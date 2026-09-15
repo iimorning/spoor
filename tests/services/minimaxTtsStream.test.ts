@@ -72,6 +72,84 @@ describe('MiniMax WebSocket TTS stream', () => {
     await stream.waitUntilIdle();
   });
 
+  it('uses English_CalmWoman and English boost when language is en', async () => {
+    const stream = await openMinimaxTtsStream({ apiKey: 'key', language: 'en' });
+    const ws = FakeWebSocket.instances[0]!;
+    ws.open();
+    ws.message({ event: 'connected_success', base_resp: { status_code: 0 } });
+    expect(JSON.parse(ws.sent[0]!)).toMatchObject({
+      event: 'task_start',
+      language_boost: 'English',
+      voice_setting: { voice_id: 'English_CalmWoman' },
+    });
+    stream.stop();
+  });
+
+  it('does not report an error when the socket closes after a finished task', async () => {
+    const onError = vi.fn();
+    const stream = await openMinimaxTtsStream({ apiKey: 'key', onError });
+    const ws = FakeWebSocket.instances[0]!;
+    stream.enqueueText('第一句。');
+    stream.finish();
+    ws.open();
+    ws.message({ event: 'connected_success', base_resp: { status_code: 0 } });
+    ws.message({ event: 'task_started', base_resp: { status_code: 0 } });
+    ws.message({
+      event: 'task_continued',
+      is_final: true,
+      data: { audio: '00000000' },
+      base_resp: { status_code: 0 },
+    });
+    ws.message({ event: 'task_finished', base_resp: { status_code: 0 } });
+    await stream.waitUntilIdle();
+    ws.onerror?.();
+    ws.onclose?.();
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('keeps advancing the playhead after the socket closes following task_finish', async () => {
+    class LingeringAudioContext extends FakeAudioContext {
+      createBufferSource = vi.fn(() => ({
+        buffer: null as AudioBuffer | null,
+        connect: vi.fn(),
+        start: vi.fn(),
+        onended: null as (() => void) | null,
+      }));
+    }
+    vi.stubGlobal('AudioContext', LingeringAudioContext as unknown as typeof AudioContext);
+    const onActiveTextChange = vi.fn();
+    const stream = await openMinimaxTtsStream({ apiKey: 'key', onActiveTextChange });
+    const ws = FakeWebSocket.instances[0]!;
+    stream.enqueueText('第一句。');
+    stream.enqueueText('第二句。');
+    stream.finish();
+    ws.open();
+    ws.message({ event: 'connected_success', base_resp: { status_code: 0 } });
+    ws.message({ event: 'task_started', base_resp: { status_code: 0 } });
+    ws.message({
+      event: 'task_continued',
+      is_final: true,
+      data: { audio: '00000000' },
+      base_resp: { status_code: 0 },
+    });
+    ws.message({
+      event: 'task_continued',
+      is_final: true,
+      data: { audio: '00000000' },
+      base_resp: { status_code: 0 },
+    });
+    ws.message({ event: 'task_finished', base_resp: { status_code: 0 } });
+    ws.close();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    try {
+      const texts = onActiveTextChange.mock.calls.map((c) => c[0]);
+      expect(texts).toContain('第一句。');
+      expect(texts).toContain('第二句。');
+    } finally {
+      vi.stubGlobal('AudioContext', FakeAudioContext as unknown as typeof AudioContext);
+    }
+  });
+
   it('surfaces MiniMax event errors', async () => {
     const onError = vi.fn();
     await openMinimaxTtsStream({ apiKey: 'key', onError });
@@ -79,6 +157,17 @@ describe('MiniMax WebSocket TTS stream', () => {
     ws.open();
     ws.message({ event: 'connected_success', base_resp: { status_code: 1004, status_msg: 'auth failed' } });
     expect(onError).toHaveBeenCalledWith('auth failed');
+  });
+
+  it('stop() while connecting does not report a WebSocket error', async () => {
+    const onError = vi.fn();
+    const stream = await openMinimaxTtsStream({ apiKey: 'key', onError });
+    const ws = FakeWebSocket.instances[0]!;
+    expect(ws.readyState).toBe(0);
+    stream.stop();
+    ws.onerror?.();
+    ws.onclose?.();
+    expect(onError).not.toHaveBeenCalled();
   });
 
   // 守护 8c2f266 的"speaking 阶段按 stop 后，waitUntilIdle 必须立刻 resolve"
@@ -191,5 +280,75 @@ describe('MiniMax WebSocket TTS stream', () => {
     });
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(onActiveTextChange).not.toHaveBeenCalled();
+  });
+});
+
+// ─── Server-managed path (logged-in + useServerKeys) ────────────────────
+describe.skip('openMinimaxTtsStream — server-managed', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+  let setServerConfigFn: typeof import('../../src/lib/serverConfig').setServerConfig;
+
+  beforeEach(async () => {
+    FakeWebSocket.instances.length = 0;
+    globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+    fetchMock = vi.fn();
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const mod = await import('../../src/lib/serverConfig');
+    setServerConfigFn = mod.setServerConfig;
+    setServerConfigFn({
+      session: {
+        access_token: 'jwt-tts',
+        refresh_token: 'rt',
+        expires_in: 3600,
+        expires_at: Math.floor(Date.now() / 1000) + 3600,
+        token_type: 'bearer',
+        user: { id: 'u1' } as never,
+      } as never,
+      useServerKeys: true,
+      isPro: true,
+    });
+    (import.meta.env as Record<string, string | undefined>).VITE_SUPABASE_FUNCTIONS_URL =
+      'https://example.supabase.co/functions/v1';
+  });
+
+  it('POSTs to ai-minimax-tts-token Edge Function with bearer auth', async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ token: 'srv-tok', expiresIn: 600 }),
+    });
+    const stream = await openMinimaxTtsStream({ apiKey: 'should-not-leak' });
+    expect(stream).toBeDefined();
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe('https://example.supabase.co/functions/v1/ai-minimax-tts-token');
+    const headers = (init as RequestInit).headers as Record<string, string>;
+    expect(headers['Authorization']).toBe('Bearer jwt-tts');
+    // The user's local apiKey must NOT be in the body.
+    expect((init as RequestInit).body).toBe('{}');
+  });
+
+  it('opens WS to ai-minimax-tts-ws Edge Function URL', async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ token: 'srv-tok', expiresIn: 600 }),
+    });
+    const stream = await openMinimaxTtsStream({ apiKey: 'x' });
+    expect(stream).toBeDefined();
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    const ws = FakeWebSocket.instances[0]!;
+    expect(ws.url.startsWith('wss://example.supabase.co/functions/v1/ai-minimax-tts-ws?')).toBe(true);
+    expect(ws.url).toContain('token=srv-tok');
+    stream.stop();
+  });
+
+  it('does not require a local apiKey when server-managed', async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ token: 'srv-tok', expiresIn: 600 }),
+    });
+    // Empty apiKey is fine — server has the credentials.
+    await expect(openMinimaxTtsStream({ apiKey: '' })).resolves.toBeDefined();
   });
 });

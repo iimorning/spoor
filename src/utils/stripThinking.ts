@@ -74,3 +74,73 @@ export function stripThinking(text: string): string {
 
   return stripToolChrome(text);
 }
+
+/**
+ * Inner chain-of-thought while the model is still thinking (or has only
+ * finished thinking and not yet emitted visible prose). Empty when there is
+ * no thinking block.
+ *
+ * Uses the last open tag (not a sequential scan) so nested/overlapping
+ * `<think>` during a stream still shows the innermost draft. Do not reuse
+ * `collectThinkingBlocks` here.
+ */
+export function extractThinkingText(text: string): string {
+  if (!text) return '';
+
+  const fromPair = (open: string, close: string): string | null => {
+    const openAt = text.lastIndexOf(open);
+    if (openAt === -1) return null;
+    const closeAt = text.indexOf(close, openAt);
+    if (closeAt === -1) return text.slice(openAt + open.length).trim();
+    return text.slice(openAt + open.length, closeAt).trim();
+  };
+
+  const think = fromPair(THINK_OPEN, THINK_CLOSE);
+  if (think != null && think.length > 0 && !visibleProseStarted(text)) return think;
+  const thought = fromPair(THOUGHT_OPEN, THOUGHT_CLOSE);
+  if (thought != null && thought.length > 0 && !visibleProseStarted(text)) return thought;
+  return '';
+}
+
+function visibleProseStarted(text: string): boolean {
+  return stripThinking(text).replace(/\s+/g, '').length > 0;
+}
+
+/** Max stored chain-of-thought on an AI card (Dexie / sync payload). */
+export const MAX_THINKING_TRACE_CHARS = 80_000;
+
+function collectThinkingBlocks(text: string, open: string, close: string): string[] {
+  const out: string[] = [];
+  let from = 0;
+  while (from < text.length) {
+    const openAt = text.indexOf(open, from);
+    if (openAt === -1) break;
+    const innerStart = openAt + open.length;
+    const closeAt = text.indexOf(close, innerStart);
+    if (closeAt === -1) {
+      const rest = text.slice(innerStart).trim();
+      if (rest) out.push(rest);
+      break;
+    }
+    const inner = text.slice(innerStart, closeAt).trim();
+    if (inner) out.push(inner);
+    from = closeAt + close.length;
+  }
+  return out;
+}
+
+/**
+ * Thinking to keep after the visible reply exists. Unlike
+ * `extractThinkingText`, this does not hide the block once prose starts,
+ * and concatenates every complete (or trailing open) think/thought span.
+ */
+export function extractCompletedThinking(text: string): string {
+  if (!text) return '';
+
+  const think = collectThinkingBlocks(text, THINK_OPEN, THINK_CLOSE);
+  const parts = think.length > 0 ? think : collectThinkingBlocks(text, THOUGHT_OPEN, THOUGHT_CLOSE);
+  const joined = parts.join('\n\n').trim();
+  if (!joined) return '';
+  if (joined.length <= MAX_THINKING_TRACE_CHARS) return joined;
+  return joined.slice(0, MAX_THINKING_TRACE_CHARS).trimEnd();
+}

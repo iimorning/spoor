@@ -1,0 +1,558 @@
+/* PolicyModal + landing-page legal footer
+   Tokens reuse --lp-* from src/landing.css so the chrome matches the
+   landing page rather than introducing a new palette. */
+
+.spoor-landing .lp-footer,
+.spoor-pricing .lp-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem 1.5rem;
+  padding: 1.5rem var(--lp-canvas-margin) 2rem;
+  max-width: 1400px;
+  margin: 0 auto;
+  width: 100%;
+  color: var(--lp-on-surface-variant);
+  font-size: 0.72rem;
+  letter-spacing: 0.01em;
+}
+
+.spoor-landing .lp-footer__copy,
+.spoor-pricing .lp-footer__copy {
+  margin: 0;
+  opacity: 0.85;
+}
+
+.spoor-landing .lp-footer__links,
+.spoor-pricing .lp-footer__links {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.85rem;
+  font-size: 0.72rem;
+}
+
+.spoor-landing .lp-footer__link,
+.spoor-pricing .lp-footer__link {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  padding: 0.15rem 0;
+  color: var(--lp-on-surface-variant);
+  font: inherit;
+  font-weight: 500;
+  text-decoration: none;
+  border-bottom: 1px dotted
+    color-mix(in srgb, var(--lp-outline-variant) 70%, transparent);
+  transition: color 0.2s ease, border-bottom-color 0.2s ease;
+}
+
+.spoor-landing .lp-footer__link:hover,
+.spoor-landing .lp-footer__link:focus-visible,
+.spoor-pricing .lp-footer__link:hover,
+.spoor-pricing .lp-footer__link:focus-visible {
+  color: var(--lp-primary);
+  border-bottom-color: var(--lp-primary);
+  outline: none;
+}
+
+.spoor-landing .lp-footer__dot,
+.spoor-pricing .lp-footer__dot {
+  color: var(--lp-on-surface-variant);
+  opacity: 0.45;
+}
+
+@media (max-width: 640px) {
+  .spoor-landing .lp-footer,
+  .spoor-pricing .lp-footer {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
+
+/* ── Modal ─────────────────────────────────────────── */
+
+.policy-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: rgba(28, 27, 27, 0.5);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  animation: policy-fade 0.18s ease-out;
+}
+
+@keyframes policy-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.policy-modal__panel {
+  position: relative;
+  width: 100%;
+  max-width: 760px;
+  max-height: calc(100vh - 2rem);
+  background: var(--lp-surface);
+  border-radius: 24px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.22);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: policy-rise 0.22s ease-out;
+  /* fill the flex column without clipping on older browsers */
+  min-height: 0;
+}
+
+@keyframes policy-rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.policy-modal__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1.1rem 1.6rem;
+  border-bottom: 1px solid var(--lp-surface-variant);
+}
+
+.policy-modal__lang {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-shrink: 0;
+}
+
+.policy-modal__lang-btn {
+  appearance: none;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 0.35rem 0.7rem;
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--lp-on-surface-variant);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.policy-modal__lang-btn:hover {
+  background: var(--lp-surface-container);
+  color: var(--lp-on-background);
+}
+
+.policy-modal__lang-btn.is-active {
+  background: var(--lp-primary);
+  color: var(--lp-on-primary);
+  border-color: var(--lp-primary);
+}
+
+.policy-modal__lang-btn:focus-visible {
+  outline: 2px solid var(--lp-primary);
+  outline-offset: 2px;
+}
+
+.policy-modal__title {
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--lp-on-background);
+  margin: 0;
+}
+
+.policy-modal__close {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--lp-on-surface-variant);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+  flex-shrink: 0;
+}
+
+.policy-modal__close:hover,
+.policy-modal__close:focus-visible {
+  background: var(--lp-surface-container);
+  color: var(--lp-on-background);
+  outline: none;
+}
+
+.policy-modal__body {
+  overflow-y: auto;
+  padding: 1.5rem 1.75rem 2rem;
+  font-size: 0.85rem;
+  line-height: 1.7;
+  color: var(--lp-on-background);
+  /* flex children inside a max-height column need this so the body
+     scrolls instead of pushing past the panel */
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* Error-boundary fallback styling (used when react-markdown throws). */
+
+.policy-modal__error {
+  padding: 1rem 0 2rem;
+}
+
+.policy-modal__error-title {
+  margin: 0 0 0.5rem;
+  font-weight: 700;
+  color: var(--lp-primary);
+  font-size: 0.95rem;
+}
+
+.policy-modal__error-msg {
+  margin: 0 0 1rem;
+  color: var(--lp-on-surface-variant);
+  font-size: 0.85rem;
+}
+
+.policy-modal__error-details {
+  border-top: 1px dashed var(--lp-surface-variant);
+  padding-top: 0.75rem;
+}
+
+.policy-modal__error-details summary {
+  cursor: pointer;
+  font-size: 0.8rem;
+  color: var(--lp-on-surface-variant);
+  margin-bottom: 0.5rem;
+}
+
+.policy-modal__error-pre {
+  background: var(--lp-surface-container);
+  padding: 0.75rem 1rem;
+  border-radius: 8px;
+  overflow-x: auto;
+  font-size: 0.72rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.policy-modal__body h1,
+.policy-modal__body h2,
+.policy-modal__body h3 {
+  color: var(--lp-on-background);
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+}
+
+.policy-modal__body h1 {
+  font-size: 1.35rem;
+  font-weight: 800;
+  margin: 1.5rem 0 0.75rem;
+}
+
+.policy-modal__body h1:first-child {
+  margin-top: 0;
+}
+
+.policy-modal__body h2 {
+  font-size: 1.05rem;
+  font-weight: 700;
+  margin: 1.4rem 0 0.55rem;
+}
+
+.policy-modal__body h3 {
+  font-size: 0.92rem;
+  font-weight: 600;
+  margin: 1rem 0 0.4rem;
+}
+
+.policy-modal__body p,
+.policy-modal__body ul,
+.policy-modal__body ol,
+.policy-modal__body table,
+.policy-modal__body blockquote {
+  margin: 0.5rem 0 0.8rem;
+}
+
+.policy-modal__body ul,
+.policy-modal__body ol {
+  padding-left: 1.4rem;
+}
+
+.policy-modal__body li {
+  margin: 0.2rem 0;
+}
+
+.policy-modal__body table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.78rem;
+  background: var(--lp-surface-container-lowest);
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--lp-surface-variant);
+}
+
+.policy-modal__body th,
+.policy-modal__body td {
+  text-align: left;
+  padding: 0.5rem 0.7rem;
+  border-bottom: 1px solid var(--lp-surface-variant);
+  vertical-align: top;
+}
+
+.policy-modal__body th {
+  background: var(--lp-surface-container);
+  font-weight: 700;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.policy-modal__body tr:last-child td {
+  border-bottom: 0;
+}
+
+.policy-modal__body blockquote {
+  margin-left: 0;
+  padding: 0.5rem 1rem;
+  border-left: 3px solid var(--lp-primary);
+  background: var(--lp-surface-container);
+  border-radius: 0 8px 8px 0;
+  color: var(--lp-on-surface-variant);
+  font-style: italic;
+}
+
+.policy-modal__body blockquote p {
+  margin: 0;
+}
+
+.policy-modal__body code {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  background: var(--lp-surface-container);
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  font-size: 0.78rem;
+}
+
+.policy-modal__body pre {
+  background: var(--lp-surface-container);
+  padding: 0.75rem 1rem;
+  border-radius: 8px;
+  overflow-x: auto;
+  font-size: 0.75rem;
+}
+
+.policy-modal__body hr {
+  border: 0;
+  height: 1px;
+  background: var(--lp-surface-variant);
+  margin: 1.5rem 0;
+}
+
+.policy-modal__body a {
+  color: var(--lp-primary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+@media (max-width: 640px) {
+  .spoor-landing .policy-modal__panel {
+    max-height: calc(100vh - 1rem);
+    border-radius: 16px;
+  }
+  .spoor-landing .policy-modal__head,
+  .spoor-landing .policy-modal__body {
+    padding-left: 1.1rem;
+    padding-right: 1.1rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spoor-landing .policy-modal,
+  .spoor-landing .policy-modal__panel {
+    animation: none !important;
+  }
+  .spoor-landing .lp-footer__link,
+  .spoor-pricing .lp-footer__link,
+  .spoor-landing .policy-modal__close {
+    transition: none !important;
+  }
+}
+
+/* ── Dedicated policy routes (/privacy, /terms) ─────── */
+
+.spoor-pricing .lp-footer {
+  margin-top: 3rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--lp-surface-variant);
+}
+
+.policy-page__topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1.25rem var(--lp-canvas-margin);
+  max-width: 960px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+.policy-page__brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  color: var(--lp-primary);
+  font: inherit;
+  font-weight: 800;
+  font-size: 1.1rem;
+  letter-spacing: -0.03em;
+}
+
+.policy-page__brand img {
+  width: 2rem;
+  height: 2rem;
+  border-radius: 0.5rem;
+  object-fit: contain;
+}
+
+.policy-page__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.policy-page__back {
+  appearance: none;
+  border: 1px solid color-mix(in srgb, var(--lp-outline-variant) 55%, transparent);
+  background: #fff;
+  color: var(--lp-on-surface-variant);
+  border-radius: 999px;
+  padding: 0.35rem 0.85rem;
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.policy-page__back:hover,
+.policy-page__back:focus-visible {
+  color: var(--lp-primary);
+  border-color: var(--lp-primary);
+  outline: none;
+}
+
+.policy-page__main {
+  flex: 1;
+  padding: 0 var(--lp-canvas-margin) 2rem;
+}
+
+.policy-page__article {
+  max-width: 760px;
+  margin: 0 auto;
+  background: #fff;
+  border: 1px solid color-mix(in srgb, var(--lp-outline-variant) 35%, transparent);
+  border-radius: 16px;
+  box-shadow: var(--cm-paper-shadow, 0 4px 20px rgba(76, 16, 0, 0.06));
+  overflow: hidden;
+}
+
+.policy-page__title {
+  margin: 0;
+  padding: 1.5rem 1.75rem 0;
+  font-family: var(--font-newsreader), Georgia, var(--cjk-ui), serif;
+  font-size: clamp(1.5rem, 3vw, 2rem);
+  color: var(--lp-on-background);
+}
+
+.policy-page__body.policy-modal__body--page {
+  max-height: none;
+  padding: 1rem 1.75rem 2rem;
+}
+
+.report-form {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  margin-top: 1.25rem;
+}
+
+.report-form__field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.82rem;
+  color: var(--lp-on-surface-variant);
+}
+
+.report-form__field input,
+.report-form__field textarea {
+  font: inherit;
+  color: var(--lp-on-background);
+  border: 1px solid color-mix(in srgb, var(--lp-outline-variant) 55%, transparent);
+  border-radius: 8px;
+  padding: 0.55rem 0.7rem;
+  background: #fff;
+}
+
+.report-form__field fieldset,
+fieldset.report-form__field {
+  border: 1px solid color-mix(in srgb, var(--lp-outline-variant) 35%, transparent);
+  border-radius: 8px;
+  padding: 0.65rem 0.8rem;
+}
+
+.report-form__check {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin: 0.25rem 0;
+  font-size: 0.82rem;
+  color: var(--lp-on-background);
+}
+
+.report-form__submit {
+  appearance: none;
+  align-self: flex-start;
+  border: 0;
+  border-radius: 999px;
+  padding: 0.55rem 1.1rem;
+  background: var(--lp-primary);
+  color: #fff;
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.policy-page__footer {
+  padding: 1rem var(--lp-canvas-margin) 2rem;
+  text-align: center;
+  font-size: 0.72rem;
+  color: var(--lp-on-surface-variant);
+}
+
+.policy-page__footer p {
+  margin: 0;
+}

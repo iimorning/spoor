@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  ArrowDown,
-  ArrowUp,
+  GripVertical,
   Loader2,
   Mic,
   MicOff,
@@ -18,15 +17,27 @@ import { db } from '../db';
 import { useAppDialog } from './AppDialogProvider';
 import { buildPublishSourceMaterial } from '../utils/publishSourceMaterial';
 import {
-  generateArticleFromOutline,
+  draftArticleFromOutline,
   generatePublishOutline,
   revisePublishOutline,
 } from '../utils/generateArticleFromOutline';
-import type { PublishOutline, PublishOutlineSection } from '../utils/parsePublishOutlineResponse';
+import {
+  asCardOrderOutline,
+  resolvePublishOutline,
+  orderOutlineSectionsByCardIds,
+  type PublishOutline,
+  type PublishOutlineSection,
+} from '../utils/parsePublishOutlineResponse';
 import { usePublishOutlineVoiceChat } from '../hooks/usePublishOutlineVoiceChat';
 import { hasVolcAsrCredentials } from '../services/volcAsr';
+import { hasMinimaxTtsAccess } from '../lib/serverConfig';
 import { getCanvasNodeContextText } from '../utils/canvasNodeContextText';
 import { formatAiError } from '../services/ai';
+import { assembleEssayDraft } from '../utils/assembleEssayDraft';
+import { findOpenCanvasPosition } from '../utils/canvas';
+import { placeEssayNode } from '../utils/essayNodes';
+import { ESSAY_NODE_SIZE } from '../utils/essayPayload';
+import { useOverlayDismiss } from '../hooks/useOverlayDismiss';
 
 interface PublishOutlineDialogProps {
   open: boolean;
@@ -36,12 +47,20 @@ interface PublishOutlineDialogProps {
   dynamicNodes: CanvasNode[];
   nodesRef: React.RefObject<Record<string, HTMLElement | null>>;
   activeCanvasId: string;
-  setActiveReferenceId: (id: string) => void;
-  setActiveTab: (tab: string) => void;
   setSelectedNodes: React.Dispatch<React.SetStateAction<Set<string>>>;
+  /** After synthesize: article + essay node placed; open fullscreen. */
+  onEssayCreated: (articleId: string, nodeId: string) => void;
 }
 
 type Phase = 'loadingOutline' | 'ready' | 'revising' | 'generating';
+
+function outlineKindLabel(
+  kind: string,
+  t: (key: string, opts?: Record<string, unknown>) => string,
+): string {
+  const k = (kind || 'other').trim() || 'other';
+  return t(`canvas.search_type_${k}`, { defaultValue: k });
+}
 
 function hasVoiceCredentials(aiConfig: AIConfig): boolean {
   return (
@@ -50,7 +69,7 @@ function hasVoiceCredentials(aiConfig: AIConfig): boolean {
       appId: aiConfig.volcAsrAppId,
       accessToken: aiConfig.volcAsrAccessToken,
       resourceId: aiConfig.volcAsrResourceId,
-    }) && Boolean((aiConfig.minimaxApiKey ?? '').trim())
+    }) && hasMinimaxTtsAccess(aiConfig.minimaxApiKey)
   );
 }
 
@@ -62,9 +81,8 @@ export function PublishOutlineDialog({
   dynamicNodes,
   nodesRef,
   activeCanvasId,
-  setActiveReferenceId,
-  setActiveTab,
   setSelectedNodes,
+  onEssayCreated,
 }: PublishOutlineDialogProps) {
   const { t } = useTranslation();
   const { alert: appAlert } = useAppDialog();
@@ -73,15 +91,16 @@ export function PublishOutlineDialog({
   const [outline, setOutline] = useState<PublishOutline | null>(null);
   const [revisionText, setRevisionText] = useState('');
   const [streamingOutlineText, setStreamingOutlineText] = useState('');
-  const [streamingArticleText, setStreamingArticleText] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
+  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
 
   const sourceMaterialRef = useRef<ReturnType<typeof buildPublishSourceMaterial> | null>(null);
 
   const voiceEnabled = useMemo(() => hasVoiceCredentials(aiConfig), [aiConfig]);
 
   const handleOutlineRevised = useCallback((next: PublishOutline) => {
-    setOutline(next);
+    setOutline(asCardOrderOutline(next));
     setError(null);
   }, []);
 
@@ -120,17 +139,24 @@ export function PublishOutlineDialog({
           promptContent: material.promptContent,
           fallbackTitle: t('ai.generated_article_title'),
           t,
+          imageHrefs: material.visionImageHrefs,
           onStreamChunk: (acc) => {
             if (!cancelled) setStreamingOutlineText(acc);
           },
         });
         if (cancelled) return;
-        if (!result) {
+        const sourceIds = material.cards.map((c) => c.nodeId);
+        const next = resolvePublishOutline(
+          result,
+          t('ai.generated_article_title'),
+          sourceIds,
+        );
+        if (next.sections.length === 0) {
           setError(t('publish.outline_load_failed'));
           setPhase('ready');
           return;
         }
-        setOutline(result);
+        setOutline(next);
         setPhase('ready');
       } catch (e) {
         if (cancelled) return;
@@ -163,9 +189,15 @@ export function PublishOutlineDialog({
     setError(null);
     setRevisionText('');
     setStreamingOutlineText('');
-    setStreamingArticleText('');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
+
+  const handleClose = useCallback(() => {
+    if (phase === 'loadingOutline' || phase === 'generating') return;
+    voice.stop();
+    onClose();
+  }, [phase, voice, onClose]);
+  const { onBackdropMouseDown } = useOverlayDismiss(open, handleClose);
 
   if (!open) return null;
 
@@ -177,15 +209,51 @@ export function PublishOutlineDialog({
     });
   };
 
-  const moveSection = (idx: number, dir: -1 | 1) => {
+  const moveSectionTo = (from: number, to: number) => {
     setOutline((prev) => {
       if (!prev) return prev;
+      if (from === to || from < 0 || to < 0 || from >= prev.sections.length || to >= prev.sections.length) {
+        return prev;
+      }
       const sections = [...prev.sections];
-      const target = idx + dir;
-      if (target < 0 || target >= sections.length) return prev;
-      [sections[idx], sections[target]] = [sections[target], sections[idx]];
+      const [moved] = sections.splice(from, 1);
+      sections.splice(to, 0, moved);
       return { ...prev, sections };
     });
+  };
+
+  const clearDrag = () => {
+    setDragIndex(null);
+    setDragOverIndex(null);
+  };
+
+  const handleSectionDragStart = (e: React.DragEvent, idx: number) => {
+    const el = e.target instanceof HTMLElement ? e.target : null;
+    if (el?.closest('input, textarea, button, a')) {
+      e.preventDefault();
+      return;
+    }
+    e.dataTransfer.effectAllowed = 'move';
+    try {
+      e.dataTransfer.setData('text/plain', String(idx));
+    } catch {
+      // jsdom DataTransfer may be incomplete
+    }
+    setDragIndex(idx);
+  };
+
+  const handleSectionDragOver = (e: React.DragEvent, idx: number) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    setDragOverIndex(idx);
+  };
+
+  const handleSectionDrop = (e: React.DragEvent, idx: number) => {
+    e.preventDefault();
+    const from = dragIndex;
+    clearDrag();
+    if (from === null) return;
+    moveSectionTo(from, idx);
   };
 
   const removeSection = (idx: number) => {
@@ -206,6 +274,10 @@ export function PublishOutlineDialog({
     });
   };
 
+  const restoreSelectionOrder = () => {
+    setOutline((prev) => (prev ? orderOutlineSectionsByCardIds(prev, selectedIds) : prev));
+  };
+
   const handleRevise = async () => {
     const instruction = revisionText.trim();
     if (!instruction || !outline || phase === 'revising') return;
@@ -217,10 +289,11 @@ export function PublishOutlineDialog({
         outline,
         instruction,
         t,
+        imageHrefs: sourceMaterialRef.current?.visionImageHrefs,
         onStreamChunk: (acc) => setStreamingOutlineText(acc),
       });
       if (next) {
-        setOutline(next);
+        setOutline(asCardOrderOutline(next));
       } else {
         setError(t('publish.outline_revise_failed'));
       }
@@ -244,39 +317,58 @@ export function PublishOutlineDialog({
     }
     setPhase('generating');
     setError(null);
-    setStreamingArticleText('');
+    const articleId = `gen-${Date.now()}`;
     try {
-      const newArticle = await generateArticleFromOutline({
-        aiConfig,
+      const draft = await draftArticleFromOutline({
         outline,
-        promptContent: material.promptContent,
-        mediaAssets: material.mediaAssets,
         cards: material.cards,
+        mediaAssets: material.mediaAssets,
         activeCanvasId,
-        t,
-        onStreamChunk: (acc) => setStreamingArticleText(acc),
+        articleId,
+        relatedHeading: t('ai.publish_related_media'),
+        generating: true,
       });
-      await db.articles.add(newArticle);
-      setActiveReferenceId(newArticle.id);
-      setActiveTab('reference');
+      await db.articles.add(draft);
+      const obstacles = await db.nodes
+        .filter((n) => (n.canvasId ?? 'default') === activeCanvasId)
+        .toArray();
+      const { x, y } = findOpenCanvasPosition({
+        transform: { x: 0, y: 0, scale: 1 },
+        obstacles,
+        size: ESSAY_NODE_SIZE,
+        gap: 36,
+        maxRings: 24,
+      });
+      const nodeId = await placeEssayNode({
+        articleId,
+        canvasId: activeCanvasId,
+        x,
+        y,
+        title: draft.title,
+        sourceNodeIds: (draft.sourceCards ?? []).map((card) => card.nodeId),
+        collapseSources: true,
+      });
+      try {
+        await assembleEssayDraft({ articleId, aiConfig, t });
+      } catch (assembleErr) {
+        console.error('[Spoor] assembleEssayDraft failed', assembleErr);
+        await db.articles.update(articleId, { generating: false });
+      }
+      onEssayCreated(articleId, nodeId);
       setSelectedNodes(new Set());
-      onClose();
     } catch (e) {
       const msg = formatAiError(e);
-      console.error('[Spoor] generateArticleFromOutline failed', { error: msg });
+      console.error('[Spoor] draftArticleFromOutline failed', { error: msg });
+      try {
+        await db.articles.update(articleId, { generating: false });
+      } catch {
+        /* draft may not exist */
+      }
       void appAlert({
         message: `${t('publish.generate_failed')}\n\n${msg}`,
       });
       setPhase('ready');
-    } finally {
-      setStreamingArticleText('');
     }
-  };
-
-  const handleClose = () => {
-    if (phase === 'loadingOutline' || phase === 'generating') return;
-    voice.stop();
-    onClose();
   };
 
   const voicePhaseLabel =
@@ -294,9 +386,7 @@ export function PublishOutlineDialog({
     <div
       className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/20 backdrop-blur-[2px]"
       role="presentation"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget) handleClose();
-      }}
+      onMouseDown={onBackdropMouseDown}
     >
       <div
         role="dialog"
@@ -309,14 +399,22 @@ export function PublishOutlineDialog({
             type="button"
             onClick={handleClose}
             disabled={phase === 'loadingOutline' || phase === 'generating'}
-            className="p-1.5 rounded-lg text-[#5a5a54] hover:bg-[#F4F1ED] disabled:opacity-40 transition-colors"
+            className="p-1.5 coarse:p-2.5 rounded-lg text-[#5a5a54] hover:bg-[#F4F1ED] disabled:opacity-40 transition-colors"
             aria-label={t('dialog.cancel')}
           >
-            <X className="w-4 h-4" />
+            <X className="w-4 h-4 coarse:w-5 coarse:h-5" />
           </button>
         </div>
 
         <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5 space-y-4">
+          <div>
+            <h2 className="text-base font-sans font-semibold text-[#1a1a1a]">
+              {t('publish.outline_title')}
+            </h2>
+            <p className="mt-1 text-xs font-sans text-[#5a5a54] leading-relaxed">
+              {t('publish.outline_edit_hint')}
+            </p>
+          </div>
           {phase === 'loadingOutline' && (
             <div className="flex items-center gap-2 text-sm font-sans text-[#5a5a54]">
               <Loader2 className="w-4 h-4 animate-spin" />
@@ -345,38 +443,81 @@ export function PublishOutlineDialog({
               </div>
 
               <div className="space-y-2">
-                {outline.sections.map((s, i) => (
-                  <div key={i} className="rounded-xl border border-[#E6E4DF] bg-white p-3 space-y-2">
+                {outline.sections.map((s, i) => {
+                  const isDragOver = dragOverIndex === i && dragIndex !== null && dragIndex !== i;
+                  const cardMeta = s.cardId
+                    ? sourceMaterialRef.current?.cards.find((c) => c.nodeId === s.cardId)
+                    : undefined;
+                  const kind = cardMeta?.kind ?? '';
+                  const kindLabel = s.cardId
+                    ? outlineKindLabel(kind, t)
+                    : t('publish.outline_empty_slot');
+                  const snippet = (cardMeta?.title || '').trim();
+                  const generic =
+                    !snippet ||
+                    snippet.toLowerCase() === kind.toLowerCase() ||
+                    snippet === kindLabel;
+                  const displayLabel = !generic
+                    ? snippet
+                    : t('publish.outline_card_label', { id: s.cardId || i + 1 });
+                  return (
+                  <div
+                    key={`${s.cardId}-${i}`}
+                    data-testid={`outline-section-${i}`}
+                    data-card-id={s.cardId || ''}
+                    draggable={!busy}
+                    onDragStart={(e) => handleSectionDragStart(e, i)}
+                    onDragOver={(e) => handleSectionDragOver(e, i)}
+                    onDrop={(e) => handleSectionDrop(e, i)}
+                    onDragEnd={clearDrag}
+                    className={`rounded-xl border bg-white p-3 space-y-2 transition-all ${
+                      isDragOver
+                        ? 'border-[#C2410C] bg-[#F4F1ED] shadow-sm'
+                        : 'border-[#E6E4DF]'
+                    } ${dragIndex === i ? 'opacity-50' : ''}`}
+                  >
                     <div className="flex items-center gap-2">
+                      <span
+                        className="shrink-0 text-[#8c8a84] cursor-grab active:cursor-grabbing"
+                        aria-label={t('publish.outline_drag')}
+                        title={t('publish.outline_drag')}
+                      >
+                        <GripVertical className="w-4 h-4" />
+                      </span>
                       <span className="text-[11px] font-mono font-bold text-[#C2410C] tabular-nums shrink-0">
                         {i + 1}
                       </span>
-                      <input
-                        type="text"
-                        value={s.heading}
-                        onChange={(e) => updateSection(i, { heading: e.target.value })}
-                        disabled={busy}
-                        placeholder={t('publish.outline_heading_placeholder')}
-                        className="flex-1 min-w-0 px-2 py-1.5 rounded-md border border-[#E6E4DF] bg-white text-sm font-sans font-medium text-[#1a1a1a] focus:outline-none focus:border-[#C2410C] focus:ring-1 focus:ring-[#C2410C]/30 disabled:bg-[#F4F1ED]"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => moveSection(i, -1)}
-                        disabled={busy || i === 0}
-                        className="p-1 rounded-md text-[#5a5a54] hover:bg-[#F4F1ED] disabled:opacity-30 transition-colors shrink-0"
-                        aria-label={t('publish.outline_move_up')}
-                      >
-                        <ArrowUp className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => moveSection(i, 1)}
-                        disabled={busy || i === outline.sections.length - 1}
-                        className="p-1 rounded-md text-[#5a5a54] hover:bg-[#F4F1ED] disabled:opacity-30 transition-colors shrink-0"
-                        aria-label={t('publish.outline_move_down')}
-                      >
-                        <ArrowDown className="w-3.5 h-3.5" />
-                      </button>
+                      <span className="shrink-0 px-1.5 py-0.5 rounded-md bg-[#F4F1ED] text-[10px] font-sans font-medium text-[#5a5a54]">
+                        {kindLabel}
+                      </span>
+                      {cardMeta?.thumbnailSrc ? (
+                        <img
+                          src={cardMeta.thumbnailSrc}
+                          alt=""
+                          draggable={false}
+                          data-testid={`outline-section-thumb-${i}`}
+                          className="h-12 w-12 shrink-0 rounded-md object-cover border border-[#E6E4DF] bg-[#FAF9F6]"
+                        />
+                      ) : null}
+                      {s.cardId ? (
+                        <p
+                          data-testid={`outline-section-label-${i}`}
+                          className="flex-1 min-w-0 text-sm font-sans font-medium text-[#1a1a1a] truncate"
+                          title={displayLabel}
+                        >
+                          {displayLabel}
+                        </p>
+                      ) : (
+                        <input
+                          type="text"
+                          value={s.heading}
+                          onChange={(e) => updateSection(i, { heading: e.target.value })}
+                          disabled={busy}
+                          draggable={false}
+                          placeholder={t('publish.outline_heading_placeholder')}
+                          className="flex-1 min-w-0 px-2 py-1.5 rounded-md border border-[#E6E4DF] bg-white text-sm font-sans font-medium text-[#1a1a1a] focus:outline-none focus:border-[#C2410C] focus:ring-1 focus:ring-[#C2410C]/30 disabled:bg-[#F4F1ED]"
+                        />
+                      )}
                       <button
                         type="button"
                         onClick={() => removeSection(i)}
@@ -387,16 +528,9 @@ export function PublishOutlineDialog({
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
                     </div>
-                    <textarea
-                      value={s.summary}
-                      onChange={(e) => updateSection(i, { summary: e.target.value })}
-                      disabled={busy}
-                      placeholder={t('publish.outline_summary_placeholder')}
-                      rows={2}
-                      className="w-full px-2 py-1.5 rounded-md border border-[#E6E4DF] bg-white text-xs font-sans text-[#4a4a44] leading-relaxed focus:outline-none focus:border-[#C2410C] focus:ring-1 focus:ring-[#C2410C]/30 disabled:bg-[#F4F1ED] resize-none"
-                    />
                   </div>
-                ))}
+                  );
+                })}
                 <button
                   type="button"
                   onClick={addSection}
@@ -405,6 +539,14 @@ export function PublishOutlineDialog({
                 >
                   <Plus className="w-3.5 h-3.5" />
                   {t('publish.outline_add_section')}
+                </button>
+                <button
+                  type="button"
+                  onClick={restoreSelectionOrder}
+                  disabled={busy || !outline.sections.length}
+                  className="w-full py-1.5 text-xs font-sans text-[#5a5a54] hover:text-[#C2410C] disabled:opacity-40 transition-colors"
+                >
+                  {t('publish.outline_reset_order')}
                 </button>
               </div>
             </>

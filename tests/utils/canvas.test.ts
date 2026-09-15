@@ -1,11 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   estimateNodeRect,
+  findAdjacentCanvasPosition,
   findOpenCanvasPosition,
   getCanvasCenterPosition,
   NEW_AI_NODE_SIZE,
   positionBesideRect,
+  positionBelowRect,
   rectsOverlap,
+  rectOverlapRatio,
 } from '../../src/utils/canvas';
 
 describe('getCanvasCenterPosition', () => {
@@ -63,6 +66,15 @@ describe('estimateNodeRect / rectsOverlap', () => {
     });
   });
 
+  it('document 未写宽高时与书籍卡同为 380×520', () => {
+    expect(estimateNodeRect({ type: 'document', x: 4, y: 8 })).toEqual({
+      x: 4,
+      y: 8,
+      width: 380,
+      height: 520,
+    });
+  });
+
   it('普通节点未写宽高时用 320×200', () => {
     expect(estimateNodeRect({ type: 'ai', x: 0, y: 0 })).toEqual({
       x: 0,
@@ -77,6 +89,22 @@ describe('estimateNodeRect / rectsOverlap', () => {
     const b = { x: 110, y: 0, width: 100, height: 100 };
     expect(rectsOverlap(a, b, 0)).toBe(false);
     expect(rectsOverlap(a, b, 20)).toBe(true);
+  });
+});
+
+describe('rectOverlapRatio', () => {
+  it('完全重合为 1', () => {
+    const a = { x: 0, y: 0, width: 100, height: 100 };
+    expect(rectOverlapRatio(a, a)).toBe(1);
+  });
+
+  it('不相交为 0', () => {
+    expect(
+      rectOverlapRatio(
+        { x: 0, y: 0, width: 100, height: 100 },
+        { x: 200, y: 0, width: 100, height: 100 },
+      ),
+    ).toBe(0);
   });
 });
 
@@ -164,5 +192,39 @@ describe('findOpenCanvasPosition', () => {
     // Should stay near the preferred seed — not a full-cluster jump.
     expect(Math.abs(pos.x - beside.x)).toBeLessThan(cluster.width);
     expect(Math.abs(pos.y - beside.y)).toBeLessThan(cluster.height);
+  });
+});
+
+describe('findAdjacentCanvasPosition', () => {
+  it('右侧空闲时贴在锚点右边', () => {
+    const ask = { type: 'ask', x: 40, y: 80, width: 320, height: 160 };
+    const expected = positionBesideRect(estimateNodeRect(ask), NEW_AI_NODE_SIZE, 28);
+    const pos = findAdjacentCanvasPosition({
+      obstacles: [ask],
+      anchor: ask,
+      size: NEW_AI_NODE_SIZE,
+    });
+    expect(pos).toEqual(expected);
+  });
+
+  it('右侧被搜索卡挡住时落到锚点正下方，而不是视口中心', () => {
+    const ai = { type: 'ai', x: 100, y: 80, width: 320, height: 240 };
+    const beside = positionBesideRect(estimateNodeRect(ai), NEW_AI_NODE_SIZE, 28);
+    const source = {
+      type: 'note',
+      x: beside.x,
+      y: beside.y,
+      width: NEW_AI_NODE_SIZE.width,
+      height: NEW_AI_NODE_SIZE.height,
+    };
+    const expected = positionBelowRect(estimateNodeRect(ai), NEW_AI_NODE_SIZE, 28);
+    const pos = findAdjacentCanvasPosition({
+      obstacles: [ai, source],
+      anchor: ai,
+      size: NEW_AI_NODE_SIZE,
+    });
+    expect(pos).toEqual(expected);
+    expect(pos.x).toBe(ai.x);
+    expect(pos.y).toBeGreaterThan(ai.y);
   });
 });

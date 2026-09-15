@@ -1,0 +1,328 @@
+.guide-page__nav {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem 1rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.guide-page .policy-page__topbar {
+  max-width: 52rem;
+}
+
+.guide-page .policy-page__back {
+  border: 0;
+  background: transparent;
+  padding: 0.2rem 0;
+  border-radius: 0;
+  font-size: 0.88rem;
+  font-weight: 500;
+  color: var(--lp-on-surface-variant);
+  cursor: pointer;
+}
+
+.guide-page .policy-page__back:hover,
+.guide-page .policy-page__back:focus-visible {
+  color: var(--lp-primary);
+  border-color: transparent;
+}
+
+.guide-page .lp-pricing-mini-cta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.38rem 0.85rem;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--lp-outline-variant) 55%, transparent);
+  background: #fff;
+  color: var(--lp-on-background);
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  text-decoration: none;
+  box-shadow: none;
+}
+
+.guide-page .lp-pricing-mini-cta:hover {
+  border-color: var(--lp-primary);
+  color: var(--lp-primary);
+}
+
+.guide-page--gallery .lp-pricing-mini-cta {
+  padding: 0.55rem 1rem;
+  color: var(--lp-on-primary);
+  background: var(--lp-primary);
+  border-color: transparent;
+  box-shadow: 0 6px 16px rgba(126, 37, 0, 0.22);
+}
+
+.guide-page--gallery .lp-pricing-mini-cta:hover {
+  color: var(--lp-on-primary);
+  border-color: transparent;
+}
+
+.guide-page .policy-page__article {
+  max-width: 42.5rem;
+  padding: 2.75rem 2.6rem 3rem;
+}
+
+.guide-page .policy-page__title {
+  padding: 0;
+  margin: 0 0 1.1rem;
+  font-size: clamp(1.85rem, 4.2vw, 2.45rem);
+  line-height: 1.18;
+  letter-spacing: -0.032em;
+  font-weight: 500;
+}
+
+.guide-page__kicker {
+  margin: 0 0 0.55rem;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--lp-on-surface-variant) 78%, #fff);
+}
+
+.guide-page__kicker a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.guide-page__kicker a:hover {
+  color: var(--lp-primary);
+}
+
+.guide-page__lede {
+  margin: 0 0 2.35rem;
+  max-width: none;
+  font-size: 1.08rem;
+  line-height: 1.68;
+  color: var(--lp-on-surface-variant);
+}
+
+.guide-page__body {
+  max-width: none;
+}
+
+.guide-page__body section + section {
+  margin-top: 2.1rem;
+}
+
+.guide-page__body h2 {
+  margin: 2.15rem 0 0.72rem;
+  font-size: 1.22rem;
+  font-weight: 650;
+  line-height: 1.35;
+  letter-spacing: -0.018em;
+  color: var(--lp-on-background);
+}
+
+.guide-page__body h2:first-child {
+  margin-top: 0.15rem;
+}
+
+.guide-page__body h3 {
+  margin: 1.45rem 0 0.55rem;
+  font-size: 1.05rem;
+  font-weight: 650;
+  letter-spacing: -0.014em;
+}
+
+.guide-page__body ul {
+  list-style: disc;
+  list-style-position: outside;
+  margin: 0 0 1.1rem;
+  padding-left: 1.35rem;
+}
+
+.guide-page__body li {
+  margin: 0 0 0.4rem;
+  font-size: 1.02rem;
+  line-height: 1.65;
+}
+
+.guide-page__body li::marker {
+  color: color-mix(in srgb, var(--lp-on-background) 72%, transparent);
+}
+
+.guide-page__body blockquote {
+  margin: 0 0 1.1rem;
+  padding: 0.15rem 0 0.15rem 1rem;
+  border-left: 2px solid color-mix(in srgb, var(--lp-outline) 55%, transparent);
+  color: var(--lp-on-surface-variant);
+}
+
+.guide-page__body blockquote p {
+  margin: 0;
+}
+
+.guide-page__body hr {
+  border: 0;
+  height: 1px;
+  margin: 2rem 0;
+  background: color-mix(in srgb, var(--lp-outline) 32%, transparent);
+}
+
+.guide-page__body strong {
+  font-weight: 650;
+  color: var(--lp-on-background);
+}
+
+.guide-page__table-wrap,
+.guide-page__body table {
+  width: 100%;
+}
+
+.guide-page__table-wrap {
+  overflow-x: auto;
+  margin: 0 0 1.4rem;
+}
+
+.guide-page__body table {
+  border-collapse: collapse;
+  font-size: 0.92rem;
+  line-height: 1.45;
+}
+
+.guide-page__body th,
+.guide-page__body td {
+  text-align: left;
+  vertical-align: top;
+  padding: 0.55rem 0.7rem 0.55rem 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--lp-outline) 28%, transparent);
+}
+
+.guide-page__body th {
+  font-size: 0.72rem;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--lp-on-surface-variant);
+}
+
+.guide-page__body p,
+.guide-page__closer {
+  margin: 0 0 0.95rem;
+  font-size: 1.02rem;
+  line-height: 1.76;
+  color: var(--lp-on-background);
+}
+
+.guide-page__body a,
+.guide-page__related a {
+  color: var(--lp-primary);
+  text-decoration: underline;
+  text-underline-offset: 0.18em;
+  text-decoration-thickness: 1px;
+}
+
+.guide-page__closer {
+  margin-top: 2.1rem;
+}
+
+.guide-page--gallery .policy-page__topbar {
+  max-width: none;
+  padding: 1.15rem 1.5rem;
+}
+
+@media (min-width: 768px) {
+  .guide-page--gallery .policy-page__topbar {
+    padding: 1.25rem 2.5rem;
+  }
+}
+
+.guide-page--gallery .policy-page__main {
+  max-width: 1280px;
+  margin: 0 auto;
+  width: 100%;
+  padding: 0.5rem 1.5rem 4rem;
+}
+
+@media (min-width: 768px) {
+  .guide-page--gallery .policy-page__main {
+    padding: 0.75rem 2.5rem 5rem;
+  }
+}
+
+.guide-page__gallery .cm-hero {
+  margin-bottom: 3.25rem;
+}
+
+.guide-page--gallery a.cm-card {
+  text-decoration: none;
+  color: inherit;
+  /* Gallery cards inherit community tilt + will-change; guides are text-heavy — lift only. */
+  transform: none;
+  will-change: auto;
+}
+
+.guide-page--gallery a.cm-card:hover {
+  transform: translateY(-4px);
+  will-change: transform;
+  box-shadow: var(--cm-paper-shadow-hover);
+  z-index: 2;
+}
+
+.guide-page--gallery a.cm-card:focus-visible {
+  outline: 2px solid var(--lp-primary);
+  outline-offset: 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .guide-page--gallery a.cm-card:hover {
+    transform: none;
+    will-change: auto;
+  }
+}
+
+.guide-page__related {
+  margin-top: 2.6rem;
+  padding-top: 1.55rem;
+  border-top: 1px solid color-mix(in srgb, var(--lp-outline) 32%, transparent);
+  max-width: none;
+}
+
+.guide-page__related h2 {
+  margin: 0 0 0.85rem;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--lp-on-surface-variant) 78%, #fff);
+}
+
+.guide-page__related ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.55rem;
+}
+
+.guide-page__related a {
+  font-size: 0.98rem;
+  line-height: 1.45;
+}
+
+@media (max-width: 640px) {
+  .guide-page .policy-page__article {
+    padding: 1.75rem 1.2rem 2.15rem;
+    border-radius: 12px;
+  }
+
+  .guide-page .policy-page__title {
+    font-size: 1.7rem;
+  }
+
+  .guide-page__lede {
+    font-size: 1.02rem;
+    margin-bottom: 1.85rem;
+  }
+
+  .guide-page__body p,
+  .guide-page__closer {
+    font-size: 1rem;
+    line-height: 1.72;
+  }
+}

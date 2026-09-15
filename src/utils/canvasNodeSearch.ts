@@ -1,5 +1,9 @@
 import type { CanvasNode } from '../db';
 import { tryParseBookContent } from './bookPayload';
+import { tryParseEssayContent } from './essayPayload';
+import { tryParseAmbienceContent } from './ambiencePayload';
+import { getAmbienceScene } from '../data/ambienceCatalog';
+import i18n from '../i18n';
 
 const DATA_URL_RE = /^data:/i;
 const MAX_FIELD_CHARS = 20_000;
@@ -47,6 +51,23 @@ export function getCanvasNodeSearchText(node: CanvasNode): string {
     return parts.join('\n');
   }
 
+  if (node.type === 'essay') {
+    const essay = tryParseEssayContent(content);
+    // Article body is loaded live in EssayNode; card search uses description + id hint.
+    if (essay) pushField(parts, essay.articleId);
+    pushField(parts, content);
+    return parts.join('\n');
+  }
+
+  if (node.type === 'ambience') {
+    const amb = tryParseAmbienceContent(content);
+    const scene = getAmbienceScene(amb?.trackId);
+    pushField(parts, i18n.t(scene.titleKey));
+    pushField(parts, i18n.t(scene.subtitleKey));
+    pushField(parts, i18n.t('ambience.card_title'));
+    return parts.join('\n');
+  }
+
   if (node.type === 'document' || /<\/?[a-z][\s\S]*>/i.test(content)) {
     pushField(parts, stripHtml(content));
     return parts.join('\n');
@@ -67,6 +88,8 @@ export function canvasNodeTypeLabelKey(type: string): string {
       return 'canvas.search_type_ai';
     case 'book':
       return 'canvas.search_type_book';
+    case 'essay':
+      return 'canvas.search_type_essay';
     case 'document':
       return 'canvas.search_type_document';
     case 'image':
@@ -75,6 +98,8 @@ export function canvasNodeTypeLabelKey(type: string): string {
       return 'canvas.search_type_video';
     case 'agent':
       return 'canvas.search_type_agent';
+    case 'ambience':
+      return 'canvas.search_type_ambience';
     default:
       return 'canvas.search_type_other';
   }
@@ -122,7 +147,7 @@ export function searchCanvasNodes(nodes: CanvasNode[], query: string): CanvasNod
     if (type === 'note' || type === 'text') return 0;
     if (type === 'theme') return 1;
     if (type === 'ai') return 2;
-    if (type === 'book' || type === 'document') return 3;
+    if (type === 'book' || type === 'document' || type === 'essay') return 3;
     return 4;
   };
   hits.sort((a, b) => rank(a.node.type) - rank(b.node.type));

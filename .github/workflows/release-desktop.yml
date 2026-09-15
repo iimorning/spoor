@@ -36,17 +36,37 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: Spoor 雪泥 ${{ github.ref_name }}
+          releaseName: Spoor v${{ github.ref_name }} (Canvas V2)
           releaseBody: |
+            ## Windows install (recommended)
+
+            Download **`Spoor_*_x64-setup.exe`**, run the installer, then open **Spoor** from the Start menu.
+
+            - **OS:** Windows 10/11, 64-bit
+            - **First launch:** open **Settings** → choose an AI provider → paste your API key (stored locally only)
+            - **UI language:** English and 中文 — switch on the landing page or in Settings
+            - **Optional local GGUF:** [LOCAL_LLM.md](https://github.com/iimorning/spoor-pro/blob/master/docs/LOCAL_LLM.md) (not bundled)
+
+            ### What's new in v0.3.0
+
+            First desktop release with **Canvas V2**: drawable **work zones**, **side-panel persona chat**, **excerpt-to-canvas**, and cloud sync for zones + threads. Also includes redesigned onboarding, essay-side AI chat, and phone memo capture.
+
+            ---
+
             ## Windows 安装（推荐）
 
             下载 **`Spoor_*_x64-setup.exe`**，双击安装，从开始菜单打开 **Spoor / 雪泥**。
 
-            - 系统：Windows 10/11，64 位
-            - 首次使用：在应用 **设置** 中配置 AI 服务商与 API Key（仅存本机）
-            - 本地 GGUF 可选，见 [LOCAL_LLM.md](https://github.com/iimorning/spoor/blob/master/docs/LOCAL_LLM.md)
+            - **系统：** Windows 10/11，64 位
+            - **首次使用：** **设置** → 选择 AI 服务商 → 粘贴 API Key（仅存本机）
+            - **界面语言：** 支持英文与中文 — 可在落地页或设置中切换
+            - **本地 GGUF 可选：** [LOCAL_LLM.md](https://github.com/iimorning/spoor-pro/blob/master/docs/LOCAL_LLM.md)（安装包不含模型）
 
-            完整说明：[docs/RELEASE_v0.1.0.md](https://github.com/iimorning/spoor/blob/master/docs/RELEASE_v0.1.0.md) · [DESKTOP_INSTALL.md](https://github.com/iimorning/spoor/blob/master/docs/DESKTOP_INSTALL.md)
+            ### v0.3.0 新内容
+
+            首个包含 **Canvas V2** 的桌面版：**工作区**、**侧栏角色对话**、**摘录到画布**，以及工作区/对话线程云同步。另含新手引导重做、长文侧栏 AI、手机备忘等。
+
+            Full notes: [docs/RELEASE_v0.3.0.md](https://github.com/iimorning/spoor-pro/blob/master/docs/RELEASE_v0.3.0.md) · [DESKTOP_INSTALL.md](https://github.com/iimorning/spoor-pro/blob/master/docs/DESKTOP_INSTALL.md)
           releaseDraft: false
           prerelease: false
           tauriScript: npm run tauri

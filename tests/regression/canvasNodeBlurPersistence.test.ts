@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { describe, it, expect } from 'vitest';
 
 /**
- * 源码契约：画布节点内联编辑须在 onBlur 中写 IndexedDB。
+ * 源码契约：可编辑画布节点须在 onBlur 中写 IndexedDB；AI 回复正文只读。
  * 若重构 ThemeNode / NoteBody / AiNode，请同步更新本文件中的断言。
  */
 const root = join(__dirname, '../..');
@@ -23,6 +23,7 @@ describe('画布节点 blur 写库源码契约', () => {
     expect(src).not.toContain('onInput');
     expect(src).not.toContain('schedulePersist');
     expect(src).not.toContain('createDebouncedThemePersist');
+    expect(src).not.toContain('fitThemeCardWidth');
   });
 
   it('NoteBody：编辑区 onBlur 写入 content', () => {
@@ -31,10 +32,12 @@ describe('画布节点 blur 写库源码契约', () => {
     expect(src).toContain('isContentBlurPersistenceDisabled()');
   });
 
-  it('AiNode：AI 回复编辑区 onBlur 写入 content', () => {
+  it('AiNode：回复正文只读，选区工具栏摘抄/问 AI，不再 contentEditable 写库', () => {
     const src = readSrc('src/components/nodes/AiNode.tsx');
-    expect(src).toContain('db.nodes.update(node.id, { content: e.currentTarget.innerText');
-    expect(src).toContain('isContentBlurPersistenceDisabled()');
+    expect(src).not.toContain('contentEditable');
+    expect(src).not.toContain('db.nodes.update');
+    expect(src).toContain('onExtractSelectionToCard');
+    expect(src).toContain('onAskAboutSelection');
   });
 
   it('commitCanvasInlineEditing：主题卡无 editingNodeId 时仍 blur 焦点元素', () => {
@@ -53,12 +56,25 @@ describe('画布节点 blur 写库源码契约', () => {
     expect(regSrc).toContain('blurActiveContentEditable');
   });
 
-  it('CanvasToolbar：提交钮为 Wand2、输入条旁无多余 Wand2', () => {
+  it('CanvasToolbar：AI 输入已迁出工具栏，+ 下拉含 Ask 与长文；不含氛围音', () => {
     const src = readSrc('src/components/CanvasToolbar.tsx');
-    expect(src).not.toContain('Send');
-    expect(src).toMatch(/isToolbarAiLoading \? <Loader2[\s\S]*?: <Wand2/);
-    const wandCount = (src.match(/<Wand2/g) ?? []).length;
-    // 1× 提交钮 + 1× 折叠态圆形手柄，均合法。
-    expect(wandCount).toBe(2);
+    // Toolbar no longer hosts the AI submit button / send / voice chip.
+    expect(src).not.toContain('isToolbarAiLoading');
+    expect(src).not.toContain('ai.input_placeholder');
+    expect(src).not.toContain('Wand2');
+    expect(src).not.toContain('<Send');
+    // The + dropdown grew Ask and blank-essay entries.
+    expect(src).toContain('canvas.add_ask_card');
+    expect(src).toContain('addAskNode');
+    expect(src).toContain('addEssayNode');
+    expect(src).toContain('canvas.add_essay_card');
+    expect(src).not.toContain('addAmbienceNode');
+    expect(src).not.toContain('canvas.add_ambience_card');
+    // A standalone mic icon now lives on the toolbar as a voice-chat entry
+    // point; it routes to the Ask card's voice mode via onActivateVoice.
+    expect(src).toContain('onActivateVoice');
+    expect(src).toContain('toolbar-voice');
+    const micUses = (src.match(/<Mic\b/g) ?? []).length;
+    expect(micUses).toBe(1);
   });
 });

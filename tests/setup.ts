@@ -58,6 +58,23 @@ Object.defineProperty(window, 'matchMedia', {
 window.confirm = () => true;
 window.alert = () => {};
 
+if (!window.getSelection) {
+  Object.defineProperty(window, 'getSelection', {
+    writable: true,
+    value: () => ({
+      rangeCount: 0,
+      addRange() {},
+      removeAllRanges() {},
+      getRangeAt() {
+        return document.createRange();
+      },
+      toString() {
+        return '';
+      },
+    }),
+  });
+}
+
 // Mock requestFullscreen / exitFullscreen (not available in jsdom)
 Element.prototype.requestFullscreen = Element.prototype.requestFullscreen || (async () => {});
 document.exitFullscreen = document.exitFullscreen || (async () => {});

@@ -1,6 +1,6 @@
 {
   "productName": "Spoor",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "identifier": "com.spoor.app",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -27,7 +27,7 @@
     "active": true,
     "targets": ["nsis"],
     "shortDescription": "Local-first spatial notes and AI thinking canvas",
-    "longDescription": "Spoor (雪泥) — canvas notes, personas, research lab. Data stays on your device (IndexedDB).",
+    "longDescription": "Spoor (雪泥) — canvas notes and AI personas. Data stays on your device (IndexedDB).",
     "category": "Productivity",
     "copyright": "Copyright (c) iimorning. PolyForm Noncommercial License 1.0.0.",
     "windows": {

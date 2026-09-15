@@ -2,7 +2,33 @@ import { useEffect } from 'react';
 import i18n from '../i18n';
 import { db } from '../db';
 import type { AgentConfig } from '../db';
-import { LEGACY_AGENT_PROMPTS, SYSTEM_AGENT_IDS, SYSTEM_AGENT_TUNING, type SystemAgentId } from '../constants/defaultAgents';
+import { LEGACY_AGENT_PROMPTS, OPTIONAL_SYSTEM_AGENT_IDS, SEEDED_AGENT_IDS, SYSTEM_AGENT_IDS, SYSTEM_AGENT_TUNING, type SystemAgentId } from '../constants/defaultAgents';
+import { cosmosNarrativeKnowledgeFile } from '../constants/agentKnowledge/cosmosNarrativeGrammar';
+import { pruneRetiredCosmosThemeCards } from '../services/spawnCosmosCanvasTemplate';
+import { migrateArticlesToEssayNodes } from '../utils/migrateArticlesToEssayNodes';
+import { stampNewCards } from '../utils/stampNewCard';
+import { recoverStaleGeneratingImages } from '../services/fulfillDrawTool';
+import { recoverStaleGeneratingAiCards } from '../utils/aiCardGeneration';
+import { tryParseEssayContent } from '../utils/essayPayload';
+import { consolidateDuplicateCommunityAgents, repairOfficialCommunityPersonaCovers } from '../utils/agentPersonaSource';
+import {
+  LEGACY_DEFAULT_ESSAY_ARTICLE_ID,
+} from '../constants/defaultCosmosWorkspace';
+import {
+  buildDefaultWorkspace,
+  DEFAULT_NODE_IDS,
+  CORE_DEFAULT_NODE_IDS,
+  defaultWorkspaceAmbiencePosition,
+  isLegacyLShapeDefaultLayout,
+  OFFICIAL_DEFAULT_STARTER_EDGE_IDS,
+  OFFICIAL_DEFAULT_STARTER_NODE_IDS,
+} from '../constants/defaultWorkspace';
+import { ensureAmbienceNodeForCanvas } from '../utils/ensureAmbienceNode';
+import { ensureDefaultAskWorkZone } from '../utils/seedDefaultAskWorkZone';
+import { applyOnboardingWorkroomLayout } from '../utils/onboardingWorkroomLayout';
+import { withoutSyncHooks } from '../utils/syncHookGuard';
+
+const COSMOS_AGENT_IDS = new Set<SystemAgentId>(['cosmos_weaver', 'character_atelier']);
 
 /** 仍在使用旧版种子文案时，写入当前语言的默认提示词（不覆盖用户自定义）。 */
 async function migrateLegacyAgentPrompts() {
@@ -18,6 +44,133 @@ async function migrateLegacyAgentPrompts() {
   }
 }
 
+/** Drop leftover cosmos personas that are not on any canvas card. */
+async function retireUnusedOptionalSystemAgents(): Promise<void> {
+  const nodes = await db.nodes.toArray();
+  const used = new Set(
+    nodes.map((n) => n.agentConfigId).filter((id): id is string => Boolean(id)),
+  );
+  for (const id of OPTIONAL_SYSTEM_AGENT_IDS) {
+    if (used.has(id)) continue;
+    await db.agents.delete(id);
+  }
+}
+
+function buildSystemAgentRow(id: SystemAgentId): AgentConfig {
+  const row: AgentConfig = {
+    id,
+    name: i18n.t(`agents.defaults.${id}.name`),
+    role: i18n.t(`agents.defaults.${id}.role`),
+    prompt: i18n.t(`agents.defaults.${id}.prompt`),
+    ...SYSTEM_AGENT_TUNING[id],
+  };
+  if (COSMOS_AGENT_IDS.has(id)) {
+    row.knowledgeMarkdownFiles = [cosmosNarrativeKnowledgeFile(i18n.language)];
+  }
+  return row;
+}
+
+function isOfficialDefaultStarterNode(node: {
+  id: string;
+  type: string;
+  content?: string;
+}): boolean {
+  if (OFFICIAL_DEFAULT_STARTER_NODE_IDS.has(node.id)) return true;
+  if (node.type === 'essay' && tryParseEssayContent(node.content)?.articleId === LEGACY_DEFAULT_ESSAY_ARTICLE_ID) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * First-run / virgin official starters may be swapped for a new default layout.
+ * Any non-official card on the main workspace aborts the swap entirely.
+ *
+ * The official starter set intentionally excludes legacy cosmos + Memory
+ * Architect node ids: an existing user who already has cosmos content on
+ * their default canvas is treated as "has non-official content" and the swap
+ * is aborted, so we never delete user data.
+ */
+async function installDefaultWorkspace(): Promise<void> {
+  const canvasId = 'default';
+  const seedAskWorkZone = async () => {
+    await ensureDefaultAskWorkZone({
+      canvasId,
+      askNodeId: DEFAULT_NODE_IDS.ask,
+    });
+    await applyOnboardingWorkroomLayout(canvasId);
+  };
+  const onDefault = (await db.nodes.toArray()).filter(
+    (n) => (!n.canvasId || n.canvasId === canvasId) && n.type !== 'ambience',
+  );
+
+  if (onDefault.some((n) => !isOfficialDefaultStarterNode(n))) {
+    await seedAskWorkZone();
+    return;
+  }
+
+  const presentIds = new Set(onDefault.map((n) => n.id));
+  const hasCoreLayout = CORE_DEFAULT_NODE_IDS.every((id) => presentIds.has(id));
+  if (hasCoreLayout) {
+    // Virgin L-shape only: move the three official cards into the horizontal row.
+    // Skip if the user already dragged any starter off the seeded coords.
+    if (isLegacyLShapeDefaultLayout(onDefault)) {
+      const { nodes } = buildDefaultWorkspace({
+        canvasId,
+        themeContent: i18n.t('canvas.starter.blank_theme'),
+        noteContent: i18n.t('canvas.starter.blank_note'),
+      });
+      await db.transaction('rw', db.nodes, db.canvases, async () => {
+        for (const node of nodes) {
+          await db.nodes.update(node.id, {
+            x: node.x,
+            y: node.y,
+            width: node.width,
+            height: node.height,
+          });
+        }
+        await db.canvases.update(canvasId, { updatedAt: Date.now() });
+      });
+      await ensureAmbienceNodeForCanvas({
+        canvasId,
+        position: defaultWorkspaceAmbiencePosition(),
+      });
+    }
+    await seedAskWorkZone();
+    return;
+  }
+
+  const removeIds = onDefault.map((n) => n.id);
+  const edges = await db.edges.toArray();
+  const removeIdSet = new Set(removeIds);
+  const edgeIdsToDelete = edges
+    .filter((e) => {
+      const onCanvas = !e.canvasId || e.canvasId === canvasId;
+      if (!onCanvas) return false;
+      if (removeIdSet.has(e.from) || removeIdSet.has(e.to)) return true;
+      return OFFICIAL_DEFAULT_STARTER_EDGE_IDS.has(e.id);
+    })
+    .map((e) => e.id);
+
+  if (removeIds.length > 0) await db.nodes.bulkDelete(removeIds);
+  if (edgeIdsToDelete.length > 0) await db.edges.bulkDelete(edgeIdsToDelete);
+  await db.articles.delete(LEGACY_DEFAULT_ESSAY_ARTICLE_ID);
+
+  const { nodes } = buildDefaultWorkspace({
+    canvasId,
+    themeContent: i18n.t('canvas.starter.blank_theme'),
+    noteContent: i18n.t('canvas.starter.blank_note'),
+  });
+
+  await db.nodes.bulkPut(stampNewCards(nodes));
+  await db.canvases.update(canvasId, { updatedAt: Date.now() });
+  await ensureAmbienceNodeForCanvas({
+    canvasId,
+    position: defaultWorkspaceAmbiencePosition(),
+  });
+  await seedAskWorkZone();
+}
+
 /** Seed the database with default agents, nodes, and articles on first run. */
 export function useSeedData() {
   useEffect(() => {
@@ -26,65 +179,36 @@ export function useSeedData() {
       if (!defaultCanvas) {
         await db.canvases.add({
           id: 'default',
-          name: 'Main Workspace',
+          name: i18n.t('canvas.default_workspace_name'),
           createdAt: Date.now(),
-          updatedAt: Date.now()
+          updatedAt: Date.now(),
         });
       }
 
-      const agentIds = [...SYSTEM_AGENT_IDS];
       const existingAgents = await db.agents.toArray();
-      const existingIds = new Set(existingAgents.map(a => a.id));
-      const missingIds = agentIds.filter(id => !existingIds.has(id));
+      const existingIds = new Set(existingAgents.map((a) => a.id));
+      const missingIds = SEEDED_AGENT_IDS.filter((id) => !existingIds.has(id));
 
       if (missingIds.length > 0) {
-        const toAdd: AgentConfig[] = missingIds.map((id) => {
-          const sid = id as SystemAgentId;
-          return {
-            id: sid,
-            name: i18n.t(`agents.defaults.${sid}.name`),
-            role: i18n.t(`agents.defaults.${sid}.role`),
-            prompt: i18n.t(`agents.defaults.${sid}.prompt`),
-            ...SYSTEM_AGENT_TUNING[sid],
-          };
-        });
+        const toAdd: AgentConfig[] = missingIds.map((id) => buildSystemAgentRow(id));
         await db.agents.bulkPut(toAdd);
       }
 
+      await retireUnusedOptionalSystemAgents();
       await migrateLegacyAgentPrompts();
+      await consolidateDuplicateCommunityAgents();
+      await repairOfficialCommunityPersonaCovers();
+      await pruneRetiredCosmosThemeCards();
       await db.agents.delete('challenger');
       await db.agents.delete('pragmatist');
 
-      const totalCount = await db.agents.count();
-      if (totalCount <= 4) {
-        const nodeCount = await db.nodes.count();
-        if (nodeCount === 0) {
-          await db.articles.put({
-            id: 'ref-042',
-            title: 'Spatial Encoding in Reconstructive Memory',
-            content: 'The human mind does not merely store experiences as isolated visual or auditory files. Instead, it constructs architectural spaces where these memories represent structural loads...',
-            date: '1994',
-            type: 'REF-042',
-            tags: [],
-            linkedCanvasIds: [],
-          });
+      await installDefaultWorkspace();
 
-          await db.nodes.bulkPut([
-            { id: 'theme', type: 'theme', content: 'The Memory Architect', x: 200, y: 300 },
-            { id: 'insp1', type: 'note', content: 'Spatial architecture of trauma', x: 500, y: 200 },
-            { id: 'ai', type: 'ai', content: 'Memory is not a storage, but a navigation.', x: 500, y: 400 },
-            { id: 'insp2', type: 'note', content: 'Non-euclidean memory leaks', x: 800, y: 300 }
-          ]);
-
-          await db.edges.bulkPut([
-            { id: 'e1', from: 'theme', to: 'insp1' },
-            { id: 'e2', from: 'theme', to: 'ai' },
-            { id: 'e3', from: 'ai', to: 'insp2' },
-            { id: 'e4', from: 'insp1', to: 'insp2' }
-          ]);
-        }
-      }
+      // After seed (or on existing DBs): ensure every article has an essay canvas card.
+      await migrateArticlesToEssayNodes({ preferredCanvasId: 'default' });
+      await recoverStaleGeneratingImages();
+      await recoverStaleGeneratingAiCards();
     };
-    seed();
+    void withoutSyncHooks(seed);
   }, []);
 }

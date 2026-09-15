@@ -2,13 +2,65 @@ import type { Article, SourceCardSegment } from '../db';
 import type { AIConfig } from '../components/AISettingsModal';
 import { callUniversalAI } from '../services/ai';
 import { getLocaleDirective, combineSystemParts } from '../utils/aiI18n';
-import { parsePublishArticleResponse } from './parsePublishArticleResponse';
+import {
+  assemblePublishBody,
+  parsePublishArticleResponse,
+  validateSourceCardFidelity,
+  type ParsedPublishSegment,
+} from './parsePublishArticleResponse';
 import {
   ensurePublishMediaInBody,
+  normalizePublishMediaPlaceholders,
+  remapOutlineAttachedVisuals,
   type PublishMediaAsset,
   type PublishSourceCardMeta,
 } from './publishSourceMaterial';
 import { serializeOutlineForPrompt, type PublishOutline } from './parsePublishOutlineResponse';
+import { createArticleMedia } from './articleMedia';
+import { prepareLlmVisionImageSlots } from './canvasContextImages';
+import { OPENROUTER_OUTLINE_MODEL } from '../constants/openrouter';
+import { spoorLlmSessionId } from './openRouterPromptCache';
+
+export function withPublishOutlineModel(aiConfig: AIConfig): {
+  config: AIConfig;
+  lockModel: true;
+} {
+  return {
+    config: {
+      ...aiConfig,
+      provider: 'openrouter',
+      model: OPENROUTER_OUTLINE_MODEL,
+    },
+    lockModel: true,
+  };
+}
+
+async function callPublishOutlineModel({
+  aiConfig,
+  systemInstruction,
+  prompt,
+  onStreamChunk,
+  imageHrefs,
+  sessionId,
+}: {
+  aiConfig: AIConfig;
+  systemInstruction: string;
+  prompt: string;
+  onStreamChunk?: (accumulatedText: string) => void;
+  imageHrefs?: string[];
+  sessionId?: string;
+}): Promise<string> {
+  const slots = await prepareLlmVisionImageSlots(imageHrefs ?? []);
+  const remapped = remapOutlineAttachedVisuals(prompt, slots);
+  return callUniversalAI({
+    ...withPublishOutlineModel(aiConfig),
+    systemInstruction,
+    prompt: remapped.prompt,
+    onStreamChunk,
+    sessionId,
+    ...(remapped.images.length > 0 ? { images: remapped.images } : {}),
+  });
+}
 
 export interface GenerateArticleFromOutlineParams {
   aiConfig: AIConfig;
@@ -22,11 +74,112 @@ export interface GenerateArticleFromOutlineParams {
   t: (key: string, opts?: Record<string, unknown>) => string;
   /** 可选流式回调（用于 UI 显示生成进度） */
   onStreamChunk?: (accumulatedText: string) => void;
+  /** Reuse a draft article already opened in the editor. */
+  articleId?: string;
+}
+
+export function outlineEligibleCards(
+  outline: PublishOutline,
+  cards: PublishSourceCardMeta[],
+): PublishSourceCardMeta[] {
+  const outlineOrderedCardIds: string[] = [];
+  const seen = new Set<string>();
+  for (const s of outline.sections) {
+    const id = (s.cardId || '').trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    outlineOrderedCardIds.push(id);
+  }
+  const cardById = new Map(cards.map((c) => [c.nodeId, c]));
+  return outlineOrderedCardIds
+    .map((id) => cardById.get(id))
+    .filter((c): c is PublishSourceCardMeta => c != null);
+}
+
+async function localMediaFromAssets(mediaAssets: PublishMediaAsset[]) {
+  return Promise.all(
+    mediaAssets
+      .filter(
+        (asset): asset is PublishMediaAsset & {
+          localDataUrl: string;
+          articleMediaId: string;
+        } => Boolean(asset.localDataUrl && asset.articleMediaId),
+      )
+      .map((asset) =>
+        createArticleMedia(asset.articleMediaId, asset.localDataUrl, asset.nodeId),
+      ),
+  );
+}
+
+/** Assemble the essay in outline order from source cards. No LLM. */
+export async function draftArticleFromOutline({
+  outline,
+  cards,
+  mediaAssets,
+  activeCanvasId,
+  articleId,
+  relatedHeading = 'Related media',
+  generating = false,
+}: {
+  outline: PublishOutline;
+  cards: PublishSourceCardMeta[];
+  mediaAssets: PublishMediaAsset[];
+  activeCanvasId: string;
+  articleId: string;
+  relatedHeading?: string;
+  /** True while a follow-up polish pass (transitions / deletions) is running. */
+  generating?: boolean;
+}): Promise<Article> {
+  const eligibleCards = outlineEligibleCards(outline, cards);
+  const mediaByNode = new Map(mediaAssets.map((asset) => [asset.nodeId, asset]));
+  const sourceCards: SourceCardSegment[] | undefined =
+    eligibleCards.length > 0
+      ? eligibleCards.map((c) => ({
+          nodeId: c.nodeId,
+          canvasId: c.canvasId,
+          kind: c.kind,
+          title: c.title,
+          segmentText: (mediaByNode.get(c.nodeId)?.articleMarkdown ?? c.markdown ?? '').trim(),
+          transitions: [],
+          deletions: [],
+        }))
+      : undefined;
+  let body = sourceCards
+    ? assemblePublishBody(
+        sourceCards.map((sc) => ({
+          text: sc.segmentText,
+          transitions: sc.transitions ?? [],
+          deletions: sc.deletions ?? [],
+        })),
+      )
+    : '';
+  body = normalizePublishMediaPlaceholders(body, mediaAssets);
+  body = ensurePublishMediaInBody(body, mediaAssets, relatedHeading);
+  const localMedia = await localMediaFromAssets(mediaAssets);
+  const title = (outline.title || '').trim() || eligibleCards[0]?.title || '';
+  return {
+    id: articleId,
+    title,
+    content: body,
+    date: new Date().getFullYear().toString(),
+    type: 'GEN-' + Math.floor(Math.random() * 1000),
+    tags: [],
+    linkedCanvasIds: [activeCanvasId],
+    author: '',
+    generating,
+    contentDrivesBody: true,
+    ...(sourceCards ? { sourceCards } : {}),
+    ...(localMedia.length > 0 ? { media: localMedia } : {}),
+  };
 }
 
 /**
  * 按定稿大纲 + 原素材生成正文，落库为新 Article，返回新文章对象。
  * 抽自原 useAiActions.handlePublish 的后半段，保持 segments 对齐与媒体兜底逻辑不变。
+ *
+ * 关键约束（feature: preserve user voice）：
+ * - AI 不得改写来源卡片文字。validateSourceCardFidelity 在解析后立即强制比对并覆盖 cardText。
+ * - transitions 是 AI 唯一可以发挥的地方，且必须落在段间。editor 侧用 AiTransitionMark 高亮。
  */
 export async function generateArticleFromOutline({
   aiConfig,
@@ -37,6 +190,7 @@ export async function generateArticleFromOutline({
   activeCanvasId,
   t,
   onStreamChunk,
+  articleId: existingId,
 }: GenerateArticleFromOutlineParams): Promise<Article> {
   const outlineText = serializeOutlineForPrompt(outline);
   const text = await callUniversalAI({
@@ -47,57 +201,59 @@ export async function generateArticleFromOutline({
       content: promptContent,
     }),
     onStreamChunk,
+    sessionId: spoorLlmSessionId('article', activeCanvasId),
   });
 
   const parsed = parsePublishArticleResponse(text || '', t('ai.generated_article_title'));
 
-  // 大纲中仍绑定来源卡的 cardId（按大纲顺序去重）。用户删段或清空 cardId 的不进侧栏。
-  const outlineOrderedCardIds: string[] = [];
-  const outlineCardIds = new Set<string>();
-  for (const s of outline.sections) {
-    const id = (s.cardId || '').trim();
-    if (!id || outlineCardIds.has(id)) continue;
-    outlineCardIds.add(id);
-    outlineOrderedCardIds.push(id);
-  }
+  const eligibleCards = outlineEligibleCards(outline, cards);
+  const outlineCardIds = new Set(eligibleCards.map((c) => c.nodeId));
 
-  const cardById = new Map(cards.map((c) => [c.nodeId, c]));
-  const eligibleCards = outlineOrderedCardIds
-    .map((id) => cardById.get(id))
-    .filter((c): c is PublishSourceCardMeta => c != null);
+  // 1. Fidelity gate：AI 改写了 cardText 就强制覆盖回源卡 markdown
+  validateSourceCardFidelity(parsed.segments, eligibleCards);
 
-  const segByCardId = new Map<string, string>();
+  // 2. 媒体占位符还原：只动 cardText（transitions 按 prompt 规则不允许含媒体）
   for (const seg of parsed.segments) {
-    if (seg.cardId) segByCardId.set(seg.cardId, seg.text);
+    seg.cardText = normalizePublishMediaPlaceholders(seg.cardText, mediaAssets);
   }
+  // 重新组装 parsed.body，让后续 missingMedia 判断用的是媒体归一化后的文本
+  parsed.body = assemblePublishBody(
+    parsed.segments.map((s) => ({
+      text: s.cardText,
+      transitions: s.transitions,
+      deletions: s.deletions,
+    })),
+  );
 
-  // 模型未带回 cardId 时，按段顺序与大纲卡一一对应（常见于漏字段但仍按序输出）
-  const orderedSegTexts: string[] = [];
-  if (segByCardId.size === 0 && parsed.segments.length === eligibleCards.length) {
-    for (let i = 0; i < parsed.segments.length; i++) {
-      orderedSegTexts[i] = parsed.segments[i]?.text ?? '';
-    }
-  }
-
-  // 只要大纲仍挂着来源卡，就写 sourceCards，保证 Reference 侧栏「关联画布」出现。
-  // 不再要求模型 segments 必须带 cardId（否则 {title,body} 回退会把侧栏弄没）。
+  // 3. 构建 sourceCards：按 cardId 匹配；模型漏 cardId 时按段顺序回退
   let sourceCards: SourceCardSegment[] | undefined;
   if (eligibleCards.length > 0) {
-    sourceCards = eligibleCards.map((c, i) => ({
-      nodeId: c.nodeId,
-      canvasId: c.canvasId,
-      kind: c.kind,
-      title: c.title,
-      segmentText: segByCardId.get(c.nodeId) ?? orderedSegTexts[i] ?? '',
-    }));
-    const hasAnySegment = sourceCards.some((s) => s.segmentText.trim());
-    if (!hasAnySegment && parsed.body.trim()) {
-      // 整篇 body 回退：挂到第一张卡，侧栏卡片列表仍保留
-      sourceCards[0] = { ...sourceCards[0], segmentText: parsed.body.trim() };
+    const segByCardId = new Map<string, ParsedPublishSegment>();
+    for (const seg of parsed.segments) {
+      if (seg.cardId) segByCardId.set(seg.cardId, seg);
     }
+    const usePositional =
+      segByCardId.size === 0 && parsed.segments.length === eligibleCards.length;
+
+    sourceCards = eligibleCards.map((c, i) => {
+      const seg =
+        segByCardId.get(c.nodeId) ??
+        (usePositional ? parsed.segments[i] : undefined);
+      const fromModel = (seg?.cardText ?? '').trim();
+      const fromSource = (c.markdown ?? '').trim();
+      return {
+        nodeId: c.nodeId,
+        canvasId: c.canvasId,
+        kind: c.kind,
+        title: c.title,
+        segmentText: fromModel || fromSource,
+        transitions: [...(seg?.transitions ?? [])],
+        deletions: [...(seg?.deletions ?? [])],
+      };
+    });
   }
 
-  // 媒体兜底：把模型遗漏的媒体追加到对应卡片段（按 nodeId 匹配），否则追加到末尾段
+  // 4. 媒体兜底：把模型遗漏的媒体追加到对应卡的 segmentText（媒体来自源卡，fidelity 不受影响）
   const missingMedia = mediaAssets.filter((asset) => {
     // 若大纲明确删掉了该媒体所属卡片，则不再兜底（用户已主动剔除）
     if (outlineCardIds.size > 0 && !outlineCardIds.has(asset.nodeId)) return false;
@@ -114,7 +270,6 @@ export async function generateArticleFromOutline({
 
   let body: string;
   if (sourceCards) {
-    // sourceCards 链路：把 missingMedia 追加到对应段或末段，再按段拼成正文
     for (const asset of missingMedia) {
       const attach = `\n\n## ${relatedHeading}\n\n${asset.articleMarkdown}`;
       const idx = sourceCards.findIndex((sc) => sc.nodeId === asset.nodeId);
@@ -126,17 +281,29 @@ export async function generateArticleFromOutline({
         };
       }
     }
-    body = sourceCards
-      .map((s) => s.segmentText.trim())
-      .filter(Boolean)
-      .join('\n\n');
+    body = assemblePublishBody(
+      sourceCards.map((sc) => ({
+        text: sc.segmentText,
+        transitions: sc.transitions ?? [],
+        deletions: sc.deletions ?? [],
+      })),
+    );
+
+    // 兜底：所有 segmentText 都为空且 parsed.body 有内容时退回 parsed.body
+    const hasAnySegment = sourceCards.some((sc) => sc.segmentText.trim());
+    if (!hasAnySegment && parsed.body.trim()) {
+      body = parsed.body.trim();
+    }
   } else {
     // 非 sourceCards 链路：用 ensurePublishMediaInBody 把遗漏媒体补到正文末尾
     body = ensurePublishMediaInBody(parsed.body, mediaAssets, relatedHeading);
   }
 
+  const articleId = existingId || `gen-${Date.now()}`;
+  const localMedia = await localMediaFromAssets(mediaAssets);
+
   const newArticle: Article = {
-    id: `gen-${Date.now()}`,
+    id: articleId,
     title: outline.title || parsed.title,
     content: body,
     date: new Date().getFullYear().toString(),
@@ -144,7 +311,10 @@ export async function generateArticleFromOutline({
     tags: [],
     linkedCanvasIds: [activeCanvasId],
     author: '',
+    generating: false,
+    contentDrivesBody: true,
     ...(sourceCards ? { sourceCards } : {}),
+    ...(localMedia.length > 0 ? { media: localMedia } : {}),
   };
 
   return newArticle;
@@ -157,24 +327,29 @@ export async function generatePublishOutline({
   fallbackTitle,
   t,
   onStreamChunk,
+  imageHrefs,
 }: {
   aiConfig: AIConfig;
   promptContent: string;
   fallbackTitle: string;
   t: (key: string, opts?: Record<string, unknown>) => string;
   onStreamChunk?: (accumulatedText: string) => void;
+  imageHrefs?: string[];
 }) {
-  const text = await callUniversalAI({
-    config: aiConfig,
+  const text = await callPublishOutlineModel({
+    aiConfig,
     systemInstruction: combineSystemParts(
-      t('ai.prompts.publishOutlineSystem'),
       getLocaleDirective(),
+      t('ai.prompts.publishOutlineSystem'),
     ),
     prompt: t('ai.prompts.publishOutline', { content: promptContent }),
     onStreamChunk,
+    imageHrefs,
+    sessionId: spoorLlmSessionId('outline'),
   });
-  const { parsePublishOutlineResponse } = await import('./parsePublishOutlineResponse');
-  return parsePublishOutlineResponse(text || '', fallbackTitle);
+  const { asCardOrderOutline, parsePublishOutlineResponse } = await import('./parsePublishOutlineResponse');
+  const parsed = parsePublishOutlineResponse(text || '', fallbackTitle);
+  return parsed ? asCardOrderOutline(parsed) : null;
 }
 
 /** 按用户文字/语音指令修订大纲 */
@@ -184,26 +359,31 @@ export async function revisePublishOutline({
   instruction,
   t,
   onStreamChunk,
+  imageHrefs,
 }: {
   aiConfig: AIConfig;
   outline: PublishOutline;
   instruction: string;
   t: (key: string, opts?: Record<string, unknown>) => string;
   onStreamChunk?: (accumulatedText: string) => void;
+  imageHrefs?: string[];
 }) {
   const outlineText = serializeOutlineForPrompt(outline);
-  const text = await callUniversalAI({
-    config: aiConfig,
+  const text = await callPublishOutlineModel({
+    aiConfig,
     systemInstruction: combineSystemParts(
-      t('ai.prompts.publishOutlineSystem'),
       getLocaleDirective(),
+      t('ai.prompts.publishOutlineSystem'),
     ),
     prompt: t('ai.prompts.publishOutlineRevise', {
       outline: outlineText,
       instruction,
     }),
     onStreamChunk,
+    imageHrefs,
+    sessionId: spoorLlmSessionId('outline-revise'),
   });
-  const { parsePublishOutlineResponse } = await import('./parsePublishOutlineResponse');
-  return parsePublishOutlineResponse(text || '', outline.title);
+  const { asCardOrderOutline, parsePublishOutlineResponse } = await import('./parsePublishOutlineResponse');
+  const parsed = parsePublishOutlineResponse(text || '', outline.title);
+  return parsed ? asCardOrderOutline(parsed) : null;
 }

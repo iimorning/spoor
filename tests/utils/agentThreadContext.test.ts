@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   collectAiThreadChain,
+  formatAgentDiscussionDialogueHistory,
   formatAgentThreadDialogueHistory,
 } from '../../src/utils/agentThreadContext';
 import type { CanvasNode } from '../../src/db';
@@ -58,5 +59,52 @@ describe('agentThreadContext', () => {
     expect(text).toContain('Assistant:\nA1');
     expect(text).toContain('User:\nQ2');
     expect(text).toContain('Assistant:\nA2');
+  });
+
+  it('formatAgentDiscussionDialogueHistory labels speakers and user interrupts', () => {
+    const discussion: CanvasNode[] = [
+      {
+        id: 'd0',
+        type: 'ai',
+        userTurn: 'Weaver',
+        content: 'Opening',
+        x: 0,
+        y: 0,
+        threadAgentConfigId: 'weaver',
+        threadDiscussionId: 'd',
+        threadDiscussionAgentIds: ['atelier', 'weaver'],
+        threadDiscussionTurnIndex: 0,
+      },
+      {
+        id: 'd1',
+        type: 'ai',
+        userTurn: 'Atelier',
+        content: 'Reply',
+        x: 0,
+        y: 1,
+        threadAgentConfigId: 'atelier',
+        threadDiscussionId: 'd',
+        threadDiscussionAgentIds: ['atelier', 'weaver'],
+        threadDiscussionTurnIndex: 1,
+      },
+      {
+        id: 'd2',
+        type: 'ai',
+        userTurn: 'What about the ritual?',
+        content: 'Ritual idea',
+        x: 0,
+        y: 2,
+        threadAgentConfigId: 'weaver',
+        threadDiscussionId: 'd',
+        threadDiscussionAgentIds: ['atelier', 'weaver'],
+        threadDiscussionTurnIndex: 2,
+      },
+    ];
+    const names = (id: string) => (id === 'weaver' ? 'Weaver' : 'Atelier');
+    const text = formatAgentDiscussionDialogueHistory(discussion, names);
+    expect(text).toContain('Weaver:\nOpening');
+    expect(text).toContain('Atelier:\nReply');
+    expect(text).toContain('User:\nWhat about the ritual?');
+    expect(text).toContain('Weaver:\nRitual idea');
   });
 });

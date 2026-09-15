@@ -6,7 +6,6 @@ import type {
   Article,
   AgentConfig,
   Edge,
-  ResearchSession,
 } from '../src/db';
 
 describe('MyDatabase', () => {
@@ -16,8 +15,10 @@ describe('MyDatabase', () => {
     await db.agents.clear();
     await db.edges.clear();
     await db.canvases.clear();
-    await db.researchSessions.clear();
     await db.agentSandboxThreads.clear();
+    await db.archivedCards.clear();
+    await db.archiveFolders.clear();
+    await db.canvasFolders.clear();
   });
 
   // --- 节点 (nodes) ---
@@ -93,7 +94,7 @@ describe('MyDatabase', () => {
       expect(result?.content).toBe('AI 回复正文');
     });
 
-    it('支持可选属性 followUpSent（追问已发出则隐藏输入）', async () => {
+    it('支持可选属性 followUpSent', async () => {
       await db.nodes.add({
         id: 'n-sent',
         type: 'ai',
@@ -249,6 +250,19 @@ describe('MyDatabase', () => {
       expect(result?.creativity).toBeUndefined();
       expect(result?.color).toBeUndefined();
     });
+
+    it('能读写 coverImageUrl', async () => {
+      await db.agents.add({
+        id: 'ag1',
+        name: 'A',
+        role: 'R',
+        prompt: 'P',
+        coverImageUrl: 'https://img.example/cover.jpg',
+      });
+      expect((await db.agents.get('ag1'))?.coverImageUrl).toBe('https://img.example/cover.jpg');
+      await db.agents.update('ag1', { coverImageUrl: 'https://img.example/next.jpg' });
+      expect((await db.agents.get('ag1'))?.coverImageUrl).toBe('https://img.example/next.jpg');
+    });
   });
 
   // --- 边 (edges) ---
@@ -339,36 +353,6 @@ describe('MyDatabase', () => {
     });
   });
 
-  // --- 深度研究会话 (researchSessions) ---
-  describe('researchSessions 表', () => {
-    it('能添加并按 createdAt 倒序列出', async () => {
-      const s1: ResearchSession = {
-        id: 's1',
-        query: 'Older topic',
-        createdAt: 1000,
-        updatedAt: 1000,
-        researchPlan: [{ title: 'A', desc: 'a' }],
-        researchReport: { intro: 'i', points: [], conclusion: 'c' },
-        sourceCount: 0,
-        searchStatus: 'idle',
-      };
-      const s2: ResearchSession = {
-        id: 's2',
-        query: 'Newer topic',
-        createdAt: 2000,
-        updatedAt: 2000,
-        researchPlan: [{ title: 'B', desc: 'b' }],
-        researchReport: { intro: 'i2', points: [{ title: 'P', text: 'T' }], conclusion: 'c2' },
-        sourceCount: 2,
-        searchStatus: 'found',
-      };
-      await db.researchSessions.bulkAdd([s1, s2]);
-      const ordered = await db.researchSessions.orderBy('createdAt').reverse().toArray();
-      expect(ordered.map((r) => r.id)).toEqual(['s2', 's1']);
-      expect(ordered[0].query).toBe('Newer topic');
-    });
-  });
-
   describe('agentSandboxThreads 表', () => {
     it('能按 agentId 写入与读取沙盒对话', async () => {
       await db.agentSandboxThreads.put({
@@ -391,9 +375,24 @@ describe('MyDatabase', () => {
       expect(db.name).toBe('CortexLocalDB');
     });
 
-    it('包含所有 7 张表', () => {
+    it('包含画布相关数据表', () => {
       expect(db.tables.map((t) => t.name).sort()).toEqual(
-        ['agentSandboxThreads', 'agents', 'articles', 'canvases', 'edges', 'nodes', 'researchSessions'],
+        [
+          'agentSandboxThreads',
+          'agents',
+          'archiveFolders',
+          'archivedCards',
+          'articles',
+          'canvasFolders',
+          'canvasPersonaThreads',
+          'canvasTemplates',
+          'canvasWorkZones',
+          'canvases',
+          'edges',
+          'nodes',
+          'workspacePartitions',
+          'workspaceState',
+        ],
       );
     });
   });

@@ -1,10 +1,13 @@
-import { db, type CanvasNode, type Edge } from '../db';
+import { db, type CanvasNode, type CanvasWorkZone, type Edge } from '../db';
 
 export const CANVAS_UNDO_MAX = 30;
 
 export type CanvasUndoEntry =
   | { type: 'delete'; nodes: CanvasNode[]; edges: Edge[] }
-  | { type: 'paste'; nodeIds: string[]; edgeIds: string[] };
+  | { type: 'paste'; nodeIds: string[]; edgeIds: string[] }
+  | { type: 'workZoneCreate'; zoneId: string }
+  | { type: 'workZoneUpdate'; before: CanvasWorkZone }
+  | { type: 'workZoneDelete'; zone: CanvasWorkZone };
 
 export type CanvasUndoStack = {
   push: (entry: CanvasUndoEntry) => void;
@@ -32,6 +35,14 @@ export function createCanvasUndoStack(max = CANVAS_UNDO_MAX): CanvasUndoStack {
   };
 }
 
+export function isWorkZoneUndoEntry(entry: CanvasUndoEntry): boolean {
+  return (
+    entry.type === 'workZoneCreate'
+    || entry.type === 'workZoneUpdate'
+    || entry.type === 'workZoneDelete'
+  );
+}
+
 /** Apply the inverse of a recorded canvas mutation. */
 export async function applyCanvasUndo(entry: CanvasUndoEntry): Promise<void> {
   if (entry.type === 'delete') {
@@ -43,8 +54,23 @@ export async function applyCanvasUndo(entry: CanvasUndoEntry): Promise<void> {
     return;
   }
 
-  await db.transaction('rw', db.nodes, db.edges, async () => {
-    if (entry.nodeIds.length > 0) await db.nodes.bulkDelete(entry.nodeIds);
-    if (entry.edgeIds.length > 0) await db.edges.bulkDelete(entry.edgeIds);
-  });
+  if (entry.type === 'paste') {
+    await db.transaction('rw', db.nodes, db.edges, async () => {
+      if (entry.nodeIds.length > 0) await db.nodes.bulkDelete(entry.nodeIds);
+      if (entry.edgeIds.length > 0) await db.edges.bulkDelete(entry.edgeIds);
+    });
+    return;
+  }
+
+  if (entry.type === 'workZoneCreate') {
+    await db.canvasWorkZones.delete(entry.zoneId);
+    return;
+  }
+
+  if (entry.type === 'workZoneUpdate') {
+    await db.canvasWorkZones.put(entry.before);
+    return;
+  }
+
+  await db.canvasWorkZones.put(entry.zone);
 }

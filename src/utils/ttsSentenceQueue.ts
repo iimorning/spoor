@@ -1,5 +1,6 @@
 import { openMinimaxTtsStream, type MinimaxTtsStream } from '../services/minimaxTtsStream';
 import { stripThinking } from './stripThinking';
+import { compactTtsText } from './ttsFollowAlongDom';
 
 const SENTENCE_END = /([。！？!?；;\n]+)/;
 
@@ -7,6 +8,7 @@ export type TtsQueueConfig = {
   apiKey: string;
   model?: string;
   voiceId?: string;
+  language?: string;
   onSpeakingChange?: (speaking: boolean) => void;
   /** Current sentence whose audio is playing; `null` when idle. */
   onActiveSentenceChange?: (sentence: string | null) => void;
@@ -95,6 +97,7 @@ export function createTtsSentenceQueue(config: TtsQueueConfig) {
       apiKey: config.apiKey,
       model: config.model,
       voiceId: config.voiceId,
+      language: config.language,
       onSpeakingChange: setSpeaking,
       onActiveTextChange: config.onActiveSentenceChange,
       onError: config.onError,
@@ -109,7 +112,15 @@ export function createTtsSentenceQueue(config: TtsQueueConfig) {
         if (finishRequested) stream.finish();
       })
       .catch((e) => {
-        if (!closed) config.onError?.(e instanceof Error ? e.message : String(e));
+        // Drop the failed handle so a later sentence can open a fresh socket.
+        // A warmup-only failure (no text yet) stays silent — the first real
+        // sentence retries instead of alerting during "thinking".
+        streamOpening = null;
+        stream = null;
+        if (closed) return;
+        if (pendingTexts.length > 0 || finishRequested) {
+          config.onError?.(e instanceof Error ? e.message : String(e));
+        }
       });
     return streamOpening;
   };
@@ -117,6 +128,8 @@ export function createTtsSentenceQueue(config: TtsQueueConfig) {
   const enqueueSentence = (sentence: string) => {
     const t = sentence.trim();
     if (!t || closed) return;
+    // Table separators / heading-only hashes compact to empty — do not speak them.
+    if (!compactTtsText(t)) return;
     if (spoken.has(t)) return; // never repeat a sentence already spoken
     spoken.add(t);
     if (stream) stream.enqueueText(t);
@@ -127,6 +140,11 @@ export function createTtsSentenceQueue(config: TtsQueueConfig) {
   };
 
   return {
+    /** Open MiniMax (token + WebSocket + task_start) before the first sentence. */
+    warmup() {
+      if (closed) return;
+      void ensureStream();
+    },
     pushAccumulatedText(accumulated: string) {
       if (closed) return;
       // Never read chain-of-thought blocks aloud.

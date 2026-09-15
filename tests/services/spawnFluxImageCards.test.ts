@@ -6,6 +6,8 @@ import {
   FLUX_IMAGE_OFFSET_FROM_HUB_X,
   fluxImageCardPos,
   fluxImageBesideAnchorPos,
+  fluxImageCardSize,
+  placeFluxImageBesideLiveAnchor,
   spawnFluxImageCard,
 } from '../../src/services/spawnFluxImageCards';
 import { BOOK_EXPAND_CHILD_OFFSET_X, BOOK_EXPAND_CHILD_WIDTH, BOOK_EXPAND_HUB_HEIGHT } from '../../src/services/spawnBookExpandCards';
@@ -25,6 +27,10 @@ describe('constants', () => {
     expect(FLUX_IMAGE_CARD_WIDTH).toBe(320);
     expect(FLUX_IMAGE_CARD_HEIGHT).toBe(210);
     expect(FLUX_IMAGE_GAP_Y).toBe(24);
+    expect(fluxImageCardSize('portrait')).toEqual({ width: 210, height: 320 });
+    expect(fluxImageCardSize('square')).toEqual({ width: 260, height: 260 });
+    expect(fluxImageCardSize('strip')).toEqual({ width: 96, height: 768 });
+    expect(fluxImageCardSize('poster')).toEqual({ width: 180, height: 320 });
   });
 
   it('places Flux cards to the right of the book-expand branch lane', () => {
@@ -90,6 +96,31 @@ describe('fluxImageBesideAnchorPos', () => {
   });
 });
 
+describe('placeFluxImageBesideLiveAnchor', () => {
+  it('sits to the right of the live anchor when that lane is free', () => {
+    const anchor = { type: 'ai', x: 40, y: 80, width: 320, height: 200 };
+    const pos = placeFluxImageBesideLiveAnchor(anchor, [anchor]);
+    expect(pos.x).toBe(40 + 320 + 28);
+    expect(pos.y).toBeGreaterThanOrEqual(80);
+    expect(Math.abs(pos.x - (anchor.x + (anchor.width ?? 0)))).toBeLessThan(400);
+  });
+
+  it('drops below the live anchor instead of jumping far when the right lane is blocked', () => {
+    const anchor = { type: 'ask', x: 100, y: 50, width: 320, height: 180 };
+    const blocker = {
+      type: 'ai',
+      x: 100 + 320 + 28,
+      y: 50,
+      width: 320,
+      height: 240,
+    };
+    const pos = placeFluxImageBesideLiveAnchor(anchor, [anchor, blocker]);
+    expect(pos.x).toBe(anchor.x);
+    expect(pos.y).toBeGreaterThan(anchor.y);
+    expect(pos.y - anchor.y).toBeLessThan(500);
+  });
+});
+
 describe('spawnFluxImageCard', () => {
   it('returns the new node id (from crypto.randomUUID)', async () => {
     const id = await spawnFluxImageCard({
@@ -101,7 +132,7 @@ describe('spawnFluxImageCard', () => {
     expect(id).toBe('uuid-1');
   });
 
-  it('inserts a node with the documented shape (type=image, dimensions, content + sourceUrl)', async () => {
+  it('inserts a generated image node without a source page URL', async () => {
     await spawnFluxImageCard({
       canvasId: 'c1',
       imageUrl: 'https://x/a.png',
@@ -115,12 +146,27 @@ describe('spawnFluxImageCard', () => {
     expect(node.id).toBe('uuid-1');
     expect(node.type).toBe('image');
     expect(node.content).toBe('https://x/a.png');
-    expect(node.sourceUrl).toBe('https://x/a.png');
+    expect(node.sourceUrl).toBeUndefined();
+    expect(node.aiGenerated).toBe(true);
     expect(node.description).toBe('雪山日落');
     expect(node.x).toBe(50);
     expect(node.y).toBe(60);
     expect(node.width).toBe(FLUX_IMAGE_CARD_WIDTH);
     expect(node.height).toBe(FLUX_IMAGE_CARD_HEIGHT);
+  });
+
+  it('accepts a portrait frame size', async () => {
+    await spawnFluxImageCard({
+      canvasId: 'c1',
+      imageUrl: 'https://x/a.png',
+      x: 0,
+      y: 0,
+      width: 210,
+      height: 320,
+    });
+    const node = await db.nodes.get('uuid-1');
+    expect(node?.width).toBe(210);
+    expect(node?.height).toBe(320);
   });
 
   it('trims the description before storing it', async () => {

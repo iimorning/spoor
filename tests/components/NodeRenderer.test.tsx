@@ -22,8 +22,10 @@ vi.mock('lucide-react', () => {
     'Quote', 'Brain', 'Bot', 'Coffee', 'Wand2', 'Send', 'SlidersHorizontal', 'History', 'ZoomIn',
     'Focus', 'Image', 'FilePlus', 'Trash2', 'Link2', 'X', 'Camera', 'ChevronLeft',
     'ChevronRight', 'Check', 'Cpu', 'ArrowRight', 'ListChecks', 'CheckCircle2',
-    'Loader2', 'PenLine', 'Edit3', 'FileText', 'Play', 'GitBranch', 'Layers2',
-    'ExternalLink', 'StickyNote', 'Square', 'Mic', 'MicOff',
+    'Loader2', 'PenLine', 'Edit3', 'FileText', 'Play', 'Pause', 'Waves', 'Droplets', 'Trees', 'Flower2',
+    'AudioLines', 'SkipBack', 'SkipForward', 'RotateCcw', 'Volume2', 'VolumeX', 'GitBranch', 'Layers2',
+    'ExternalLink', 'StickyNote', 'Square', 'Mic', 'MicOff', 'RotateCcw', 'MessagesSquare',
+    'MapPin', 'Headphones', 'Video', 'FileText', 'Loader2',
   ];
   const icons: Record<string, React.FC> = {};
   for (const name of iconNames) {
@@ -114,7 +116,7 @@ describe('NodeRenderer', () => {
         analyzingAgentNodeId={null}
       />
     );
-    expect(getByText('LATENT_SPACE')).toBeInTheDocument();
+    expect(getByText('nodes.theme_default_tag_latent')).toBeInTheDocument();
   });
 
   it('type="note" 渲染 NoteNode', () => {
@@ -170,15 +172,14 @@ describe('NodeRenderer', () => {
     expect(getByTestId('markdown')).toHaveTextContent('AI 回复');
   });
 
-  it('type="ai" 已 followUpSent 时不渲染追问输入', () => {
+  it('type="ai" 不渲染卡片内追问输入', () => {
     const { container } = render(
       <NodeRenderer
-        node={makeNode('ai', { followUpSent: true })}
+        node={makeNode('ai', { content: 'AI 回复' })}
         editingNodeId={null}
         setEditingNodeId={vi.fn()}
         agentConfigs={mockAgentConfigs}
         analyzingAgentNodeId={null}
-        onAiFollowUp={vi.fn()}
       />
     );
     expect(container.querySelector('textarea')).toBeNull();
@@ -211,6 +212,46 @@ describe('NodeRenderer', () => {
     );
     const video = container.querySelector('video');
     expect(video).toBeInTheDocument();
+  });
+
+  it('local wav upload 渲染 audio 控件', () => {
+    const { container } = render(
+      <NodeRenderer
+        node={makeNode('video', {
+          content: 'data:audio/wav;base64,UklGRg==',
+          fileType: 'audio/wav',
+          description: 'clip.wav',
+        })}
+        editingNodeId={null}
+        setEditingNodeId={vi.fn()}
+        agentConfigs={mockAgentConfigs}
+        analyzingAgentNodeId={null}
+      />
+    );
+    expect(container.querySelector('audio')).toBeInTheDocument();
+    expect(container.querySelector('video')).not.toBeInTheDocument();
+    expect(container.querySelector('[data-testid="audio-transcribe"]')).not.toBeInTheDocument();
+  });
+
+  it('audio card with onTranscribeAudio shows the transcribe button', () => {
+    const onTranscribeAudio = vi.fn();
+    const { container } = render(
+      <NodeRenderer
+        node={makeNode('video', {
+          content: 'data:audio/wav;base64,UklGRg==',
+          fileType: 'audio/wav',
+        })}
+        editingNodeId={null}
+        setEditingNodeId={vi.fn()}
+        agentConfigs={mockAgentConfigs}
+        analyzingAgentNodeId={null}
+        onTranscribeAudio={onTranscribeAudio}
+      />
+    );
+    const btn = container.querySelector('[data-testid="audio-transcribe"]') as HTMLButtonElement;
+    expect(btn).toBeInTheDocument();
+    btn.click();
+    expect(onTranscribeAudio).toHaveBeenCalledWith(expect.any(String));
   });
 
   it('type="document" 渲染 DocumentNode', () => {
@@ -256,12 +297,25 @@ describe('NodeRenderer', () => {
         setEditingNodeId={vi.fn()}
         agentConfigs={mockAgentConfigs}
         analyzingAgentNodeId={null}
-        onAgentRunAnalysis={vi.fn()}
       />
     );
     expect(getByText('Test Agent')).toBeInTheDocument();
     expect(queryByTestId('agent-analyzing-overlay')).toBeNull();
-    expect(queryByTestId('agent-run-analysis')).toBeInTheDocument();
+    expect(queryByTestId('agent-run-analysis')).toBeNull();
+  });
+
+  it('type="agent" 不在卡片主体上渲染生成封面或分析按钮', () => {
+    const { queryByTestId } = render(
+      <NodeRenderer
+        node={makeNode('agent', { agentConfigId: 'a1' })}
+        editingNodeId={null}
+        setEditingNodeId={vi.fn()}
+        agentConfigs={mockAgentConfigs}
+        analyzingAgentNodeId={null}
+      />,
+    );
+    expect(queryByTestId('agent-generate-cover')).toBeNull();
+    expect(queryByTestId('agent-run-analysis')).toBeNull();
   });
 
   it('type="agent" 且 analyzingAgentNodeId 匹配时显示分析遮罩', () => {
@@ -272,7 +326,6 @@ describe('NodeRenderer', () => {
         setEditingNodeId={vi.fn()}
         agentConfigs={mockAgentConfigs}
         analyzingAgentNodeId="agent-1"
-        onAgentRunAnalysis={vi.fn()}
       />
     );
     expect(getByTestId('agent-analyzing-overlay')).toBeInTheDocument();
@@ -290,5 +343,54 @@ describe('NodeRenderer', () => {
     );
     // 容器内不应有内容
     expect(container.innerHTML).toBe('');
+  });
+
+  it('type="ask" 渲染狐狸插画卡，不含输入框', () => {
+    const { getByTestId, queryByTestId } = render(
+      <NodeRenderer
+        node={makeNode('ask', { content: '' })}
+        editingNodeId={null}
+        setEditingNodeId={vi.fn()}
+        agentConfigs={mockAgentConfigs}
+        analyzingAgentNodeId={null}
+      />
+    );
+    expect(getByTestId('ask-card')).toBeInTheDocument();
+    expect(getByTestId('ask-fox')).toBeInTheDocument();
+    expect(queryByTestId('ask-input')).toBeNull();
+    expect(queryByTestId('ask-send')).toBeNull();
+    expect(queryByTestId('ask-voice-toggle')).toBeNull();
+    expect(queryByTestId('ask-context-badge')).toBeNull();
+  });
+
+  it('AI 回复卡：isTtsSpeaking=true 时显示停止播放按钮，不显示重播', () => {
+    const { getByTestId, queryByTestId } = render(
+      <NodeRenderer
+        node={makeNode('ai', { content: 'AI reply text' })}
+        editingNodeId={null}
+        setEditingNodeId={vi.fn()}
+        agentConfigs={mockAgentConfigs}
+        analyzingAgentNodeId={null}
+        isTtsSpeaking
+        onStopTts={vi.fn()}
+      />,
+    );
+    expect(getByTestId('ai-tts-stop')).toBeInTheDocument();
+    expect(queryByTestId('ai-tts-replay')).toBeNull();
+  });
+
+  it('AI 回复卡：未在朗读时不显示停止或重播按钮', () => {
+    const { queryByTestId } = render(
+      <NodeRenderer
+        node={makeNode('ai', { content: 'AI reply text' })}
+        editingNodeId={null}
+        setEditingNodeId={vi.fn()}
+        agentConfigs={mockAgentConfigs}
+        analyzingAgentNodeId={null}
+        onStopTts={vi.fn()}
+      />,
+    );
+    expect(queryByTestId('ai-tts-stop')).toBeNull();
+    expect(queryByTestId('ai-tts-replay')).toBeNull();
   });
 });

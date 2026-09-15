@@ -2,7 +2,7 @@
 # https://docs.netlify.com/routing/redirects/rewrites-proxies/
 
 [build]
-  command = "npm run build"
+  command = "npm run setup:note-hand-fonts && npm run build"
   publish = "dist"
 
 [build.environment]
@@ -39,6 +39,13 @@
   status = 200
   force = true
 
+# OpenRouter Images API: /api/openrouter/* -> https://openrouter.ai/api/v1/*
+[[redirects]]
+  from = "/api/openrouter/*"
+  to = "https://openrouter.ai/api/v1/:splat"
+  status = 200
+  force = true
+
 # 302.AI (Flux-2-Klein-4b): /api/302/* -> https://api.302ai.cn/*
 [[redirects]]
   from = "/api/302/*"
@@ -46,8 +53,81 @@
   status = 200
   force = true
 
-# SPA: client-side routes
+# 302.AI generated-image CDNs (download; <img> can load these cross-origin, fetch cannot)
+[[redirects]]
+  from = "/api/file-302cn/*"
+  to = "https://file.302ai.cn/:splat"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/file-302ai/*"
+  to = "https://file.302.ai/:splat"
+  status = 200
+  force = true
+
+# SPA: client-side routes. Published files win (shadowing), so
+# dist/pricing/index.html, dist/llms.txt, and other GEO prerender
+# outputs are served instead of this fallback.
 [[redirects]]
   from = "/*"
   to = "/index.html"
   status = 200
+
+# Canvas shell is a private workspace — keep it out of search results.
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+[[headers]]
+  for = "/index.html"
+  [headers.values]
+    Cache-Control = "public, max-age=0, must-revalidate"
+
+[[headers]]
+  for = "/"
+  [headers.values]
+    Cache-Control = "public, max-age=0, must-revalidate"
+
+[[headers]]
+  for = "/app"
+  [headers.values]
+    X-Robots-Tag = "noindex, nofollow"
+    Cache-Control = "public, max-age=0, must-revalidate"
+
+[[headers]]
+  for = "/app/*"
+  [headers.values]
+    X-Robots-Tag = "noindex, nofollow"
+    Cache-Control = "public, max-age=0, must-revalidate"
+
+[[headers]]
+  for = "/llms.txt"
+  [headers.values]
+    Content-Type = "text/plain; charset=UTF-8"
+    Cache-Control = "public, max-age=0, must-revalidate"
+
+[[headers]]
+  for = "/llms-full.txt"
+  [headers.values]
+    Content-Type = "text/plain; charset=UTF-8"
+    Cache-Control = "public, max-age=0, must-revalidate"
+
+[[headers]]
+  for = "/manifest.webmanifest"
+  [headers.values]
+    Content-Type = "application/manifest+json; charset=UTF-8"
+    Cache-Control = "public, max-age=0, must-revalidate"
+
+[[headers]]
+  for = "/sw.js"
+  [headers.values]
+    Cache-Control = "public, max-age=0, must-revalidate"
+
+[[headers]]
+  for = "/downloads/*"
+  [headers.values]
+    Content-Type = "application/octet-stream"
+    Content-Disposition = "attachment; filename=\"Spoor-latest-x64-setup.exe\""
+    Cache-Control = "public, max-age=300"

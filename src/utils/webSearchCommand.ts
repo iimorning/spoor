@@ -141,3 +141,41 @@ export function parseVoiceWebSearchIntent(raw: string): WebSearchIntent | null {
     matchInline(s, WEBPAGE_INLINE_TRIGGER, 'webpage')
   );
 }
+
+/** User turn asks for live retrieval (product command or casual 搜/查 phrasing). */
+export function userTurnRequestsLiveSearch(raw: string): boolean {
+  const s = raw.trim();
+  if (!s) return false;
+  if (parseVoiceWebSearchIntent(s)) return true;
+  return /(?:搜|查|检索|找(?:一?[下找找]))/i.test(s);
+}
+
+/** Build a Metaso spec from an explicit user search command. Empty query → null (model must write one). */
+export function searchSpecFromWebSearchIntent(intent: WebSearchIntent): {
+  query: string;
+  scopes: Array<WebSearchKind>;
+} | null {
+  const query = intent.explicitQuery.replace(/\s+/g, ' ').trim().slice(0, 200);
+  if (!query) return null;
+  // Generic “联网搜索” should still pull images when the model forgets the fence.
+  const scopes: WebSearchKind[] =
+    intent.kind === 'webpage' ? ['webpage', 'image'] : [intent.kind];
+  return { query, scopes };
+}
+
+export function searchNoResultsI18nKey(
+  scopes: readonly WebSearchKind[],
+):
+  | 'nodes.search_no_images'
+  | 'nodes.search_no_videos'
+  | 'nodes.search_no_podcasts'
+  | 'nodes.search_no_results' {
+  const unique = [...new Set(scopes)];
+  if (unique.length === 1) {
+    if (unique[0] === 'image') return 'nodes.search_no_images';
+    if (unique[0] === 'video') return 'nodes.search_no_videos';
+    if (unique[0] === 'podcast') return 'nodes.search_no_podcasts';
+  }
+  // Mixed scopes (e.g. webpage + image) → generic copy, not “webpage only”.
+  return 'nodes.search_no_results';
+}

@@ -1,28 +1,40 @@
 import {StrictMode} from 'react';
 import {createRoot} from 'react-dom/client';
 import './i18n';
-import App from './App.tsx';
+import Root from './Root.tsx';
 import { AppDialogProvider } from './components/AppDialogProvider';
+import { AuthProvider } from './contexts/AuthContext';
+import { AppEntryGateProvider } from './contexts/AppEntryGateContext';
+import { BillingProvider } from './contexts/BillingContext';
+import { AppErrorBoundary } from './components/AppErrorBoundary';
 import './index.css';
 import { registerDevBuiltinAgentReset } from './dev/resetBuiltinAgents';
 import { initTheme } from './hooks/useTheme';
-import logoUrl from '../LOGO.png';
+import { initNoteCjkAfterFirstPaint } from './hooks/useNoteCjk';
+import { initCanvasGrid } from './hooks/useCanvasGrid';
+import { isTauriRuntime } from './utils/isTauriRuntime';
+import { registerPwaServiceWorker } from './utils/pwaInstall';
+import { registerVitePreloadRecovery } from './utils/vitePreloadRecovery';
 
 registerDevBuiltinAgentReset();
+registerVitePreloadRecovery();
 initTheme();
-
-document.title = 'Spoor';
-
-const favicon = document.querySelector<HTMLLinkElement>('link[rel="icon"]') ?? document.createElement('link');
-favicon.rel = 'icon';
-favicon.type = 'image/png';
-favicon.href = logoUrl;
-if (!favicon.parentNode) document.head.appendChild(favicon);
+initNoteCjkAfterFirstPaint();
+initCanvasGrid();
+if (!isTauriRuntime()) registerPwaServiceWorker();
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <AppDialogProvider>
-      <App />
-    </AppDialogProvider>
+    <AppErrorBoundary>
+      <AuthProvider>
+        <AppEntryGateProvider>
+          <BillingProvider>
+            <AppDialogProvider>
+              <Root />
+            </AppDialogProvider>
+          </BillingProvider>
+        </AppEntryGateProvider>
+      </AuthProvider>
+    </AppErrorBoundary>
   </StrictMode>,
 );

@@ -8,17 +8,29 @@ interface WebSearchSourcesToggleProps {
   onToggle?: () => void;
   /** Extra classes for dark / glass note shells */
   className?: string;
+  /** Override tooltip / aria when reusing for Ask thread stacking etc. */
+  collapseTitle?: string;
+  expandTitle?: string;
+  /** Hide when count is below this (default 2 for web sources; Ask/theme use 1). */
+  minCount?: number;
 }
 
-/** Compact stack/expand control for web-search source cards. */
+/** Compact stack/expand control for web-search / Ask / theme card piles. */
 export function WebSearchSourcesToggle({
   count,
   collapsed,
   onToggle,
   className = '',
+  collapseTitle,
+  expandTitle,
+  minCount = 2,
 }: WebSearchSourcesToggleProps) {
   const { t } = useTranslation();
-  if (count <= 1 || !onToggle) return null;
+  if (count < minCount || !onToggle) return null;
+
+  const title = collapsed
+    ? expandTitle ?? t('nodes.expand_web_sources')
+    : collapseTitle ?? t('nodes.collapse_web_sources');
 
   return (
     <button
@@ -28,8 +40,9 @@ export function WebSearchSourcesToggle({
         onToggle();
       }}
       onPointerDown={(e) => e.stopPropagation()}
-      title={collapsed ? t('nodes.expand_web_sources') : t('nodes.collapse_web_sources')}
-      aria-label={collapsed ? t('nodes.expand_web_sources') : t('nodes.collapse_web_sources')}
+      title={title}
+      aria-label={title}
+      data-testid="stack-cards-toggle"
       className={`absolute top-3 right-3 z-20 flex items-center gap-1 rounded-full border border-[#E6E4DF] bg-white/90 px-2 py-1 text-[10px] font-sans font-medium text-[#5a5a54] shadow-sm hover:border-[#C2410C]/50 hover:text-[#C2410C] transition-colors ${className}`}
     >
       <Layers2 className="h-3.5 w-3.5" aria-hidden />

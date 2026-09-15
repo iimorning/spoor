@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseVoiceDrawIntent } from '../../src/utils/voiceDrawIntent';
+import { isDrawChaseUp, parseVoiceDrawIntent } from '../../src/utils/voiceDrawIntent';
 
 describe('parseVoiceDrawIntent', () => {
   it('extracts Chinese draw prompts', () => {
@@ -13,5 +13,14 @@ describe('parseVoiceDrawIntent', () => {
 
   it('returns null for unrelated speech', () => {
     expect(parseVoiceDrawIntent('继续讲注意力经济')).toBeNull();
+  });
+
+  it('extracts 帮我生成…的图片', () => {
+    expect(parseVoiceDrawIntent('帮我生成意大利冰淇淋的图片')?.prompt).toBe('意大利冰淇淋');
+  });
+
+  it('detects chase-ups that do not name a new subject', () => {
+    expect(isDrawChaseUp('？？在哪里，你不是可以调用302AI吗')).toBe(true);
+    expect(isDrawChaseUp('继续讲注意力经济')).toBe(false);
   });
 });

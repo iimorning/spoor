@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Smoke test: Volcengine Ark chat/completions with inference endpoint ID.
+ * Smoke test: Volcengine Ark chat/completions.
  * Usage: node scripts/test-doubao-api.mjs
  * Reads VITE_BUILTIN_DOUBAO_API_KEY from .env.local or env.
  */
@@ -20,7 +20,7 @@ if (!apiKey) {
   process.exit(1);
 }
 
-const model = 'ep-20260218175314-xrnrn';
+const model = 'doubao-seed-2-1-turbo-260628';
 const url = 'https://ark.cn-beijing.volces.com/api/v3/chat/completions';
 const body = {
   model,

@@ -88,6 +88,31 @@ describe('collectLinkedCardTextsForSearch', () => {
     const texts = collectLinkedCardTextsForSearch('mid', nodes, []);
     expect(texts.join('\n')).toMatch(/日本/);
   });
+  it('includes relationship notes from traversed edges', () => {
+    const nodes = [
+      makeNode({ id: 'a', type: 'note', content: '教师尊严' }),
+      makeNode({ id: 'b', type: 'note', content: '婴儿潮政策' }),
+    ];
+    const edges = [{ from: 'a', to: 'b', note: '对比日本与中国编制' }];
+    const texts = collectLinkedCardTextsForSearch('a', nodes, edges);
+    expect(texts.some((t) => t.includes('(Link note)') && t.includes('日本'))).toBe(true);
+    expect(texts.some((t) => t.includes('婴儿潮'))).toBe(true);
+  });
+});
+
+describe('collectIncidentEdgeNotes', () => {
+  it('returns notes touching a node', async () => {
+    const { collectIncidentEdgeNotes, formatEdgeNotesForPrompt } = await import(
+      '../../src/utils/linkedCardSearchContext'
+    );
+    const notes = collectIncidentEdgeNotes('a', [
+      { from: 'a', to: 'b', note: '因果' },
+      { from: 'c', to: 'd', note: '无关' },
+      { from: 'b', to: 'a', note: '  ' },
+    ]);
+    expect(notes).toEqual(['因果']);
+    expect(formatEdgeNotesForPrompt(notes)).toBe('- 因果');
+  });
 });
 
 describe('enrichSearchQueryWithLinkedContext', () => {

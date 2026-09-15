@@ -24,16 +24,54 @@ describe('ttsSentenceQueue', () => {
     streamMocks.finish.mockClear();
     streamMocks.stop.mockClear();
     streamMocks.waitUntilIdle.mockClear();
-    streamMocks.openMinimaxTtsStream.mockClear();
+    streamMocks.openMinimaxTtsStream.mockReset();
+    streamMocks.openMinimaxTtsStream.mockImplementation(async () => ({
+      enqueueText: streamMocks.enqueueText,
+      finish: streamMocks.finish,
+      stop: streamMocks.stop,
+      waitUntilIdle: streamMocks.waitUntilIdle,
+    }));
   });
 
-  it('cuts at Chinese period and enqueues one chunk', async () => {
+  it('warmup() opens MiniMax before any sentence and later pushes reuse that stream', async () => {
     const queue = createTtsSentenceQueue({ apiKey: 'k' });
-    queue.pushAccumulatedText('你好世界。');
+    queue.warmup();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(streamMocks.openMinimaxTtsStream).toHaveBeenCalledTimes(1);
+    expect(streamMocks.enqueueText).not.toHaveBeenCalled();
+    queue.pushAccumulatedText('你好。');
     queue.flush();
     await queue.waitUntilIdle();
-    expect(streamMocks.enqueueText).toHaveBeenCalledWith('你好世界。');
+    expect(streamMocks.openMinimaxTtsStream).toHaveBeenCalledTimes(1);
+    expect(streamMocks.enqueueText).toHaveBeenCalledWith('你好。');
   });
+
+  it('a failed warmup stays silent and a later sentence opens a new stream', async () => {
+    streamMocks.openMinimaxTtsStream.mockRejectedValueOnce(new Error('token fail'));
+    const onError = vi.fn();
+    const queue = createTtsSentenceQueue({ apiKey: 'k', onError });
+    queue.warmup();
+    const opening = streamMocks.openMinimaxTtsStream.mock.results[0]?.value as Promise<unknown> | undefined;
+    await opening?.then(
+      () => undefined,
+      () => undefined,
+    );
+    expect(onError).not.toHaveBeenCalled();
+    queue.pushAccumulatedText('你好。');
+    queue.flush();
+    await queue.waitUntilIdle();
+    expect(streamMocks.openMinimaxTtsStream).toHaveBeenCalledTimes(2);
+    expect(streamMocks.enqueueText).toHaveBeenCalledWith('你好。');
+  });
+
+    it('cuts at Chinese period and enqueues one chunk', async () => {
+      const queue = createTtsSentenceQueue({ apiKey: 'k' });
+      queue.pushAccumulatedText('你好世界。');
+      queue.flush();
+      await queue.waitUntilIdle();
+      expect(streamMocks.enqueueText).toHaveBeenCalledWith('你好世界。');
+    });
 
   it('cuts at multiple Chinese terminators within one accumulated string', async () => {
     const queue = createTtsSentenceQueue({ apiKey: 'k' });
@@ -181,5 +219,14 @@ describe('ttsSentenceQueue', () => {
     expect(texts.length).toBe(2);
     expect(texts[0]).toMatch(/^Hello there!$/);
     expect(texts[1]).toMatch(/^How are you\?$/);
+  });
+
+  it('does not enqueue markdown-only chrome that compact to empty', async () => {
+    const queue = createTtsSentenceQueue({ apiKey: 'k' });
+    queue.pushAccumulatedText('| --- | --- |\n正文一句。');
+    queue.flush();
+    await queue.waitUntilIdle();
+    const texts = streamMocks.enqueueText.mock.calls.map((c) => c[0] as string);
+    expect(texts).toEqual(['正文一句。']);
   });
 });

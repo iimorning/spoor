@@ -69,13 +69,14 @@ function buildFakeStream(trackCount = 1): { stream: MediaStream; tracks: FakeTra
 interface Mocks {
   getUserMedia: ReturnType<typeof vi.fn>;
   audioCtx: FakeAudioContext;
+  tracks: FakeTrack[];
 }
 
 function setupBrowserMocks(opts: { suspended?: boolean; sampleRate?: number; trackCount?: number } = {}): Mocks {
   const audioCtx = new FakeAudioContext();
   audioCtx.state = opts.suspended ? 'suspended' : 'running';
   audioCtx.sampleRate = opts.sampleRate ?? 16000;
-  const { stream } = buildFakeStream(opts.trackCount ?? 1);
+  const { stream, tracks } = buildFakeStream(opts.trackCount ?? 1);
 
   const getUserMedia = vi.fn().mockResolvedValue(stream);
   Object.defineProperty(globalThis.navigator, 'mediaDevices', {
@@ -86,7 +87,7 @@ function setupBrowserMocks(opts: { suspended?: boolean; sampleRate?: number; tra
   globalThis.AudioContext = function () {
     return audioCtx;
   };
-  return { getUserMedia, audioCtx };
+  return { getUserMedia, audioCtx, tracks };
 }
 
 describe('startMicCapture', () => {
@@ -97,8 +98,9 @@ describe('startMicCapture', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
-    // @ts-expect-error — clean up AudioContext stub
-    delete globalThis.AudioContext;
+    // Clean up AudioContext stub: delete via bracket notation so TS doesn't
+    // complain about deleting a non-optional global property.
+    delete (globalThis as { AudioContext?: unknown }).AudioContext;
   });
 
   it('requests microphone with the documented constraints', async () => {
@@ -131,17 +133,16 @@ describe('startMicCapture', () => {
     await cap.stop();
   });
 
-  it('creates an AnalyserNode with fftSize 256 connected to the source', async () => {
+  it('connects the source directly to the processor without a diagnostic analyser', async () => {
     const { audioCtx } = setupBrowserMocks();
     const cap = await startMicCapture(vi.fn());
-    expect(audioCtx.createAnalyser).toHaveBeenCalledTimes(1);
-    // AnalyserNode.fftSize is set in the source code after the call; verify the
-    // analyser was created and the source was connected to it (not the
-    // connect mock on the analyser instance, which is a different reference).
+    expect(audioCtx.createAnalyser).not.toHaveBeenCalled();
     const source = audioCtx.createMediaStreamSource.mock.results[0]
       .value as FakeSource;
-    // The source is connected to (1) analyser and (2) processor → at least 2 calls
-    expect(source.connect.mock.calls.length).toBeGreaterThanOrEqual(2);
+    const processor = audioCtx.createScriptProcessor.mock.results[0]
+      .value as FakeProcessor;
+    expect(source.connect).toHaveBeenCalledOnce();
+    expect(source.connect).toHaveBeenCalledWith(processor);
     await cap.stop();
   });
 
@@ -263,13 +264,11 @@ describe('startMicCapture', () => {
   it('stop() swallows disconnect errors (already-disconnected nodes)', async () => {
     const { audioCtx } = setupBrowserMocks();
     const cap = await startMicCapture(vi.fn());
-    const analyser = audioCtx.createAnalyser.mock.results[0].value as FakeAnalyser;
     const source = audioCtx.createMediaStreamSource.mock.results[0]
       .value as FakeSource;
     const processor = audioCtx.createScriptProcessor.mock.results[0]
       .value as FakeProcessor;
     const gain = audioCtx.createGain.mock.results[0].value as FakeGain;
-    analyser.disconnect = vi.fn(() => { throw new Error('already gone'); });
     source.disconnect = vi.fn(() => { throw new Error('already gone'); });
     processor.disconnect = vi.fn(() => { throw new Error('already gone'); });
     gain.disconnect = vi.fn(() => { throw new Error('already gone'); });
@@ -283,16 +282,13 @@ describe('startMicCapture', () => {
     await expect(cap.stop()).resolves.not.toThrow();
   });
 
-  it('attaches onmute/onunmute/onended handlers to each audio track', async () => {
-    const { audioCtx } = setupBrowserMocks({ trackCount: 2 });
+  it('attaches onmute and onended handlers to each audio track', async () => {
+    const { tracks } = setupBrowserMocks({ trackCount: 2 });
     const cap = await startMicCapture(vi.fn());
-    // Tracks are captured by the stream passed to getUserMedia; we can't easily get a
-    // direct reference, but verify the source.connect was called twice (one per
-    // analyser + one per processor = at least 2 connects through source)
-    const source = audioCtx.createMediaStreamSource.mock.results[0]
-      .value as FakeSource;
-    // Source is connected twice: once to analyser, once to processor
-    expect(source.connect.mock.calls.length).toBeGreaterThanOrEqual(2);
+    for (const track of tracks) {
+      expect(track.onmute).toBeTypeOf('function');
+      expect(track.onended).toBeTypeOf('function');
+    }
     await cap.stop();
   });
 

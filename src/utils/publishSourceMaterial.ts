@@ -1,7 +1,51 @@
 import type { CanvasNode } from '../db';
+import { articleMediaUrl } from './articleMedia';
+import {
+  isAttachableImageContent,
+  isImageDataUrl,
+  MAX_DATA_URL_CHARS,
+} from './canvasContextImages';
 
 /** Keep huge data-URLs out of the LLM prompt; still inject them into the final article. */
 const MAX_PROMPT_MEDIA_URL_CHARS = 2_000;
+
+/** 1-based index in the multimodal `images` array actually sent with the request. */
+export function outlineAttachedVisualLine(n: number): string {
+  return (
+    `Attached visual #${n} in this request is this card. ` +
+    'Look at the image pixels to place it next to the matching text note.\n'
+  );
+}
+
+export const OUTLINE_VISUAL_PIXELS_SKIPPED =
+  'Media card (pixels not attached; use the caption only).\n';
+
+/**
+ * If some local images could not be attached, drop/renumber `Attached visual #N`
+ * so it still matches the `images` array the model receives.
+ */
+export function remapOutlineAttachedVisuals(
+  prompt: string,
+  slots: Array<string | null>,
+): { prompt: string; images: string[] } {
+  const images: string[] = [];
+  const newNs: Array<number | null> = slots.map((slot) => {
+    if (!slot) return null;
+    images.push(slot);
+    return images.length;
+  });
+  let next = prompt;
+  const tokens = slots.map((_, i) => `\0OUTLINE_VISUAL_SLOT_${i}\0`);
+  for (let i = slots.length - 1; i >= 0; i--) {
+    next = next.split(outlineAttachedVisualLine(i + 1)).join(tokens[i]!);
+  }
+  for (let i = 0; i < slots.length; i++) {
+    const newN = newNs[i];
+    const replacement = newN ? outlineAttachedVisualLine(newN) : OUTLINE_VISUAL_PIXELS_SKIPPED;
+    next = next.split(tokens[i]!).join(replacement);
+  }
+  return { prompt: next, images };
+}
 
 export interface PublishMediaAsset {
   nodeId: string;
@@ -9,6 +53,9 @@ export interface PublishMediaAsset {
   articleMarkdown: string;
   /** Shorter / placeholder form for the model prompt when the real URL is huge */
   promptMarkdown: string;
+  /** Local upload kept out of Markdown; converted to one Blob on article save. */
+  localDataUrl?: string;
+  articleMediaId?: string;
 }
 
 export interface PublishSourceCardMeta {
@@ -18,6 +65,13 @@ export interface PublishSourceCardMeta {
   kind: string;
   /** 侧栏显示标题 */
   title: string;
+  /**
+   * The source card's verbatim text content. Used by the AI fidelity gate in
+   * `generateArticleFromOutline` to enforce "do not rewrite card text".
+   */
+  markdown: string;
+  /** Image/video preview in the outline list (data URL or http). */
+  thumbnailSrc?: string;
 }
 
 function asHttpUrl(raw: string | undefined): string {
@@ -29,10 +83,23 @@ function escapeMdAlt(s: string): string {
   return s.replace(/[\[\]]/g, '').replace(/\s+/g, ' ').trim();
 }
 
+function isDataUrl(s: string): boolean {
+  return /^data:/i.test(s.trim());
+}
+
+const EMBEDDED_DATA_IMAGE_RE =
+  /data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+(?=[^A-Za-z0-9+/=]|$)/gi;
+
+/** Keep pixels out of the text prompt; they belong in multimodal image parts. */
+export function stripEmbeddedImageDataUrls(text: string): string {
+  if (!text) return text;
+  return text.replace(EMBEDDED_DATA_IMAGE_RE, 'media://embedded-image');
+}
+
 /** 取卡片内容前若干字符作为侧栏标题；为空时回退到 description / 类型名 */
 function deriveCardTitle(node: CanvasNode, fallback: string): string {
   const fromContent = (node.content || '').replace(/\s+/g, ' ').trim();
-  if (fromContent) return fromContent.slice(0, 40);
+  if (fromContent && !isDataUrl(fromContent)) return fromContent.slice(0, 40);
   const fromDesc = (node.description || '').replace(/\s+/g, ' ').trim();
   if (fromDesc) return fromDesc.slice(0, 40);
   return fallback;
@@ -45,24 +112,34 @@ export function mediaMarkdownFromNode(node: CanvasNode): PublishMediaAsset | nul
     if (!src) return null;
     if (!/^https?:\/\//i.test(src) && !src.startsWith('data:image/')) return null;
     const alt = escapeMdAlt(node.description || 'Image') || 'Image';
-    const articleMarkdown = `![${alt}](${src})`;
+    const local = src.startsWith('data:image/');
+    const articleMediaId = local ? `node-${node.id}` : undefined;
+    const articleSrc = articleMediaId ? articleMediaUrl(articleMediaId) : src;
+    const articleMarkdown = `![${alt}](${articleSrc})`;
     const source = asHttpUrl(node.sourceUrl);
-    const withSource =
-      source && source !== src ? `${articleMarkdown}\n\n[${source}](${source})` : articleMarkdown;
+    const withSource = source && source !== src
+      ? `${articleMarkdown}\n\n[${source}](${source})`
+      : articleMarkdown;
     const promptMarkdown =
-      src.length > MAX_PROMPT_MEDIA_URL_CHARS
+      local || src.length > MAX_PROMPT_MEDIA_URL_CHARS
         ? `![${alt}](media://image/${node.id})`
         : withSource;
-    return { nodeId: node.id, articleMarkdown: withSource, promptMarkdown };
+    return {
+      nodeId: node.id,
+      articleMarkdown: withSource,
+      promptMarkdown,
+      ...(local ? { localDataUrl: src, articleMediaId } : {}),
+    };
   }
 
   if (node.type === 'video') {
-    const page = asHttpUrl(node.sourceUrl) || asHttpUrl(node.content) || (node.content || '').trim();
-    if (!page && !(node.content || '').startsWith('data:video/')) return null;
+    const content = (node.content || '').trim();
+    const isLocalFile = content.startsWith('data:video/') || content.startsWith('data:audio/');
+    const href = asHttpUrl(node.sourceUrl) || asHttpUrl(node.content);
+    if (!href && !isLocalFile) return null;
     const title = escapeMdAlt(node.description || 'Video') || 'Video';
-    const href = asHttpUrl(node.sourceUrl) || asHttpUrl(node.content) || page;
-    if (!href && (node.content || '').startsWith('data:video/')) {
-      // Local uploaded video: keep as a named placeholder link is useless; skip data:video in md
+    if (!href && isLocalFile) {
+      // Local uploaded video/audio: keep as a named placeholder; skip data: URLs in md
       const articleMarkdown = `*[${title}]*`;
       return {
         nodeId: node.id,
@@ -85,6 +162,45 @@ export interface PublishSourceMaterial {
   mediaAssets: PublishMediaAsset[];
   /** 选中卡片元数据，按选中顺序（用于回填 sourceCards） */
   cards: PublishSourceCardMeta[];
+  /**
+   * Image hrefs (data URL or http) in the same order as attached visual #N
+   * in `promptContent`. Capped for the multimodal request.
+   */
+  visionImageHrefs: string[];
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * The model sometimes echoes prompt-only `media://image/...` placeholders.
+ * Replace them with the canonical article reference before missing-media
+ * detection, otherwise the fallback appends a second image and leaves the
+ * echoed placeholder as a broken image.
+ */
+export function normalizePublishMediaPlaceholders(
+  text: string,
+  mediaAssets: PublishMediaAsset[],
+): string {
+  let normalized = text;
+  for (const asset of mediaAssets) {
+    const placeholders = [
+      ...asset.promptMarkdown.matchAll(/media:\/\/image\/[^)\s]+/g),
+    ].map((match) => match[0]);
+    if (placeholders.length === 0) continue;
+    const canonicalUrl = asset.articleMarkdown.match(/!\[[^\]]*\]\(([^)\s]+)\)/)?.[1];
+    if (!canonicalUrl) continue;
+    for (const placeholder of new Set(placeholders)) {
+      const imageMarkdown = new RegExp(
+        `!\\[[^\\]\\n]*\\]\\(${escapeRegExp(placeholder)}\\)`,
+        'g',
+      );
+      normalized = normalized.replace(imageMarkdown, asset.articleMarkdown);
+      normalized = normalized.split(placeholder).join(canonicalUrl);
+    }
+  }
+  return normalized;
 }
 
 /**
@@ -105,44 +221,86 @@ export function buildPublishSourceMaterial(
   const textParts: string[] = [];
   const mediaAssets: PublishMediaAsset[] = [];
   const cards: PublishSourceCardMeta[] = [];
+  const visionImageHrefs: string[] = [];
 
   for (const id of selectedIds) {
     const node = byId.get(id);
     const kind = node?.type ?? 'card';
     const fallbackTitle = typeLabel ? typeLabel(kind) : kind;
     const cardCanvasId = node?.canvasId ?? canvasId ?? '';
-    cards.push({
-      nodeId: id,
-      canvasId: cardCanvasId,
-      kind,
-      title: node ? deriveCardTitle(node, fallbackTitle) : fallbackTitle,
-    });
+    const fromDom = getText(id).trim();
+    const fromNode = (node?.content || '').trim();
+    const usableDom = fromDom && !isDataUrl(fromDom) ? fromDom : '';
+    const usableNode = fromNode && !isDataUrl(fromNode) ? fromNode : '';
 
     if (!node) {
-      const t = getText(id).trim();
-      if (t) textParts.push(`【cardId:${id}】\n${t}`);
+      const markdown = usableDom;
+      cards.push({
+        nodeId: id,
+        canvasId: cardCanvasId,
+        kind,
+        title: markdown.slice(0, 40) || fallbackTitle,
+        markdown,
+      });
+      if (markdown) textParts.push(`【cardId:${id}】\n${stripEmbeddedImageDataUrls(markdown)}`);
       continue;
     }
 
     const media = mediaMarkdownFromNode(node);
     if (media) {
       mediaAssets.push(media);
+      const href = (node.content || '').trim();
+      const thumbnailSrc =
+        node.type === 'image' && isAttachableImageContent(href) ? href : undefined;
+      let visualLine = '';
+      if (
+        node.type === 'image' &&
+        thumbnailSrc &&
+        !(isImageDataUrl(href) && href.length > MAX_DATA_URL_CHARS)
+      ) {
+        visionImageHrefs.push(href);
+        visualLine = outlineAttachedVisualLine(visionImageHrefs.length);
+      } else if (node.type === 'image' || node.type === 'video') {
+        visualLine = OUTLINE_VISUAL_PIXELS_SKIPPED;
+      }
+      cards.push({
+        nodeId: id,
+        canvasId: cardCanvasId,
+        kind,
+        title: deriveCardTitle(node, fallbackTitle),
+        markdown: media.promptMarkdown,
+        ...(thumbnailSrc ? { thumbnailSrc } : {}),
+      });
       textParts.push(
-        `【cardId:${id}】\nMedia asset (include this markdown in this card's segment):\n${media.promptMarkdown}`,
+        `【cardId:${id}】\n${visualLine}Caption / markdown:\n${media.promptMarkdown}`,
       );
       continue;
     }
 
-    const fromDom = getText(id).trim();
-    const fromNode = (node.content || '').trim();
-    const chunk = fromDom || fromNode;
-    if (chunk) textParts.push(`【cardId:${id}】\n${chunk}`);
+    const markdown = usableDom || usableNode;
+    cards.push({
+      nodeId: id,
+      canvasId: cardCanvasId,
+      kind,
+      title: deriveCardTitle({ ...node, content: markdown || node.content }, fallbackTitle),
+      markdown,
+    });
+    if (markdown) textParts.push(`【cardId:${id}】\n${stripEmbeddedImageDataUrls(markdown)}`);
   }
 
+  const index = cards
+    .map((c, i) => `${i + 1}. 【cardId:${c.nodeId}】 ${c.kind}${c.title ? ` ${c.title}` : ''}`)
+    .join('\n');
+  const body = textParts.join('\n\n');
+  const promptContent = index
+    ? `Cards (${cards.length}), in selection order:\n${index}${body ? `\n\n---\n\n${body}` : ''}`
+    : body;
+
   return {
-    promptContent: textParts.join('\n\n'),
+    promptContent,
     mediaAssets,
     cards,
+    visionImageHrefs,
   };
 }
 

@@ -4,33 +4,41 @@ import type { AIConfig } from '../components/AISettingsModal';
 import { useAppDialog } from '../components/AppDialogProvider';
 import {
   MINIMAX_DEFAULT_TTS_MODEL,
-  MINIMAX_DEFAULT_VOICE_ID,
   VOLC_ASR_DEFAULT_RESOURCE_ID,
 } from '../constants/voiceWriting';
 import { db } from '../db';
+import { stampNewCard } from '../utils/stampNewCard';
+import { aiGeneratingPatch, settleAiCardGeneration } from '../utils/aiCardGeneration';
+import { formatImageGenerationError, IMAGE_GEN_ERROR, isImageGenerationTimeoutError } from '../utils/imageGenerationWait';
 import { callUniversalAI, formatAiError } from '../services/ai';
-import { startMicCapture, type MicCapture } from '../services/micCapture';
-import { buildSearchContext, metasoSearch } from '../services/search';
-import { generateFluxDevImage, hasFlux302Credentials } from '../services/flux302';
+import type { MicCapture } from '../services/micCapture';
+import { startMicAndAsrSession } from '../services/startMicAndAsr';
+import { loadVolcAsrBiasForAskCard } from '../utils/volcAsrBias';
+import { generateGptImage2, hasFlux302Credentials, imageKeysFromAiConfig } from '../services/flux302';
+import { fulfillDrawToolFromNode, resolveDrawInputReferences } from '../services/fulfillDrawTool';
+import { fulfillSearchToolFromNode } from '../services/fulfillSearchTool';
+import { synthesizeAskFromSearch } from '../services/synthesizeAskFromSearch';
 import {
-  FLUX_IMAGE_CARD_HEIGHT,
-  FLUX_IMAGE_CARD_WIDTH,
   fluxImageBesideAnchorPos,
+  fluxImageCardSize,
   spawnFluxImageCard,
 } from '../services/spawnFluxImageCards';
-import {
-  spawnWebSearchCardsFromImages,
-  spawnWebSearchCardsFromMedia,
-  spawnWebSearchCardsFromPages,
-} from '../services/spawnWebSearchNoteCards';
-import { hasVolcAsrCredentials, openVolcAsrSession, type VolcAsrSession } from '../services/volcAsr';
+import { hasVolcAsrCredentials, type VolcAsrSession } from '../services/volcAsr';
 import { getCanvasCenterPosition } from '../utils/canvas';
+import { clipImageSourceNote } from '../utils/canvasContextImages';
 import { runCanvasStreamingAiCall } from '../utils/canvasStreamingAi';
 import { combineSystemParts, getLocaleDirective } from '../utils/aiI18n';
+import { spoorLlmSessionId } from '../utils/openRouterPromptCache';
 import { createTtsSentenceQueue } from '../utils/ttsSentenceQueue';
+import { playVoiceCue } from '../utils/voiceCue';
 import { parseVoiceDrawIntent } from '../utils/voiceDrawIntent';
+import { inferImageOrientation } from '../utils/imageOrientation';
 import { voiceAiPosition, voiceUserPosition, transformToFocusNode } from '../utils/voiceNoteLayout';
-import { parseVoiceWebSearchIntent } from '../utils/webSearchCommand';
+import { searchNoResultsI18nKey } from '../utils/webSearchCommand';
+import { hasLiveWebSearchAccess, hasMinimaxTtsAccess } from '../lib/serverConfig';
+import { liveSearchMissingKeyI18nKey, liveSearchToolsPromptKey, liveSearchUsesImmediateUserQuestion } from '../constants/webSearchBackend';
+import { spokenFallbackFromWritten } from '../utils/voiceSpokenBrief';
+import { visibleAiReplyText } from '../utils/visibleAiReply';
 import type { CanvasTransform } from './useCanvasInteraction';
 
 export type VoicePhase = 'idle' | 'listening' | 'thinking' | 'speaking';
@@ -43,9 +51,24 @@ type UseVoiceWritingModeParams = {
   /** When the user is typing in a note, ASR must not overwrite that note. */
   editingNodeId: string | null;
   setStreamingAiNodeId: (id: string | null) => void;
-  enterFullscreen: () => void;
-  exitFullscreen: () => void;
   isAnyAiBusy: boolean;
+  /** Mutable ref so the voice hook reads the latest Ask card id at the moment
+   *  {@link toggleVoiceMode} fires. Passing a value (captured at render time)
+   *  is too late: the parent sets the target and calls toggle in the same
+   *  synchronous tick, so the next render's closure still sees the old value. */
+  targetAskCardIdRef: RefObject<string | null>;
+  /** Live ASR transcript (replaced, not appended, on each Volc callback). */
+  onTranscript?: (text: string, askNodeId: string) => void;
+  /** User finished a turn (clicked mic to send) — final transcript + the Ask
+   *  card it should land on. Passing the ask id explicitly avoids a ref-read
+   *  race: the parent may clear voiceTargetAskCardIdRef synchronously right
+   *  before triggering toggleVoiceMode, so by the time this callback fires
+   *  the ref is no longer trustworthy. */
+  onCommit?: (text: string, askNodeId: string) => void;
+  onOpenSettings?: () => void;
+  /** Logged-out canvas: missing ASR/TTS keys offer Sign in, which opens Settings. */
+  onOpenLogin?: () => void;
+  onStreamingThought?: (thought: string) => void;
 };
 
 export function useVoiceWritingMode({
@@ -55,24 +78,35 @@ export function useVoiceWritingMode({
   setCanvasTransform,
   editingNodeId,
   setStreamingAiNodeId,
-  enterFullscreen,
-  exitFullscreen,
   isAnyAiBusy,
+  targetAskCardIdRef,
+  onTranscript,
+  onCommit,
+  onOpenSettings: _onOpenSettings,
+  onOpenLogin,
+  onStreamingThought,
 }: UseVoiceWritingModeParams) {
-  const { t } = useTranslation();
-  const { alert: appAlert } = useAppDialog();
+  const { t, i18n } = useTranslation();
+  const { alert: appAlert, confirm: appConfirm } = useAppDialog();
   const [voiceModeActive, setVoiceModeActive] = useState(false);
   const [voicePhase, setVoicePhase] = useState<VoicePhase>('idle');
   /** Follow-along highlight while MiniMax TTS plays a sentence on an AI card. */
   const [ttsHighlight, setTtsHighlight] = useState<{ nodeId: string; sentence: string } | null>(null);
+  const [liveTranscript, setLiveTranscript] = useState('');
 
   const activeRef = useRef(false);
   const rowRef = useRef(0);
   const currentUserNoteIdRef = useRef<string | null>(null);
+  /** Snapshot of targetAskCardId taken when voice mode starts; survives the
+   *  parent clearing targetAskCardIdRef synchronously before mic-off commit.
+   *  Cleared when voice mode fully stops. */
+  const currentTargetAskCardIdRef = useRef<string | null>(null);
   const originRef = useRef<{ x: number; y: number } | null>(null);
   const micRef = useRef<MicCapture | null>(null);
   const asrRef = useRef<VolcAsrSession | null>(null);
   const ttsRef = useRef<ReturnType<typeof createTtsSentenceQueue> | null>(null);
+  /** Card to highlight while TTS plays; empty during thinking fillers. */
+  const ttsHighlightNodeIdRef = useRef<string | null>(null);
   const handlingUtteranceRef = useRef(false);
   const pausedListeningRef = useRef(false);
   const latestTranscriptRef = useRef('');
@@ -81,6 +115,8 @@ export function useVoiceWritingMode({
   editingNodeIdRef.current = editingNodeId;
   /** Assigned while a listening session is live; mic toggle calls this to commit the turn. */
   const finishListeningRoundRef = useRef<(() => void) | null>(null);
+  /** Clears timers scoped to the current ASR listening loop. */
+  const clearListeningTimersRef = useRef<(() => void) | null>(null);
   // Synchronous gate: voiceModeActive is React state and lags behind ref writes by one tick,
   // so a fast double-click observes the same `false` in both closures and would launch two
   // sessions. `startingRef` is a ref so the second click sees `true` immediately.
@@ -93,30 +129,35 @@ export function useVoiceWritingMode({
 
   const teardownSession = useCallback(async () => {
     finishListeningRoundRef.current = null;
-    const promises: Promise<void>[] = [];
+    clearListeningTimersRef.current?.();
+    clearListeningTimersRef.current = null;
+    // Stop the TTS instance we currently own *before* awaiting mic shutdown.
+    // Mic stop can lag; if we wait and then stop `ttsRef.current`, we would
+    // kill a reply stream that started while we were still tearing down.
+    const ttsToStop = ttsRef.current;
+    ttsRef.current = null;
+    ttsHighlightNodeIdRef.current = null;
+    try {
+      ttsToStop?.stop();
+    } catch {
+      /* ignore */
+    }
     try {
       asrRef.current?.close();
     } catch {
       /* ignore */
     }
     asrRef.current = null;
-    if (micRef.current) {
-      promises.push(
-        micRef.current.stop().catch(() => {
-          /* best effort */
-        }),
-      );
-      micRef.current = null;
+    setLiveTranscript('');
+    const mic = micRef.current;
+    micRef.current = null;
+    if (mic) {
+      await mic.stop().catch(() => {
+        /* best effort */
+      });
     }
-    try {
-      ttsRef.current?.stop();
-    } catch {
-      /* ignore */
-    }
-    ttsRef.current = null;
-    if (promises.length > 0) {
-      await Promise.all(promises);
-    }
+    // Note: silenceTimer is owned by the startListeningLoop closure and cleared
+    // when a new ASR session is opened or when finishListeningRound fires.
   }, []);
 
   const focusNode = useCallback(
@@ -141,7 +182,6 @@ export function useVoiceWritingMode({
     setVoiceModeActive(false);
     setStreamingAiNodeId(null);
     setPhase('idle');
-    exitFullscreen();
   }
 
   const stopVoiceMode = useCallback(() => {
@@ -150,20 +190,27 @@ export function useVoiceWritingMode({
     handlingUtteranceRef.current = false;
     startingRef.current = false;
     latestTranscriptRef.current = '';
+    currentTargetAskCardIdRef.current = null;
     finishListeningRoundRef.current = null;
     setTtsHighlight(null);
     void teardownSession().finally(() => {
+      // Mic + ASR + TTS are all torn down at this point — fire the off-cue as the
+      // audible "voice mode ended" signal. Cues are fire-and-forget; even if Web
+      // Audio is locked or unavailable the session still exits cleanly.
+      playVoiceCue('off');
       setStreamingAiNodeId(null);
       setVoiceModeActive(false);
       setPhase('idle');
-      exitFullscreen();
     });
-  }, [exitFullscreen, setStreamingAiNodeId, teardownSession]);
+  }, [setStreamingAiNodeId, teardownSession]);
 
   const startListeningLoop = useCallback(async () => {
     if (!activeRef.current) return;
 
     await teardownSession();
+    // Capture from this click, not after the ASR handshake. Otherwise the first
+    // words spoken while the token/WS are still opening never become PCM.
+    pausedListeningRef.current = false;
 
     const creds = {
       apiKey: aiConfig.volcAsrApiKey,
@@ -173,21 +220,69 @@ export function useVoiceWritingMode({
     };
 
     latestTranscriptRef.current = '';
+    setLiveTranscript('');
 
-    // Volc result_type=full: every callback is the complete transcript so far. Replace
-    // the note — do not concatenate, or revised hypotheses stack into an "echo".
+    // Silence detector: every ASR callback arms a timer; if no callback fires
+    // within SILENCE_MS the buffered transcript is committed automatically.
+    // Lets the user just speak and wait, no second mic click required.
+    const SILENCE_MS = 1500;
+    const TRANSCRIPT_RENDER_INTERVAL_MS = 180;
+    let silenceTimer: ReturnType<typeof setTimeout> | null = null;
+    let transcriptFlushTimer: ReturnType<typeof setTimeout> | null = null;
+    let pendingTranscript: string | null = null;
+    const armSilenceTimer = () => {
+      if (silenceTimer) clearTimeout(silenceTimer);
+      silenceTimer = setTimeout(() => {
+        silenceTimer = null;
+        if (activeRef.current && !handlingUtteranceRef.current) {
+          finishListeningRoundRef.current?.();
+        }
+      }, SILENCE_MS);
+    };
+
+    const flushTranscript = async () => {
+      if (transcriptFlushTimer) {
+        clearTimeout(transcriptFlushTimer);
+        transcriptFlushTimer = null;
+      }
+      const next = pendingTranscript;
+      pendingTranscript = null;
+      if (!next) return;
+      const id = currentUserNoteIdRef.current;
+      if (id) {
+        if (editingNodeIdRef.current === id) {
+          return;
+        }
+        await db.nodes.update(id, { content: next });
+        return;
+      }
+      if (onTranscript) {
+        onTranscript(next, targetAskCardIdRef.current || currentTargetAskCardIdRef.current || '');
+      }
+    };
+
+    // Volc result_type=full: every callback is the complete transcript so far.
+    // Keep the newest value in a ref for immediate commit, but coalesce canvas
+    // writes and React work to avoid re-rendering the whole graph per packet.
     const applyTranscript = (incoming: string) => {
       const next = incoming.trim();
       if (!next || next === latestTranscriptRef.current) return;
       latestTranscriptRef.current = next;
-      const id = currentUserNoteIdRef.current;
-      // User clicked into the note to type — keep ASR for mic UX but don't clobber the editor.
-      if (id && editingNodeIdRef.current === id) {
-        console.log('[Spoor Voice] transcript skipped (user editing)', { id });
-        return;
+      pendingTranscript = next;
+      setLiveTranscript(next);
+      if (!transcriptFlushTimer) {
+        transcriptFlushTimer = setTimeout(() => {
+          void flushTranscript();
+        }, TRANSCRIPT_RENDER_INTERVAL_MS);
       }
-      console.log('[Spoor Voice] transcript → db.update', { id, next });
-      if (id) void db.nodes.update(id, { content: next });
+      armSilenceTimer();
+    };
+    clearListeningTimersRef.current = () => {
+      if (silenceTimer) clearTimeout(silenceTimer);
+      silenceTimer = null;
+      if (transcriptFlushTimer) clearTimeout(transcriptFlushTimer);
+      transcriptFlushTimer = null;
+      pendingTranscript = null;
     };
 
     const commitUtterance = (text: string) => {
@@ -198,81 +293,127 @@ export function useVoiceWritingMode({
       pausedListeningRef.current = true;
       latestTranscriptRef.current = '';
       finishListeningRoundRef.current = null;
-      void teardownSession();
-      void runAiTurn(trimmed).finally(() => {
-        handlingUtteranceRef.current = false;
-      });
+      void (async () => {
+        await teardownSession();
+        if (!activeRef.current) return;
+        void runAiTurn(trimmed).finally(() => {
+          handlingUtteranceRef.current = false;
+        });
+      })();
     };
 
     finishListeningRoundRef.current = () => {
       if (!activeRef.current || handlingUtteranceRef.current) return;
       if (voicePhaseRef.current !== 'listening') return;
+      // Cancel any pending silence auto-commit; we're committing now.
+      if (silenceTimer) {
+        clearTimeout(silenceTimer);
+        silenceTimer = null;
+      }
       const id = currentUserNoteIdRef.current;
       void (async () => {
+        // Persist the latest coalesced ASR result before reading this turn.
+        await flushTranscript();
         // Flush uncontrolled contentEditable → db before reading the note.
         const ae = document.activeElement;
         if (ae instanceof HTMLElement && ae.isContentEditable) {
           ae.blur();
           await Promise.resolve();
         }
-        const row = id ? await db.nodes.get(id) : undefined;
-        const text = (row?.content ?? latestTranscriptRef.current).trim();
-        if (!text) {
+        const text = id
+          ? (await db.nodes.get(id))?.content ?? latestTranscriptRef.current
+          : latestTranscriptRef.current;
+        const trimmed = text.trim();
+        if (!trimmed) {
           // Nothing spoken — treat mic-off as exiting voice mode.
           stopVoiceMode();
           return;
         }
-        commitUtterance(text);
+        // Ask card path: hand the final transcript to the parent (which will
+        // trigger Ask's submit). Skip the legacy runAiTurn entirely.
+        if (!id) {
+          handlingUtteranceRef.current = true;
+          pausedListeningRef.current = true;
+          latestTranscriptRef.current = '';
+          finishListeningRoundRef.current = null;
+          await teardownSession();
+          if (!activeRef.current) return;
+          onCommit?.(trimmed, targetAskCardIdRef.current || currentTargetAskCardIdRef.current || '');
+          return;
+        }
+        commitUtterance(trimmed);
       })();
     };
 
-    const session = await openVolcAsrSession(creds, {
-      onPartial: (partial) => {
-        console.log('[Spoor Voice] onPartial', JSON.stringify(partial));
-        if (!activeRef.current || pausedListeningRef.current) {
-          console.log('[Spoor Voice] onPartial dropped', { active: activeRef.current, paused: pausedListeningRef.current });
-          return;
-        }
-        applyTranscript(partial);
-      },
-      onDefinite: (text) => {
-        // Definite only finalizes transcript segments — never auto-starts the AI turn.
-        console.log('[Spoor Voice] onDefinite (accumulate only)', JSON.stringify(text));
-        if (!activeRef.current || pausedListeningRef.current) return;
-        applyTranscript(text);
-      },
-      onError: (message) => {
-        if (!activeRef.current) return;
-        console.error('[Spoor] Volc ASR', message);
-        void appAlert({ message: t('voice.asr_error', { message }) });
-        // The session is gone — surface this as a stop so the hook returns to idle.
-        stopVoiceMode();
-      },
-    });
-    asrRef.current = session;
-    console.log('[Spoor Voice] ASR session opened');
-
     let mic: MicCapture;
+    let session: VolcAsrSession;
+    let corpusContext: string | undefined;
+    const askId = targetAskCardIdRef.current || currentTargetAskCardIdRef.current;
+    if (askId) {
+      try {
+        corpusContext = await loadVolcAsrBiasForAskCard(askId, activeCanvasId);
+        if (corpusContext) {
+          console.log('[Spoor ASR] canvas bias attached', { chars: corpusContext.length });
+        }
+      } catch (e) {
+        console.warn('[Spoor ASR] canvas bias skipped', e);
+      }
+    }
     try {
-      mic = await startMicCapture((pcm) => {
-        if (!activeRef.current || pausedListeningRef.current) return;
-        asrRef.current?.sendPcm(pcm);
-      });
+      const started = await startMicAndAsrSession(
+        creds,
+        {
+          onPartial: (partial) => {
+            if (!activeRef.current || pausedListeningRef.current) {
+              return;
+            }
+            applyTranscript(partial);
+          },
+          onDefinite: (text) => {
+            // Definite only finalizes transcript segments — never auto-starts the AI turn.
+            if (!activeRef.current || pausedListeningRef.current) return;
+            applyTranscript(text);
+          },
+          onError: (message) => {
+            if (!activeRef.current) return;
+            console.error('[Spoor] Volc ASR', message);
+            void appAlert({ message: t('voice.asr_error', { message }) });
+            // The session is gone — surface this as a stop so the hook returns to idle.
+            stopVoiceMode();
+          },
+        },
+        {
+          shouldSendPcm: () => Boolean(activeRef.current && !pausedListeningRef.current),
+          asrOptions: corpusContext ? { corpusContext } : undefined,
+        },
+      );
+      mic = started.mic;
+      session = started.session;
     } catch (e) {
       if (!activeRef.current) return;
       await rollbackOnStartFailure(e);
       return;
     }
+    console.log('[Spoor Voice] ASR session opened');
 
-    // Race: user may have toggled off while getUserMedia was awaiting. If `activeRef` is now
-    // false, immediately release the new mic instead of installing it.
+    // Race: user may have toggled off while token/getUserMedia were awaiting.
     if (!activeRef.current) {
       await mic.stop().catch(() => {
         /* ignore */
       });
+      try {
+        session.close();
+      } catch {
+        /* ignore */
+      }
       return;
     }
+    asrRef.current = session;
     micRef.current = mic;
+    // Voice mode is now fully booted: ASR + mic are live and the race guard above
+    // (line ~335) has confirmed the user hasn't toggled off mid-start. Fire the
+    // on-cue so the user hears a clear "I'm listening" confirmation.
+    playVoiceCue('on');
     setPhase('listening');
     pausedListeningRef.current = false;
     // Voice mode is now fully booted: release the synchronous startingRef so the next click
@@ -293,14 +434,17 @@ export function useVoiceWritingMode({
 
       const aiNodeId = crypto.randomUUID();
       const edgeId = crypto.randomUUID();
-      await db.nodes.add({
+      await db.nodes.add(stampNewCard({
         id: aiNodeId,
         canvasId: activeCanvasId,
         type: 'ai',
         content: '',
+        userTurn: userText,
         x: aiPos.x,
         y: aiPos.y,
-      });
+        ...(userNoteId ? { threadRootContextNodeId: userNoteId } : {}),
+        ...aiGeneratingPatch(),
+      }));
       if (userNoteId) {
         await db.edges.add({
           id: edgeId,
@@ -314,12 +458,12 @@ export function useVoiceWritingMode({
       setPhase('thinking');
 
       const minimaxKey = (aiConfig.minimaxApiKey || '').trim();
-      const tts =
-        minimaxKey.length > 0
+      const tts = hasMinimaxTtsAccess(aiConfig.minimaxApiKey)
           ? createTtsSentenceQueue({
               apiKey: minimaxKey,
               model: aiConfig.minimaxTtsModel || MINIMAX_DEFAULT_TTS_MODEL,
-              voiceId: aiConfig.minimaxVoiceId || MINIMAX_DEFAULT_VOICE_ID,
+              voiceId: aiConfig.minimaxVoiceId,
+              language: i18n.language,
               onSpeakingChange: (speaking) => {
                 if (!activeRef.current) return;
                 if (speaking) setPhase('speaking');
@@ -333,105 +477,29 @@ export function useVoiceWritingMode({
                 setTtsHighlight({ nodeId: aiNodeId, sentence });
               },
               onError: (message) => {
+                const stillActive = ttsRef.current === tts;
+                if (stillActive) {
+                  ttsRef.current = null;
+                }
                 console.error('[Spoor] MiniMax TTS', message);
+                if (!stillActive) return;
                 void appAlert({ message: t('voice.tts_error', { message }) });
               },
             })
           : null;
       ttsRef.current = tts;
+      tts?.warmup();
 
       let replyText = '';
+      let lastRaw = '';
       try {
         let aiPrompt = userText;
-        const searchIntent = parseVoiceWebSearchIntent(userText);
-        if (searchIntent) {
-          const searchKey = (aiConfig.metasoApiKey || '').trim();
-          const query = searchIntent.explicitQuery;
-          if (!searchKey) {
-            void appAlert({ message: t('nodes.search_no_metaso_key') });
-            aiPrompt = '用户请求了联网搜索，但尚未配置秘塔搜索 API Key。请简洁说明这一点，并请用户在设置中配置后重试。';
-          } else if (!query) {
-            void appAlert({ message: t('nodes.search_need_text') });
-            aiPrompt = '用户请求了联网搜索，但没有提供检索关键词。请简洁请用户补充关键词。';
-          } else {
-            try {
-              const kind = searchIntent.kind;
-              const searchResult = await metasoSearch(query, {
-                apiKey: searchKey,
-                scope: kind,
-              });
-              const pages = searchResult.webpages ?? [];
-              const images = searchResult.images ?? [];
-              const videos = searchResult.videos ?? [];
-              const podcasts = searchResult.podcasts ?? [];
-              const hitCount =
-                kind === 'image'
-                  ? images.length
-                  : kind === 'video'
-                    ? videos.length
-                    : kind === 'podcast'
-                      ? podcasts.length
-                      : pages.length;
-              if (hitCount === 0) {
-                void appAlert({
-                  message:
-                    kind === 'image'
-                      ? t('nodes.search_no_images')
-                      : kind === 'video'
-                        ? t('nodes.search_no_videos')
-                        : kind === 'podcast'
-                          ? t('nodes.search_no_podcasts')
-                          : t('nodes.search_no_results'),
-                });
-                const label =
-                  kind === 'image'
-                    ? '搜图'
-                    : kind === 'video'
-                      ? '搜视频'
-                      : kind === 'podcast'
-                        ? '搜播客'
-                        : '联网搜索';
-                aiPrompt = `用户${label}“${query}”但没有获得结果。请简洁告知用户，并建议更具体的检索词。`;
-              } else {
-                const searchContext = buildSearchContext(searchResult);
-                // Show sources as linked cards without holding up the answer / TTS pipeline.
-                if (kind === 'image') {
-                  void spawnWebSearchCardsFromImages(aiNodeId, aiPos, images, activeCanvasId);
-                } else if (kind === 'video') {
-                  void spawnWebSearchCardsFromMedia(aiNodeId, aiPos, videos, activeCanvasId, 'video');
-                } else if (kind === 'podcast') {
-                  void spawnWebSearchCardsFromMedia(aiNodeId, aiPos, podcasts, activeCanvasId, 'podcast');
-                } else {
-                  void spawnWebSearchCardsFromPages(aiNodeId, aiPos, pages, activeCanvasId);
-                }
-                const doneLabel =
-                  kind === 'image'
-                    ? '图片检索'
-                    : kind === 'video'
-                      ? '视频检索'
-                      : kind === 'podcast'
-                        ? '播客检索'
-                        : '网页检索';
-                aiPrompt = [
-                  `用户的问题：${query}`,
-                  `系统已经完成${doneLabel}，结果如下（请直接据此回答，不要再发起搜索或工具调用）：`,
-                  searchContext,
-                  '要求：只用自然语言回答；禁止输出 tool_call、函数调用 JSON、XML 标签，或任何 ]<]minimax[> 之类的特殊标记；不要提及内部工具或检索流程；不确定处请说清楚。',
-                ].join('\n\n');
-              }
-            } catch (e) {
-              const msg = formatAiError(e);
-              console.error('[Spoor] voice web search failed', msg);
-              void appAlert({ message: `${t('nodes.search_failed')}\n\n${msg}` });
-              aiPrompt = `用户联网搜索“${query}”时失败。请简洁告知用户搜索暂时不可用，并建议稍后重试。`;
-            }
-          }
-        } else {
-          const drawIntent = parseVoiceDrawIntent(userText);
-          if (drawIntent) {
+        const drawIntent = parseVoiceDrawIntent(userText);
+        if (drawIntent) {
             const fluxKey = (aiConfig.api302Key || '').trim();
+            const orImageKey = imageKeysFromAiConfig(aiConfig).openrouterApiKey;
             const drawPrompt = drawIntent.prompt.trim() || userText.trim();
-            if (!hasFlux302Credentials(fluxKey)) {
+            if (!hasFlux302Credentials(fluxKey, orImageKey)) {
               void appAlert({ message: t('voice.flux_need_key') });
               aiPrompt =
                 '用户想生成配图，但尚未配置 302.AI API Key。请简洁说明这一点，并请用户在设置中填写后重试。';
@@ -440,34 +508,59 @@ export function useVoiceWritingMode({
             } else {
               // Generate beside the AI card without blocking TTS of the spoken reply.
               void (async () => {
-                try {
-                  const { url } = await generateFluxDevImage({
-                    apiKey: fluxKey,
-                    prompt: drawPrompt,
-                  });
-                  if (!activeRef.current) return;
-                  const pos = fluxImageBesideAnchorPos(aiPos, 0);
-                  await spawnFluxImageCard({
-                    canvasId: activeCanvasId,
-                    imageUrl: url,
-                    description: drawPrompt.slice(0, 80),
-                    x: pos.x,
-                    y: pos.y,
-                    linkFromId: aiNodeId,
-                  });
+                const orientation = inferImageOrientation(drawPrompt);
+                const card = fluxImageCardSize(orientation);
+                const pos = fluxImageBesideAnchorPos(aiPos, 0, card);
+                // Ghost first so the canvas shows the pending card during the wait.
+                const imageNodeId = await spawnFluxImageCard({
+                  canvasId: activeCanvasId,
+                  imageUrl: '',
+                  description: drawPrompt.slice(0, 80),
+                  x: pos.x,
+                  y: pos.y,
+                  linkFromId: aiNodeId,
+                  imageStatus: 'generating',
+                  imagePrompt: drawPrompt,
+                  imageSourceNote: clipImageSourceNote(userText),
+                  width: card.width,
+                  height: card.height,
+                });
+                // Move the camera now rather than after the model returns.
+                if (activeRef.current) {
                   setCanvasTransform(
                     transformToFocusNode(
                       pos.x,
                       pos.y,
                       transformRef.current.scale || 1,
-                      FLUX_IMAGE_CARD_WIDTH,
-                      FLUX_IMAGE_CARD_HEIGHT,
+                      card.width,
+                      card.height,
                     ),
                   );
+                }
+                try {
+                  const { url } = await generateGptImage2({
+                    apiKey: fluxKey,
+                    openrouterApiKey: orImageKey,
+                    prompt: drawPrompt,
+                    orientation,
+                    inputReferences: await resolveDrawInputReferences(aiNodeId, [imageNodeId]),
+                  });
+                  // Always resolve the ghost, even if voice mode already exited —
+                  // the card is on the canvas and would otherwise spin forever.
+                  await db.nodes.update(imageNodeId, {
+                    content: url,
+                    imageStatus: undefined,
+                    imageError: undefined,
+                  });
                 } catch (e) {
-                  const msg = formatAiError(e);
+                  const msg = isImageGenerationTimeoutError(e)
+                    ? IMAGE_GEN_ERROR.timeout
+                    : formatAiError(e);
                   console.error('[Spoor] voice flux image failed', msg);
-                  void appAlert({ message: t('voice.flux_error', { message: msg }) });
+                  await db.nodes.update(imageNodeId, { imageStatus: 'error', imageError: msg });
+                  void appAlert({
+                    message: t('voice.flux_error', { message: formatImageGenerationError(msg, t) }),
+                  });
                 }
               })();
               aiPrompt = [
@@ -475,53 +568,138 @@ export function useVoiceWritingMode({
                 '系统已在后台生成插画并放到画布上。请用一两句口语确认你理解的画面，不要输出 JSON 或工具标记。',
               ].join('\n');
             }
-          }
         }
 
         replyText = await runCanvasStreamingAiCall({
           nodeId: aiNodeId,
+          onThinking: onStreamingThought,
+          ...(liveSearchUsesImmediateUserQuestion() && userText.trim()
+            ? { immediateSearchQuery: userText.trim() }
+            : {}),
+          synthesizeFromSearch:
+            hasLiveWebSearchAccess({
+              metasoApiKey: aiConfig.metasoApiKey,
+              provider: aiConfig.provider,
+              llmApiKey: aiConfig.apiKey,
+            }) && userText.trim()
+              ? async ({ draftAnswer, hits, onStreamChunk }) => {
+                  const revised = await synthesizeAskFromSearch({
+                    config: aiConfig,
+                    t,
+                    userQuestion: userText.trim(),
+                    draftAnswer,
+                    hits,
+                    onStreamChunk: (accumulated) => {
+                      onStreamChunk(accumulated);
+                      const spoken = visibleAiReplyText(accumulated).trim();
+                      if (spoken) tts?.pushAccumulatedText(spoken);
+                    },
+                    sessionId: spoorLlmSessionId(
+                      'voice-synth',
+                      currentTargetAskCardIdRef.current || activeCanvasId,
+                    ),
+                  });
+                  lastRaw = revised;
+                  return revised;
+                }
+              : undefined,
           callAi: (onStreamChunk) =>
             callUniversalAI({
               config: aiConfig,
               systemInstruction: combineSystemParts(
-                t('ai.prompts.voiceWritingPersona'),
                 getLocaleDirective(),
+                t('ai.prompts.askCharacterIdentity', { name: t('ask.character_name') }),
+                t('ai.prompts.voiceWritingPersona'),
+                t('ai.prompts.voiceSpokenBrief'),
+                hasLiveWebSearchAccess({
+                  metasoApiKey: aiConfig.metasoApiKey,
+                  provider: aiConfig.provider,
+                  llmApiKey: aiConfig.apiKey,
+                })
+                  ? t(liveSearchToolsPromptKey())
+                  : '',
+                hasFlux302Credentials(aiConfig.api302Key, imageKeysFromAiConfig(aiConfig).openrouterApiKey) ? t('ai.prompts.drawToolAvailable') : '',
               ),
               prompt: aiPrompt,
+              sessionId: spoorLlmSessionId(
+                'voice',
+                currentTargetAskCardIdRef.current || activeCanvasId,
+              ),
               onStreamChunk: (accumulated) => {
+                lastRaw = accumulated;
                 onStreamChunk(accumulated);
-                tts?.pushAccumulatedText(accumulated);
+                const spoken = visibleAiReplyText(accumulated).trim();
+                if (spoken) tts?.pushAccumulatedText(spoken);
               },
             }),
+          onDrawImages: (images) => {
+            void fulfillDrawToolFromNode({
+              nodeId: aiNodeId,
+              images,
+              ...imageKeysFromAiConfig(aiConfig),
+              onMissingKey: () => {
+                void appAlert({ message: t('voice.flux_need_key') });
+              },
+              onError: (message) => {
+                void appAlert({ message: t('voice.flux_error', { message: formatImageGenerationError(message, t) }) });
+              },
+            });
+          },
+          onSearchTools: async (searches) =>
+            fulfillSearchToolFromNode({
+              nodeId: aiNodeId,
+              searches,
+              userQuestion: userText.trim(),
+              apiKey: aiConfig.metasoApiKey,
+              openRouterApiKey: aiConfig.provider === 'openrouter' ? aiConfig.apiKey : '',
+              llmProvider: aiConfig.provider,
+              reportEmpty: false,
+              onMissingKey: () => {
+                void appAlert({ message: t(liveSearchMissingKeyI18nKey()) });
+              },
+              onError: (message) => {
+                void appAlert({ message: `${t('nodes.search_failed')}\n\n${message}` });
+              },
+              filterWebpages: {
+                config: aiConfig,
+                t,
+                sessionId: spoorLlmSessionId('ask-web-filter', aiNodeId),
+              },
+            }),
+          onSearchNoResults: (detail) => {
+            void appAlert({ message: t(searchNoResultsI18nKey(detail?.scopes ?? [])) });
+          },
         });
 
+        const spoken =
+          visibleAiReplyText(lastRaw).trim() || spokenFallbackFromWritten(replyText);
+        if (spoken) tts?.pushAccumulatedText(spoken);
         tts?.flush();
         if (tts) {
           setPhase('speaking');
           await tts.waitUntilIdle();
-        }
-
-        if (!replyText) {
           try {
-            await db.edges.delete(edgeId);
+            tts.stop();
           } catch {
             /* ignore */
           }
         }
+
       } catch (e) {
-        try {
-          await db.edges.delete(edgeId);
-        } catch {
-          /* ignore */
-        }
         const msg = formatAiError(e);
         console.error('[Spoor] voice AI turn failed', msg);
-        void appAlert({ message: t('voice.ai_error', { message: msg }) });
+        try {
+          await settleAiCardGeneration(aiNodeId, msg);
+        } catch {
+          /* stream helper may already have marked the card */
+        }
       } finally {
+        await settleAiCardGeneration(aiNodeId);
         setStreamingAiNodeId(null);
         setTtsHighlight(null);
         ttsRef.current?.stop();
         ttsRef.current = null;
+        ttsHighlightNodeIdRef.current = null;
       }
 
       if (!activeRef.current) return;
@@ -531,14 +709,14 @@ export function useVoiceWritingMode({
       rowRef.current = nextRow;
       const nextPos = voiceUserPosition(nextOrigin, nextRow);
       const nextUserId = crypto.randomUUID();
-      await db.nodes.add({
+      await db.nodes.add(stampNewCard({
         id: nextUserId,
         canvasId: activeCanvasId,
         type: 'text',
         content: '',
         x: nextPos.x,
         y: nextPos.y,
-      });
+      }));
       if (replyText) {
         await db.edges.add({
           id: crypto.randomUUID(),
@@ -555,7 +733,6 @@ export function useVoiceWritingMode({
     activeCanvasId,
     aiConfig,
     appAlert,
-    exitFullscreen,
     focusNode,
     rollbackOnStartFailure,
     setStreamingAiNodeId,
@@ -564,6 +741,25 @@ export function useVoiceWritingMode({
     teardownSession,
     transformRef,
   ]);
+
+  const promptMissingVoiceKeys = useCallback(
+    async (kind: 'asr' | 'tts') => {
+      if (!onOpenLogin) {
+        await appAlert({
+          message: t(kind === 'asr' ? 'voice.need_asr_keys' : 'voice.need_minimax_key'),
+        });
+        return;
+      }
+      const goLogin = await appConfirm({
+        title: t('dialog.alert_title'),
+        message: t(kind === 'asr' ? 'voice.need_asr_keys_guest' : 'voice.need_minimax_key'),
+        confirmLabel: t('cloud.signIn'),
+        cancelLabel: t('dialog.ok'),
+      });
+      if (goLogin) onOpenLogin();
+    },
+    [appAlert, appConfirm, onOpenLogin, t],
+  );
 
   const startVoiceMode = useCallback(async () => {
     // Synchronous guard so back-to-back clicks can't both start.
@@ -578,12 +774,12 @@ export function useVoiceWritingMode({
     });
     if (!asrOk) {
       startingRef.current = false;
-      void appAlert({ message: t('voice.need_asr_keys') });
+      void promptMissingVoiceKeys('asr');
       return;
     }
-    if (!(aiConfig.minimaxApiKey || '').trim()) {
+    if (!hasMinimaxTtsAccess(aiConfig.minimaxApiKey)) {
       startingRef.current = false;
-      void appAlert({ message: t('voice.need_minimax_key') });
+      void promptMissingVoiceKeys('tts');
       return;
     }
 
@@ -591,22 +787,31 @@ export function useVoiceWritingMode({
     setVoiceModeActive(true);
     rowRef.current = 0;
     handlingUtteranceRef.current = false;
-    enterFullscreen();
 
     try {
-      const { x, y } = getCanvasCenterPosition(transformRef.current);
-      const userNoteId = crypto.randomUUID();
-      await db.nodes.add({
-        id: userNoteId,
-        canvasId: activeCanvasId,
-        type: 'text',
-        content: '',
-        x,
-        y,
-      });
-      currentUserNoteIdRef.current = userNoteId;
-      originRef.current = { x, y };
-      focusNode(x, y);
+      // Read the ref AT call time, not at render time. toggleVoiceMode is fired
+      // synchronously after the parent updates the ref, so this sees the fresh
+      // value even before React re-renders.
+      const targetAskCardId = targetAskCardIdRef.current;
+      currentTargetAskCardIdRef.current = targetAskCardId;
+      if (!targetAskCardId) {
+        // Legacy fallback: spawn a user-note as the voice buffer. Not reachable
+        // from the toolbar anymore (Ask card is the only entry point), but
+        // kept so a future caller without a target doesn't crash.
+        const { x, y } = getCanvasCenterPosition(transformRef.current);
+        const userNoteId = crypto.randomUUID();
+        await db.nodes.add(stampNewCard({
+          id: userNoteId,
+          canvasId: activeCanvasId,
+          type: 'text',
+          content: '',
+          x,
+          y,
+        }));
+        currentUserNoteIdRef.current = userNoteId;
+        originRef.current = { x, y };
+        focusNode(x, y);
+      }
 
       try {
         await startListeningLoop();
@@ -619,14 +824,12 @@ export function useVoiceWritingMode({
   }, [
     activeCanvasId,
     aiConfig,
-    appAlert,
-    enterFullscreen,
-    exitFullscreen,
     focusNode,
+    targetAskCardIdRef,
     isAnyAiBusy,
+    promptMissingVoiceKeys,
     rollbackOnStartFailure,
     startListeningLoop,
-    t,
     transformRef,
     voiceModeActive,
   ]);
@@ -663,6 +866,7 @@ export function useVoiceWritingMode({
         /* ignore */
       }
       ttsRef.current = null;
+      ttsHighlightNodeIdRef.current = null;
       return;
     }
     if (phase === 'listening' && !handlingUtteranceRef.current) {
@@ -677,21 +881,182 @@ export function useVoiceWritingMode({
       activeRef.current = false;
       startingRef.current = false;
       void teardownSession();
-      // Voice mode may have put the document in fullscreen; restore on unmount.
-      if (document.fullscreenElement) {
-        void document.exitFullscreen().catch(() => {
-          /* ignore */
-        });
-      }
     };
   }, [teardownSession]);
+
+  /**
+   * TTS queue for the spoken reply. Follow-along highlight is skipped until a
+   * reply card id is set. Creating the queue starts the MiniMax handshake so
+   * the first sentence does not wait on token + WebSocket.
+   */
+  const ensureTtsQueue = (replyNodeId?: string) => {
+    if (replyNodeId) ttsHighlightNodeIdRef.current = replyNodeId;
+    if (ttsRef.current) return ttsRef.current;
+    if (!hasMinimaxTtsAccess(aiConfig.minimaxApiKey)) return null;
+    const minimaxKey = (aiConfig.minimaxApiKey || '').trim();
+    let tts: ReturnType<typeof createTtsSentenceQueue>;
+    tts = createTtsSentenceQueue({
+      apiKey: minimaxKey,
+      model: aiConfig.minimaxTtsModel || MINIMAX_DEFAULT_TTS_MODEL,
+      voiceId: aiConfig.minimaxVoiceId,
+      language: i18n.language,
+      onSpeakingChange: (speaking) => {
+        if (!activeRef.current) return;
+        if (speaking) setPhase('speaking');
+      },
+      onActiveSentenceChange: (sentence) => {
+        if (!activeRef.current) return;
+        const nodeId = ttsHighlightNodeIdRef.current;
+        if (!sentence || !nodeId) {
+          setTtsHighlight(null);
+          return;
+        }
+        setTtsHighlight({ nodeId, sentence });
+      },
+      onError: (message) => {
+        const stillActive = ttsRef.current === tts;
+        if (stillActive) {
+          try {
+            ttsRef.current.stop();
+          } catch {
+            /* ignore */
+          }
+          ttsRef.current = null;
+        }
+        console.error('[Spoor] MiniMax TTS', message);
+        if (!stillActive) return;
+        void appAlert({ message: t('voice.tts_error', { message }) });
+      },
+    });
+    ttsRef.current = tts;
+    tts.warmup();
+    return tts;
+  };
+
+  /** Drop the current ASR WebSocket session if any. Called whenever TTS is
+   *  about to start so the Volc server doesn't sit on an idle WS until its
+   *  MaxDuration timeout fires (code:100008 "Timeout waiting next packet").
+   *  Mic capture is left alone — pausedListeningRef alone is enough to drop
+   *  frames, but we want the WS itself closed. startListeningLoop opens a
+   *  fresh session once TTS finishes. */
+  const closeAsr = useCallback(() => {
+    if (!asrRef.current) return;
+    try {
+      asrRef.current.close();
+    } catch {
+      /* ignore */
+    }
+    asrRef.current = null;
+  }, []);
+
+  /** Push written-card text into the TTS queue as the stream accumulates. */
+  const pushTtsChunk = useCallback(
+    (replyNodeId: string, accumulated: string) => {
+      closeAsr();
+      const spoken = visibleAiReplyText(accumulated).trim();
+      if (!spoken) return;
+      const tts = ensureTtsQueue(replyNodeId);
+      if (!tts) return;
+      tts.pushAccumulatedText(spoken);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [aiConfig.minimaxApiKey, aiConfig.minimaxTtsModel, aiConfig.minimaxVoiceId, closeAsr, i18n.language, t],
+  );
+
+  /** Flush leftover carry, wait for audio already in flight, then listen again. */
+  const endTtsReply = useCallback(
+    async (replyNodeId: string, spokenText: string): Promise<void> => {
+      if (!activeRef.current) return;
+      // Reuse the warmed / in-flight queue so first-sentence audio is not thrown away.
+      const tts = replyNodeId ? ensureTtsQueue(replyNodeId) : ttsRef.current;
+      if (!tts) {
+        handlingUtteranceRef.current = false;
+        if (targetAskCardIdRef.current) {
+          try {
+            await startListeningLoop();
+          } catch (e) {
+            await rollbackOnStartFailure(e);
+          }
+        }
+        return;
+      }
+      if (spokenText.trim()) {
+        tts.pushAccumulatedText(spokenText.trim());
+      }
+      tts.flush();
+      await tts.waitUntilIdle();
+      try {
+        tts.stop();
+      } catch {
+        /* ignore */
+      }
+      if (ttsRef.current === tts) ttsRef.current = null;
+      ttsHighlightNodeIdRef.current = null;
+      setTtsHighlight(null);
+      handlingUtteranceRef.current = false;
+
+      if (!activeRef.current) return;
+      if (targetAskCardIdRef.current) {
+        try {
+          await startListeningLoop();
+        } catch (e) {
+          await rollbackOnStartFailure(e);
+        }
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [aiConfig.minimaxApiKey, aiConfig.minimaxTtsModel, aiConfig.minimaxVoiceId, rollbackOnStartFailure, startListeningLoop, i18n.language, t, targetAskCardIdRef],
+  );
+
+  /** Stop the current TTS stream mid-playback. Clears the queue, drops the
+   *  highlight, cancels any pending silence auto-commit and mic-off commit,
+   *  and re-opens ASR so the user can keep talking. Does NOT exit voice mode. */
+  const stopTts = useCallback(async (): Promise<void> => {
+    if (ttsRef.current) {
+      try {
+        ttsRef.current.stop();
+      } catch {
+        /* ignore */
+      }
+      ttsRef.current = null;
+      ttsHighlightNodeIdRef.current = null;
+    }
+    setTtsHighlight(null);
+    handlingUtteranceRef.current = false;
+    // Cancel any pending silence timer / mic-off commit — the user pressed
+    // stop, not commit, so the buffered speech must NOT auto-submit to the AI.
+    finishListeningRoundRef.current = null;
+    latestTranscriptRef.current = '';
+    if (!activeRef.current) return;
+    if (targetAskCardIdRef.current) {
+      try {
+        await startListeningLoop();
+      } catch (e) {
+        await rollbackOnStartFailure(e);
+      }
+    }
+  }, [rollbackOnStartFailure, startListeningLoop, targetAskCardIdRef]);
+
+  /** Caller flips phase to "thinking"; MiniMax handshake starts immediately. */
+  const markThinking = useCallback(() => {
+    if (!activeRef.current) return;
+    setPhase('thinking');
+    closeAsr();
+    ensureTtsQueue();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [aiConfig.minimaxApiKey, aiConfig.minimaxTtsModel, aiConfig.minimaxVoiceId, closeAsr, i18n.language, t]);
 
   return {
     voiceModeActive,
     voicePhase,
+    liveTranscript,
     ttsHighlight,
     toggleVoiceMode,
     stopVoiceMode,
     stopVoiceActivity,
+    pushTtsChunk,
+    endTtsReply,
+    stopTts,
+    markThinking,
   };
 }

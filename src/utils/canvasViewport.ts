@@ -60,3 +60,57 @@ export function saveCanvasViewport(canvasId: string, transform: CanvasTransform)
     // ignore quota / private mode
   }
 }
+
+/** Pan/zoom so axis-aligned world rects fit inside the viewport with padding. */
+export function transformToFitRects(
+  rects: { x: number; y: number; width: number; height: number }[],
+  viewport: { width: number; height: number },
+  padding = 96,
+): CanvasTransform {
+  if (rects.length === 0 || viewport.width <= 0 || viewport.height <= 0) {
+    return { ...DEFAULT_TRANSFORM };
+  }
+
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const r of rects) {
+    minX = Math.min(minX, r.x);
+    minY = Math.min(minY, r.y);
+    maxX = Math.max(maxX, r.x + r.width);
+    maxY = Math.max(maxY, r.y + r.height);
+  }
+
+  const bw = Math.max(1, maxX - minX);
+  const bh = Math.max(1, maxY - minY);
+  const scale = Math.min(
+    5,
+    Math.max(
+      0.1,
+      Math.min((viewport.width - padding * 2) / bw, (viewport.height - padding * 2) / bh),
+    ),
+  );
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
+  return {
+    scale,
+    x: viewport.width / 2 - cx * scale,
+    y: viewport.height / 2 - cy * scale,
+  };
+}
+
+/** Pan/zoom so every card's bbox fits inside the viewport with padding. */
+export function transformToFitNodes(
+  nodes: { x: number; y: number; width?: number; height?: number }[],
+  viewport: { width: number; height: number },
+  padding = 96,
+): CanvasTransform {
+  if (nodes.length === 0) return { ...DEFAULT_TRANSFORM };
+  const rects = nodes.map((n) => {
+    const w = n.width && n.width > 0 ? n.width : 320;
+    const h = n.height && n.height > 0 ? n.height : 200;
+    return { x: n.x, y: n.y, width: w, height: h };
+  });
+  return transformToFitRects(rects, viewport, padding);
+}

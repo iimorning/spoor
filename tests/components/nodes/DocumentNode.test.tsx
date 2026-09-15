@@ -3,6 +3,10 @@ import { render, screen } from '@testing-library/react';
 import React from 'react';
 import { DocumentNode } from '../../../src/components/nodes/DocumentNode';
 import { CANVAS_NODE_CONTEXT_TEXT_ATTR } from '../../../src/utils/canvasNodeContextText';
+import {
+  DOCUMENT_CARD_AUTO_MAX_HEIGHT_PX,
+  DOCUMENT_CARD_SCROLL_MAX_HEIGHT_PX,
+} from '../../../src/utils/canvas';
 import type { CanvasNode } from '../../../src/db';
 
 vi.mock('lucide-react', () => ({
@@ -136,6 +140,36 @@ describe('DocumentNode', () => {
       const span = container.querySelector('span[title]')!;
       expect(span).toHaveClass('truncate');
       expect(span).toHaveClass('max-w-[120px]');
+    });
+  });
+
+  describe('height cap (book footprint)', () => {
+    it('未拖拽高度时外壳有 maxHeight，长 Word 在卡内滚动', () => {
+      const { getByTestId } = render(
+        <DocumentNode
+          node={makeNode({ content: '<p>long</p>' })}
+          editingNodeId={null}
+          setEditingNodeId={vi.fn()}
+        />,
+      );
+      expect(getByTestId('document-node-shell').style.maxHeight).toBe(
+        `${DOCUMENT_CARD_AUTO_MAX_HEIGHT_PX}px`,
+      );
+      expect(getByTestId('document-body-scroll').style.maxHeight).toBe(
+        `${DOCUMENT_CARD_SCROLL_MAX_HEIGHT_PX}px`,
+      );
+    });
+
+    it('用户拖拽过高度后外壳取消 maxHeight', () => {
+      const { getByTestId } = render(
+        <DocumentNode
+          node={makeNode({ content: '<p>long</p>', height: 700 })}
+          editingNodeId={null}
+          setEditingNodeId={vi.fn()}
+        />,
+      );
+      expect(getByTestId('document-node-shell').style.maxHeight).toBe('');
+      expect(getByTestId('document-body-scroll').style.maxHeight).toBe('');
     });
   });
 

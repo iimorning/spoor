@@ -5,6 +5,7 @@ import type { NoteNodeProps } from '../../types';
 import { NoteBody } from '../NoteBody';
 import { receiptDerivedFromId } from '../receiptDerivedFromId';
 import { WebSearchSourcesToggle } from '../../WebSearchSourcesToggle';
+import { NOTE_CARD_AUTO_MAX_HEIGHT_PX } from '../../../../utils/canvas';
 
 export function NoteLayoutReceipt({
   node,
@@ -13,6 +14,9 @@ export function NoteLayoutReceipt({
   webSearchSourceCount = 0,
   webSearchSourcesCollapsed = false,
   onToggleWebSearchSources,
+  notePileCount = 0,
+  notePileCollapsed = false,
+  onToggleNotePile,
 }: NoteNodeProps) {
   const { t, i18n } = useTranslation();
 
@@ -33,16 +37,24 @@ export function NoteLayoutReceipt({
   const viewReceipt =
     'markdown-body font-mono text-[13px] leading-[1.4] text-[#2c281f] [text-shadow:0_0_1px_rgba(44,40,31,0.2)]';
   const editClassName = `${editReceipt} empty:before:text-[#2c281f]/40 empty:before:content-['${t('nodes.type_something')}']`;
+  const userSizedHeight = Boolean(node.height && node.height > 0);
 
   return (
     <div
-      className="note-surface-receipt receipt-note-shadow relative flex h-full w-full min-h-0 flex-col transition-all duration-500"
-      style={{ outline: '1px solid transparent' }}
+      data-testid="note-node-shell"
+      className="note-cjk note-surface-receipt receipt-note-shadow relative flex h-full w-full min-h-0 flex-col overflow-hidden transition-all duration-500"
+      style={{
+        outline: '1px solid transparent',
+        ...(userSizedHeight ? {} : { maxHeight: NOTE_CARD_AUTO_MAX_HEIGHT_PX }),
+      }}
     >
       <WebSearchSourcesToggle
-        count={webSearchSourceCount}
-        collapsed={webSearchSourcesCollapsed}
-        onToggle={onToggleWebSearchSources}
+        count={notePileCount >= 2 ? notePileCount : webSearchSourceCount}
+        collapsed={notePileCount >= 2 ? notePileCollapsed : webSearchSourcesCollapsed}
+        onToggle={notePileCount >= 2 ? onToggleNotePile : onToggleWebSearchSources}
+        minCount={2}
+        collapseTitle={notePileCount >= 2 ? t('nodes.collapse_note_pile') : undefined}
+        expandTitle={notePileCount >= 2 ? t('nodes.expand_note_pile') : undefined}
       />
       <div className="receipt-jagged-top note-receipt-paper shrink-0 rotate-180" aria-hidden />
       <div className="note-receipt-paper relative flex min-h-0 flex-1 flex-col overflow-hidden px-5 py-5">
@@ -82,7 +94,7 @@ export function NoteLayoutReceipt({
           setEditingNodeId={setEditingNodeId}
           editClassName={editClassName}
           viewClassName={viewReceipt}
-          emptyNoteMarkdown={`_${t('nodes.empty_note')}_`}
+          emptyNotePlaceholder={t('nodes.empty_note')}
           scrollAreaClassName="note-receipt-markdown relative z-10 min-h-0 flex-1 overflow-y-auto pr-1 custom-scrollbar"
         />
 

@@ -55,5 +55,5 @@ scripts\tauri-build-release.cmd
 |------|------|
 | 系统 | Windows 10/11，64 位 |
 | 磁盘 | 约 50–150 MB（视依赖而定） |
-| 网络 | 使用云端 AI / 研究实验室联网检索时需要 |
+| 网络 | 使用云端 AI / 画布联网搜索时需要 |
 | 本地 LLM | 可选，见 [LOCAL_LLM.md](./LOCAL_LLM.md) |

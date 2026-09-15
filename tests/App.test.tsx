@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen, act, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { db } from '../src/db';
+import { ONBOARDING_STORAGE_KEY } from '../src/onboarding/useOnboarding';
 
 // --- Mock 外部依赖 ---
 
@@ -20,17 +21,30 @@ vi.mock('react-i18next', () => ({
     t: (key: string, opts?: Record<string, unknown>) => {
       const translations: Record<string, string> = {
         'sidebar.personal': '画布',
-        'sidebar.reference': '长文',
-        'sidebar.lab': '研究',
+        'sidebar.archive': '知识存档',
         'sidebar.agents': '角色',
+        'nodes.essay': '长文',
+        'nodes.essay_open': '打开',
+        'nodes.essay_untitled': '未命名长文',
+        'nodes.essay_loading': '加载长文…',
+        'nodes.essay_missing': '这篇长文不存在或已被删除。',
+        'canvas.add_essay_card': '长文卡',
+        'reference.empty_body': '空正文',
         'sidebar.search_placeholder': '搜索记忆...',
         'sidebar.new_note': '新建便签',
         'sidebar.publish': '合成文章',
+        'sidebar.pocket': '备忘',
+        'sidebar.archive_waiting': `${opts?.count ?? ''} 条手机备忘待放入画布`,
         'sidebar.settings': '设置',
+        'sidebar.rail_label': '快捷导航',
         'canvas.zoom': '缩放',
         'canvas.full_screen': '全屏',
         'canvas.history': '历史记录',
         'canvas.new_canvas': '新建画布',
+        'canvas.new_blank_canvas': '新建空白画布',
+        'canvas.new_folder': '新建文件夹',
+        'canvas.new_folder_name': `文件夹 ${opts?.number ?? ''}`,
+        'canvas.history_drag_hint': '长按可调整顺序，拖到文件夹上即可归类',
         'canvas.default_name': `画布 ${opts?.number ?? ''}`,
         'canvas.rename': '重命名',
         'canvas.delete_note': '删除便签',
@@ -66,6 +80,9 @@ vi.mock('react-i18next', () => ({
         'settings.close': '关闭',
         'settings.save': '保存配置',
         'ai.input_placeholder': '让 AI 构思一些想法或段落...',
+        'ask.input_placeholder': '把卡片连到我身上，再向我提问...',
+        'canvas.add_ask_card': '阿狸',
+        'sidebar.new_theme_card': '新建主题',
         'ai.loading': 'AI 思考中...',
         'agents.personas': '人格设定',
         'agents.new_persona': '新建人格',
@@ -100,49 +117,43 @@ vi.mock('react-i18next', () => ({
         'settings.docs_security_note': '切勿向他人泄露密钥。',
         'agents.select_persona': '请选择一个人格',
         'agents.select_subtitle': '从侧边栏选择一个人格或创建一个新人格。',
-        'lab.investigate': '您想调查什么？',
-        'lab.placeholder': '例如：空间衰减与记忆丧失之间的关系...',
-        'lab.approve': '批准并执行',
-        'lab.executing': '智能体执行日志',
-        'lab.report': '综合报告',
-        'lab.new_research': '新研究',
-        'lab.past_sessions': '历史会话',
-        'lab.no_past_sessions': '暂无已完成的研究。完成一次研究后会显示在这里。',
-        'lab.idle_intro': '可以输入宽泛主题或具体论点。智能体会拟定研究计划、对照档案与资料并生成综合报告。',
-        'lab.suggested_tag_1': '# 空间编码',
-        'lab.suggested_tag_2': '# 人物弧光',
-        'lab.sources_utilized': '已用来源',
-        'lab.processed': '已处理',
-        'lab.demo_source_card_1_title': '第四章：档案室',
-        'lab.demo_source_card_1_desc': '找到 3 处与「衰败」相关的隐喻。',
-        'lab.demo_source_card_2_title': '参考文献 042：空间编码',
-        'lab.demo_source_card_2_desc': '串联创伤理论与蓝图意象。',
-        'lab.target_inquiry': '研究主题',
-        'lab.recommended_plan_title': '推荐研究计划',
-        'lab.plan_edit_hint': '可直接编辑各步标题与说明。',
-        'lab.plan_revision_placeholder': '说明希望如何修改大纲…',
-        'lab.plan_revision_apply': '让 AI 按说明更新大纲',
-        'lab.plan_revision_applying': '正在更新大纲…',
-        'lab.searching': '正在联网搜索...',
-        'lab.search_complete': `已获取 ${opts?.count ?? 0} 条网络来源`,
-        'lab.search_fallback': '搜索不可用，使用离线模式',
-        'lab.search_preparing': '正在准备联网搜索…',
-        'lab.search_offline_no_key': '离线模式 — 未配置 Metaso API 密钥。',
-        'lab.stage_resolving_context': '正在整理上下文…',
-        'lab.stage_generating_report': '正在生成报告…',
-        'lab.report_footer_web': `基于 ${opts?.count ?? 0} 条网络来源与 LLM 综合`,
-        'lab.report_footer_offline': '离线模式 — 仅由 LLM 综合',
-        'lab.conclusion_label': '智能体建议与结论：',
         'reference.index_title': '档案索引',
         'reference.search_refs': '搜索参考文献...',
         'reference.citation': '引用文献',
         'reference.metadata_notes': '元数据与笔记',
         'reference.tags': '标签',
-        'reference.linked_drafts': '关联画布',
+        'reference.linked_drafts': '关联便签',
         'reference.private_notes': '私密笔记',
         'reference.notes_placeholder': '为此参考文献添加您自己的笔记...',
         'app.name': '记忆建筑师',
         'app.description': '空间思维与知识合成',
+        'onboarding.cta_next': '下一步',
+        'onboarding.cta_done': '完成',
+        'onboarding.cta_skip': '跳过引导',
+        'onboarding.step1.title': '你的画布',
+        'onboarding.step1.body': '这是你的画布。点击 + 可添加便签、主题、问卡（阿狸）或角色卡。',
+        'onboarding.step2.title': '向画布提问',
+        'onboarding.step2.body': '把卡片连到阿狸问卡上提问，AI 会把卡片当作上下文来回答。',
+        'onboarding.step3.title': '说出来',
+        'onboarding.step3.body': '按 Tab 或点击麦克风进入语音模式；工具栏上每个角色都有自己的麦。',
+        'onboarding.step4.title': '合成文章',
+        'onboarding.step4.body': '选中 2 张以上卡片，点这里生成一篇合成长文。',
+        'onboarding.step5.title': '左侧栏',
+        'onboarding.step5.body': '这里是知识存档、角色和设置。点击切换标签，再点当前标签可回到画布。',
+        'onboarding.step6.title': '新建画布',
+        'onboarding.step6.body': '点右上角历史记录，再点「新建空白画布」。当前画布会原样保留。',
+        'onboarding.step7.title': '知识存档',
+        'onboarding.step7.body': '从画布归档的卡片都集中在这里，可搜索、可拖回画布。',
+        'onboarding.step8.title': '角色工作室',
+        'onboarding.step8.body': '自定义 AI 角色，各自以不同声音读画布。按 Esc 回到画布。',
+        'onboarding.restart_button': '重新播放引导',
+        'onboarding.restart_section': '新手引导',
+        'pocket.title': '备忘',
+        'pocket.empty': '备忘还是空的。',
+        'pocket.new': '新记一条',
+        'pocket.placeholder': '想到什么就写。',
+        'pocket.open_canvas': '打开画布',
+        'canvas.default_workspace_name': '主工作区',
       };
       return translations[key] ?? key;
     },
@@ -160,12 +171,33 @@ vi.mock('lucide-react', () => {
   const iconNames = [
     'MessageSquare', 'Terminal', 'Network', 'Search', 'Bell', 'Settings', 'Plus',
     'BookOpen', 'Users', 'Library', 'Microscope', 'Sparkles', 'Maximize2', 'Minimize2',
-    'Quote', 'Brain', 'Bot', 'Coffee', 'Wand2', 'Send', 'SlidersHorizontal', 'History', 'ZoomIn',
-    'Focus', 'Image', 'FilePlus', 'Trash2', 'Link2', 'X', 'Camera', 'ChevronLeft',
+    'Quote', 'Brain', 'Bot', 'Coffee', 'Wand2', 'Send', 'SlidersHorizontal',     'History', 'ZoomIn',
+    'Focus', 'Scan', 'Image', 'FilePlus', 'Trash2', 'Link2', 'X', 'Camera', 'ChevronLeft',
     'ChevronRight', 'Check', 'Cpu', 'ArrowRight', 'ListChecks', 'CheckCircle2',
     'Loader2', 'PenLine', 'Edit3', 'FileText', 'Globe', 'ExternalLink', 'RotateCcw',
     'Monitor', 'Download', 'Mic', 'MicOff', 'Layers2',
     'GripVertical', 'Pencil', 'Video', 'Layers', 'Type',
+    'Sun', 'Moon',
+    'Cloud', 'CloudOff', 'LogOut',
+    'Headphones', 'GitBranch', 'Square', 'SquareDashed', 'StickyNote', 'MapPin',
+    'MessagesSquare', 'Play', 'Pause', 'Waves', 'Droplets', 'Trees', 'Flower2',
+    'AudioLines', 'SkipBack', 'SkipForward', 'RotateCcw',
+    'Volume2', 'VolumeX',
+    'Archive', 'ArrowUpRight',
+    'Folder', 'FolderPlus', 'FolderOpen', 'Inbox',
+    'Grid3x3', 'Share2', 'Heart', 'Bookmark', 'MessageCircle', 'CreditCard',
+    'Mail', 'Github',
+    // AmbienceNode's SceneIcon — omitting these throws and takes the whole tree down.
+    'CloudLightning', 'Flame', 'Snowflake',
+    // From AgentsStudio "From document" button + Essay editor toolbar (commits ahead of origin/master).
+    'FileUp', 'FileDown', 'Copy',
+    'PanelLeftOpen', 'PanelLeftClose',
+    'Bold', 'Italic',
+    'Heading1', 'Heading2', 'Heading3',
+    'List', 'ListOrdered',
+    'Undo2', 'Redo2',
+    'Link',
+    'NotebookPen', 'LayoutGrid', 'ArrowLeft', 'CircleUser',
   ];
   const icons: Record<string, React.FC> = {};
   for (const name of iconNames) {
@@ -200,6 +232,8 @@ vi.mock('motion', () => ({
 
 // 导入被测组件
 import App from '../src/App';
+import { PHONE_MQ } from '../src/hooks/useAdaptiveLayout';
+import { POCKET_CANVAS_ID } from '../src/utils/pocketNotes';
 
 describe('App 组件', () => {
   beforeEach(async () => {
@@ -209,16 +243,13 @@ describe('App 组件', () => {
     await db.agents.clear();
     await db.edges.clear();
     await db.canvases.clear();
-    await db.researchSessions.clear();
     await db.agentSandboxThreads.clear();
     localStorage.clear();
+    // 抑制新手引导，避免现有测试被 overlay 干扰；专门测引导的集成测试自己清 key。
+    localStorage.setItem(ONBOARDING_STORAGE_KEY, 'true');
   });
 
-  // --- 辅助函数：在 <a> 标签中查找导航链接 ---
-  const getNavLinks = () => {
-    const nav = document.querySelector('nav');
-    return nav ? Array.from(nav.querySelectorAll('a')) : [];
-  };
+  const getRail = () => screen.getByTestId('side-rail');
 
   // --- 基础渲染 ---
   describe('基础渲染', () => {
@@ -226,67 +257,88 @@ describe('App 组件', () => {
       await act(async () => {
         render(<App />);
       });
-      // 侧边栏导航链接应存在（无「导航」分区标题）
-      const nav = document.querySelector('nav');
-      expect(nav).toBeTruthy();
-      expect(nav?.textContent).not.toContain('导航');
-      const links = getNavLinks();
-      const linkTexts = links.map(a => a.textContent?.trim());
-      expect(linkTexts).toContain('画布');
-      expect(linkTexts).toContain('长文');
-      expect(linkTexts).toContain('研究');
-      expect(linkTexts).toContain('角色');
+      const rail = getRail();
+      expect(rail).toBeInTheDocument();
+      expect(screen.queryByTestId('rail-pocket')).not.toBeInTheDocument();
+      expect(screen.getByTestId('rail-archive')).toBeInTheDocument();
+      expect(screen.getByLabelText('知识存档')).toBeInTheDocument();
+      expect(screen.getByLabelText('角色')).toBeInTheDocument();
+      expect(screen.getByLabelText('设置')).toBeInTheDocument();
+      expect(screen.queryByLabelText('画布')).not.toBeInTheDocument();
+      expect(screen.queryByText('长文')).not.toBeInTheDocument();
+      expect(screen.queryByText('研究')).not.toBeInTheDocument();
     });
 
-    it('渲染用户默认名称', async () => {
+    it('损坏的本地 AI 配置不会导致启动白屏', async () => {
+      localStorage.setItem('ai_config', '{broken json');
       await act(async () => {
         render(<App />);
       });
-      expect(screen.getByText('Main Library')).toBeInTheDocument();
+      expect(getRail()).toBeInTheDocument();
     });
 
-    it('渲染用户默认角色状态', async () => {
+    it('手机端不显示侧栏，默认进口袋', async () => {
+      const original = window.matchMedia;
+      Object.defineProperty(window, 'matchMedia', {
+        writable: true,
+        configurable: true,
+        value: (query: string) => ({
+          matches: query === PHONE_MQ,
+          media: query,
+          onchange: null,
+          addListener: () => {},
+          removeListener: () => {},
+          addEventListener: () => {},
+          removeEventListener: () => {},
+          dispatchEvent: () => false,
+        }),
+      });
+      try {
+        await act(async () => {
+          render(<App />);
+        });
+        expect(screen.queryByTestId('side-rail')).not.toBeInTheDocument();
+        expect(screen.getByTestId('pocket-view')).toBeInTheDocument();
+        expect(screen.queryByTestId('pocket-open-canvas')).not.toBeInTheDocument();
+      } finally {
+        Object.defineProperty(window, 'matchMedia', {
+          writable: true,
+          configurable: true,
+          value: original,
+        });
+      }
+    });
+
+    it('桌面端把手机备忘记在存档按钮上，而不是单独的口袋入口', async () => {
+      await db.nodes.add({
+        id: 'p1',
+        type: 'note',
+        content: 'from phone',
+        x: 0,
+        y: 0,
+        canvasId: POCKET_CANVAS_ID,
+        createdAt: Date.now(),
+      });
       await act(async () => {
         render(<App />);
       });
-      expect(screen.getByText('Focus Mode Active')).toBeInTheDocument();
+      expect(screen.queryByTestId('rail-pocket')).not.toBeInTheDocument();
+      expect(await screen.findByTestId('rail-archive-badge')).toHaveTextContent('1');
+      expect(screen.getByTestId('rail-archive')).toHaveAttribute(
+        'aria-label',
+        '知识存档 · 1 条手机备忘待放入画布',
+      );
     });
   });
 
   // --- 侧边栏导航 ---
   describe('侧边栏导航', () => {
-    it('默认选中 personal 标签', async () => {
+    it('画布态时归档/角色均未按下', async () => {
       await act(async () => {
         render(<App />);
       });
-      const links = getNavLinks();
-      const personalLink = links.find(a => a.textContent?.includes('画布'));
-      expect(personalLink).toBeDefined();
-      expect(personalLink).toHaveClass('bg-white');
-    });
-
-    it('切换到 reference 标签', async () => {
-      const user = userEvent.setup();
-      await act(async () => {
-        render(<App />);
-      });
-
-      const links = getNavLinks();
-      const refLink = links.find(a => a.textContent?.includes('长文'))!;
-      await user.click(refLink);
-      expect(refLink).toHaveClass('bg-white');
-    });
-
-    it('切换到 lab 标签', async () => {
-      const user = userEvent.setup();
-      await act(async () => {
-        render(<App />);
-      });
-
-      const links = getNavLinks();
-      const labLink = links.find(a => a.textContent?.includes('研究'))!;
-      await user.click(labLink);
-      expect(labLink).toHaveClass('bg-white');
+      expect(screen.getByLabelText('知识存档')).toHaveAttribute('aria-pressed', 'false');
+      expect(screen.getByLabelText('角色')).toHaveAttribute('aria-pressed', 'false');
     });
 
     it('切换到 agents 标签', async () => {
@@ -295,10 +347,9 @@ describe('App 组件', () => {
         render(<App />);
       });
 
-      const links = getNavLinks();
-      const agentsLink = links.find(a => a.textContent?.includes('角色'))!;
-      await user.click(agentsLink);
-      expect(agentsLink).toHaveClass('bg-white');
+      const agentsBtn = screen.getByLabelText('角色');
+      await user.click(agentsBtn);
+      expect(agentsBtn).toHaveAttribute('aria-pressed', 'true');
     });
   });
 
@@ -314,8 +365,13 @@ describe('App 组件', () => {
       await user.click(settingsBtn);
 
       // 设置面板应出现（无冗余标题，以关闭按钮与语言区为准）
-      expect(screen.getByRole('button', { name: '关闭' })).toBeInTheDocument();
-      expect(screen.getByText('English')).toBeInTheDocument();
+      expect(
+        await screen.findByRole('button', { name: '关闭' }, { timeout: 10_000 }),
+      ).toBeInTheDocument();
+      // Language chips: visible text is "EN"/"中", aria-label is "English"/"中文".
+      expect(
+        await screen.findByRole('button', { name: 'English' }, { timeout: 10_000 }),
+      ).toBeInTheDocument();
     });
 
     it('设置面板包含语言切换选项', async () => {
@@ -325,8 +381,10 @@ describe('App 组件', () => {
       });
 
       await user.click(screen.getByTitle('设置'));
-      expect(screen.getByText('English')).toBeInTheDocument();
-      expect(screen.getByText('中文')).toBeInTheDocument();
+      expect(
+        await screen.findByRole('button', { name: 'English' }, { timeout: 10_000 }),
+      ).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: '中文' })).toBeInTheDocument();
     });
 
     it('设置面板包含 AI 提供商选项', async () => {
@@ -336,6 +394,14 @@ describe('App 组件', () => {
       });
 
       await user.click(screen.getByTitle('设置'));
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: '关闭' })).toBeInTheDocument();
+      });
+      const apiToggle = screen.queryByTestId('settings-show-api-config');
+      if (apiToggle) await user.click(apiToggle);
+      await waitFor(() => {
+        expect(document.querySelector('select')).toBeInTheDocument();
+      });
       expect(screen.getByText('AI 服务商')).toBeInTheDocument();
       expect(screen.getByText('API 密钥')).toBeInTheDocument();
       expect(screen.getByText('模型')).toBeInTheDocument();
@@ -382,7 +448,7 @@ describe('App 组件', () => {
       await user.click(historyBtn);
 
       // 画布列表应出现
-      expect(screen.getByText('新建画布')).toBeInTheDocument();
+      expect(screen.getByText('新建空白画布')).toBeInTheDocument();
     });
   });
 
@@ -403,9 +469,7 @@ describe('App 组件', () => {
         render(<App />);
       });
 
-      // 缩放+按钮的文本是 "缩放 +"
-      const zoomInBtn = screen.getByText('缩放 +');
-      await user.click(zoomInBtn);
+      await user.click(screen.getByTestId('canvas-zoom-in'));
 
       // 缩放应大于 100%
       const zoomText = screen.getByText(/%/);
@@ -419,9 +483,7 @@ describe('App 组件', () => {
         render(<App />);
       });
 
-      // 缩放-按钮的文本是 "缩放 -"
-      const zoomOutBtn = screen.getByText('缩放 -');
-      await user.click(zoomOutBtn);
+      await user.click(screen.getByTestId('canvas-zoom-out'));
 
       const zoomText = screen.getByText(/%/);
       const value = parseInt(zoomText.textContent ?? '100');
@@ -435,8 +497,8 @@ describe('App 组件', () => {
       });
 
       // 连续放大两次
-      await user.click(screen.getByText('缩放 +'));
-      await user.click(screen.getByText('缩放 +'));
+      await user.click(screen.getByTestId('canvas-zoom-in'));
+      await user.click(screen.getByTestId('canvas-zoom-in'));
 
       const zoomText = screen.getByText(/%/);
       const value = parseInt(zoomText.textContent ?? '100');
@@ -478,7 +540,7 @@ describe('App 组件', () => {
       expect(roles).toContain('Visionary');
     });
 
-    it('首次渲染时自动创建示例节点和边', async () => {
+    it('首次渲染时自动创建阿狸、主题卡和便签卡（无默认连线）', async () => {
       await act(async () => {
         render(<App />);
       });
@@ -487,33 +549,32 @@ describe('App 组件', () => {
         await new Promise(resolve => setTimeout(resolve, 200));
       });
 
-      const nodes = await db.nodes.toArray();
-      expect(nodes.length).toBeGreaterThanOrEqual(3);
+      const nodes = (await db.nodes.toArray()).filter((n) => n.type !== 'ambience');
+      expect(nodes.filter((n) => n.type === 'ask')).toHaveLength(1);
+      expect(nodes.filter((n) => n.type === 'theme')).toHaveLength(1);
+      expect(nodes.filter((n) => n.type === 'note')).toHaveLength(1);
 
       const edges = await db.edges.toArray();
-      expect(edges.length).toBeGreaterThanOrEqual(3);
-
-      // 应有 theme 类型节点
-      expect(nodes.some(n => n.type === 'theme')).toBe(true);
+      expect(edges).toEqual([]);
     });
   });
 
-  // --- localStorage 持久化 ---
+  // --- localStorage 持久化（资料编辑已从画布 rail 移除，仅验证 hook 仍读写） ---
   describe('localStorage 持久化', () => {
-    it('用户名从 localStorage 恢复', async () => {
+    it('用户名从 localStorage 恢复并写回', async () => {
       localStorage.setItem('user_name', '自定义用户');
       await act(async () => {
         render(<App />);
       });
-      expect(screen.getByText('自定义用户')).toBeInTheDocument();
+      expect(localStorage.getItem('user_name')).toBe('自定义用户');
     });
 
-    it('用户角色从 localStorage 恢复', async () => {
+    it('用户角色从 localStorage 恢复并写回', async () => {
       localStorage.setItem('user_role', '专注写作中');
       await act(async () => {
         render(<App />);
       });
-      expect(screen.getByText('专注写作中')).toBeInTheDocument();
+      expect(localStorage.getItem('user_role')).toBe('专注写作中');
     });
   });
 
@@ -525,6 +586,21 @@ describe('App 组件', () => {
       await user.click(screen.getByTitle('设置'));
       await waitFor(() => {
         expect(screen.getByRole('button', { name: '关闭' })).toBeInTheDocument();
+      });
+    };
+
+    /**
+     * AISettingsModal 默认显示账号面板，需要展开本地 AI 表单才能拿到
+     * `<select>` / Base URL 字段 / API Key 输入框。
+     * 切换按钮用 data-testid `settings-show-api-config` 唯一定位，避免和
+     * canvas 网格按钮（同样是 aria-pressed）混淆。
+     */
+    const openSettingsApi = async (user: ReturnType<typeof userEvent.setup>) => {
+      await openSettings(user);
+      const apiToggle = screen.queryByTestId('settings-show-api-config');
+      if (apiToggle) await user.click(apiToggle);
+      await waitFor(() => {
+        expect(document.querySelector('select')).toBeInTheDocument();
       });
     };
 
@@ -553,7 +629,7 @@ describe('App 组件', () => {
     it('设置面板包含提供商下拉选项', async () => {
       const user = userEvent.setup();
       await act(async () => { render(<App />); });
-      await openSettings(user);
+      await openSettingsApi(user);
       const select = document.querySelector('select');
       expect(select).toBeInTheDocument();
       expect(select?.querySelector('option[value="gemini"]')).toBeTruthy();
@@ -566,7 +642,7 @@ describe('App 组件', () => {
     it('切换到 gemini 提供商后不显示 Base URL 字段', async () => {
       const user = userEvent.setup();
       await act(async () => { render(<App />); });
-      await openSettings(user);
+      await openSettingsApi(user);
       const select = document.querySelector('select')!;
       await user.selectOptions(select, 'gemini');
       expect(screen.queryByText('基础 URL (可选)')).not.toBeInTheDocument();
@@ -575,7 +651,7 @@ describe('App 组件', () => {
     it('切换到 OpenAI 提供商时显示 Base URL 字段', async () => {
       const user = userEvent.setup();
       await act(async () => { render(<App />); });
-      await openSettings(user);
+      await openSettingsApi(user);
       const select = document.querySelector('select')!;
       await user.selectOptions(select, 'openai');
       expect(screen.getByText('基础 URL (可选)')).toBeInTheDocument();
@@ -584,7 +660,7 @@ describe('App 组件', () => {
     it('切换到 DeepSeek 提供商时显示 Base URL 字段', async () => {
       const user = userEvent.setup();
       await act(async () => { render(<App />); });
-      await openSettings(user);
+      await openSettingsApi(user);
       const select = document.querySelector('select')!;
       await user.selectOptions(select, 'deepseek');
       expect(screen.getByText('基础 URL (可选)')).toBeInTheDocument();
@@ -594,7 +670,7 @@ describe('App 组件', () => {
     it('切换到 Custom 提供商时显示 Base URL 字段', async () => {
       const user = userEvent.setup();
       await act(async () => { render(<App />); });
-      await openSettings(user);
+      await openSettingsApi(user);
       const select = document.querySelector('select')!;
       await user.selectOptions(select, 'custom');
       expect(screen.getByText('基础 URL (可选)')).toBeInTheDocument();
@@ -603,7 +679,7 @@ describe('App 组件', () => {
     it('切换到 Anthropic 提供商时不显示 Base URL 字段', async () => {
       const user = userEvent.setup();
       await act(async () => { render(<App />); });
-      await openSettings(user);
+      await openSettingsApi(user);
       const select = document.querySelector('select')!;
       await user.selectOptions(select, 'anthropic');
       expect(screen.queryByText('基础 URL (可选)')).not.toBeInTheDocument();
@@ -612,8 +688,16 @@ describe('App 组件', () => {
     it('修改 API Key 后自动更新 localStorage', async () => {
       const user = userEvent.setup();
       await act(async () => { render(<App />); });
-      await openSettings(user);
-      const apiKeyInput = document.querySelector('input[type="password"]') as HTMLInputElement;
+      await openSettingsApi(user);
+      // Find the AI provider's API-key input by walking down from the
+      // 'API 密钥' label. CloudAccountPanel renders its own type=password
+      // inputs in a <form>, so a flat querySelector picks the wrong field.
+      const apiKeyLabel = Array.from(document.querySelectorAll('label')).find(
+        (el) => el.textContent === 'API 密钥',
+      );
+      expect(apiKeyLabel).toBeTruthy();
+      const apiKeyInput = apiKeyLabel!.parentElement!.querySelector('input[type="password"]') as HTMLInputElement;
+      expect(apiKeyInput).toBeTruthy();
       await user.clear(apiKeyInput);
       await user.type(apiKeyInput, 'test-key-123');
       // 配置通过 useEffect 自动保存到 localStorage
@@ -626,7 +710,7 @@ describe('App 组件', () => {
     it('修改模型名称', async () => {
       const user = userEvent.setup();
       await act(async () => { render(<App />); });
-      await openSettings(user);
+      await openSettingsApi(user);
       const textInputs = document.querySelectorAll('input[type="text"]');
       const modelInput = Array.from(textInputs).find(input =>
         (input as HTMLInputElement).placeholder?.includes('gemini') ||
@@ -642,76 +726,48 @@ describe('App 组件', () => {
     it('设置面板展示 AI 配置说明折叠区', async () => {
       const user = userEvent.setup();
       await act(async () => { render(<App />); });
-      await openSettings(user);
+      await openSettingsApi(user);
       expect(screen.getByText('配置说明与官方文档')).toBeInTheDocument();
     });
   });
 
   // ============================================================
-  // Reference 参考文献面板
+  // Essays live on canvas (no sidebar Reference tab)
   // ============================================================
-  describe('Reference 参考文献面板', () => {
-    const goToReference = async (user: ReturnType<typeof userEvent.setup>) => {
-      await act(async () => { render(<App />); });
+  describe('长文画布卡片', () => {
+    it('侧栏不再显示「长文」入口，也不显示画布按钮', async () => {
       await act(async () => {
-        await new Promise(resolve => setTimeout(resolve, 200));
+        render(<App />);
       });
-      const links = getNavLinks();
-      const refLink = links.find(a => a.textContent?.includes('长文'))!;
-      await user.click(refLink);
-    };
-
-    it('切换到参考区标签后显示档案索引标题', async () => {
-      const user = userEvent.setup();
-      await goToReference(user);
-      expect(screen.getByText('档案索引')).toBeInTheDocument();
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      });
+      expect(screen.queryByLabelText('长文')).not.toBeInTheDocument();
+      expect(screen.queryByLabelText('画布')).not.toBeInTheDocument();
+      expect(screen.getByLabelText('知识存档')).toBeInTheDocument();
+      expect(screen.getByTestId('side-rail').querySelectorAll('button')).toHaveLength(3);
     });
 
-    it('参考区显示文章列表', async () => {
-      const user = userEvent.setup();
-      await goToReference(user);
-      // 文章标题同时出现在列表和内容区，使用 getAllByText
-      const matches = screen.getAllByText(/Spatial Encoding/);
-      expect(matches.length).toBeGreaterThanOrEqual(1);
-    });
-
-    it('参考区显示文章类型和日期', async () => {
-      const user = userEvent.setup();
-      await goToReference(user);
-      // 档案索引默认折叠，先展开以查看列表中的类型与日期
-      await user.click(screen.getByText('档案索引'));
-      // REF-042 和 1994 可能出现在列表和内容区
-      const refMatches = screen.getAllByText('REF-042');
-      expect(refMatches.length).toBeGreaterThanOrEqual(1);
-      const dateMatches = screen.getAllByText('1994');
-      expect(dateMatches.length).toBeGreaterThanOrEqual(1);
-    });
-
-    it('参考区有搜索框', async () => {
-      const user = userEvent.setup();
-      await goToReference(user);
-      // 档案索引默认折叠，先点击左上角按钮展开
-      await user.click(screen.getByText('档案索引'));
-      const searchInput = document.querySelector('input[placeholder="搜索参考文献..."]');
-      expect(searchInput).toBeInTheDocument();
-    });
-
-    it('参考区显示来源画布区域（替代原元数据与笔记）', async () => {
-      const user = userEvent.setup();
-      await goToReference(user);
-      expect(screen.getByText('关联画布')).toBeInTheDocument();
-    });
-
-    it('参考区不再显示标签区域', async () => {
-      const user = userEvent.setup();
-      await goToReference(user);
-      expect(screen.queryByText('标签')).toBeNull();
-    });
-
-    it('参考区不再显示私密笔记区域', async () => {
-      const user = userEvent.setup();
-      await goToReference(user);
-      expect(screen.queryByText('私密笔记')).toBeNull();
+    it('已有文章且无 essay 卡时会迁移到画布', async () => {
+      await db.articles.put({
+        id: 'user-essay-1',
+        title: 'Spatial Encoding in Reconstructive Memory',
+        content: 'The human mind does not merely store experiences.',
+        date: '1994',
+        type: 'REF-042',
+        tags: [],
+        linkedCanvasIds: ['default'],
+      });
+      await act(async () => {
+        render(<App />);
+      });
+      await waitFor(async () => {
+        const essays = await db.nodes.where('type').equals('essay').toArray();
+        expect(essays.length).toBeGreaterThanOrEqual(1);
+      });
+      await waitFor(() => {
+        expect(screen.getAllByText(/Spatial Encoding/i).length).toBeGreaterThanOrEqual(1);
+      });
     });
   });
 
@@ -724,9 +780,7 @@ describe('App 组件', () => {
       await act(async () => {
         await new Promise(resolve => setTimeout(resolve, 300));
       });
-      const links = getNavLinks();
-      const agentsLink = links.find(a => a.textContent?.includes('角色'))!;
-      await user.click(agentsLink);
+      await user.click(screen.getByLabelText('角色'));
     };
 
     it('切换到 AI 助手标签后顶部为搜索人格栏且无「人格设定」标题', async () => {
@@ -826,78 +880,6 @@ describe('App 组件', () => {
 
   });
 
-  // ============================================================
-  // ResearchLab 研究实验室
-  // ============================================================
-  describe('ResearchLab 研究实验室', () => {
-    const goToLab = async (user: ReturnType<typeof userEvent.setup>) => {
-      await act(async () => { render(<App />); });
-      const links = getNavLinks();
-      const labLink = links.find(a => a.textContent?.includes('研究'))!;
-      await user.click(labLink);
-    };
-
-    it('切换到研究标签后显示调查输入框', async () => {
-      const user = userEvent.setup();
-      await goToLab(user);
-      expect(screen.getByText('您想调查什么？')).toBeInTheDocument();
-    });
-
-    it('输入框有正确的 placeholder', async () => {
-      const user = userEvent.setup();
-      await goToLab(user);
-      const input = document.querySelector('input[placeholder*="空间衰减"]');
-      expect(input).toBeInTheDocument();
-    });
-
-    it('显示历史会话区域', async () => {
-      const user = userEvent.setup();
-      await goToLab(user);
-      expect(screen.getByText('历史会话')).toBeInTheDocument();
-    });
-
-    it('idle 无历史记录时显示空态文案', async () => {
-      const user = userEvent.setup();
-      await goToLab(user);
-      // 历史会话面板默认折叠，先点击左上角按钮展开
-      await user.click(screen.getByText('历史会话'));
-      expect(screen.getByText('暂无已完成的研究。完成一次研究后会显示在这里。')).toBeInTheDocument();
-    });
-
-    it('idle 阶段显示提交箭头按钮', async () => {
-      const user = userEvent.setup();
-      await goToLab(user);
-      // idle 阶段有 form submit 按钮（ArrowRight 图标）
-      const form = document.querySelector('form');
-      const submitBtn = form?.querySelector('button[type="submit"]');
-      expect(submitBtn).toBeInTheDocument();
-    });
-
-    it('输入研究主题后可以提交', async () => {
-      const user = userEvent.setup();
-      await goToLab(user);
-      const input = document.querySelector('input[placeholder*="空间衰减"]') as HTMLInputElement;
-      await user.type(input, 'The relationship between spatial decay and memory loss');
-      expect(input.value).toContain('spatial decay');
-    });
-
-    it('提交研究主题后进入 planning 阶段', async () => {
-      const user = userEvent.setup();
-      await goToLab(user);
-      const input = document.querySelector('input[placeholder*="空间衰减"]') as HTMLInputElement;
-      await user.type(input, 'memory architecture');
-      const form = document.querySelector('form');
-      const submitBtn = form?.querySelector('button[type="submit"]');
-      await user.click(submitBtn!);
-      // 应进入 planning 阶段或 plan_ready 阶段
-      // 由于 mock 了 AI，会立即完成
-      await act(async () => {
-        await new Promise(resolve => setTimeout(resolve, 100));
-      });
-    });
-  });
-
-  // ============================================================
   // callUniversalAI 间接测试
   // ============================================================
   describe('callUniversalAI 间接测试', () => {
@@ -935,9 +917,8 @@ describe('App 组件', () => {
       await act(async () => {
         await new Promise(resolve => setTimeout(resolve, 200));
       });
-      // 应用正常渲染不崩溃 — 使用 getNavLinks 验证侧栏存在
-      const links = getNavLinks();
-      expect(links.length).toBeGreaterThan(0);
+      // 应用正常渲染不崩溃 — 验证左侧 icon rail 存在
+      expect(getRail()).toBeInTheDocument();
     });
 
     it('OpenAI 配置下应用正常渲染', async () => {
@@ -945,8 +926,7 @@ describe('App 组件', () => {
         provider: 'openai', apiKey: 'sk-test', model: 'gpt-4o', baseUrl: ''
       }));
       await act(async () => { render(<App />); });
-      const links = getNavLinks();
-      expect(links.length).toBeGreaterThan(0);
+      expect(getRail()).toBeInTheDocument();
     });
 
     it('Anthropic 配置下应用正常渲染', async () => {
@@ -954,8 +934,7 @@ describe('App 组件', () => {
         provider: 'anthropic', apiKey: 'sk-ant-test', model: 'claude-3-5-sonnet'
       }));
       await act(async () => { render(<App />); });
-      const links = getNavLinks();
-      expect(links.length).toBeGreaterThan(0);
+      expect(getRail()).toBeInTheDocument();
     });
 
     it('Custom 配置下应用正常渲染', async () => {
@@ -963,8 +942,7 @@ describe('App 组件', () => {
         provider: 'custom', apiKey: 'test-key', model: 'custom-model', baseUrl: 'http://localhost:8080/v1'
       }));
       await act(async () => { render(<App />); });
-      const links = getNavLinks();
-      expect(links.length).toBeGreaterThan(0);
+      expect(getRail()).toBeInTheDocument();
     });
   });
 
@@ -977,8 +955,12 @@ describe('App 组件', () => {
       await act(async () => {
         await new Promise(resolve => setTimeout(resolve, 300));
       });
-      // 种子数据包含 "The Memory Architect" 节点
-      expect(screen.getByText('The Memory Architect')).toBeInTheDocument();
+      // 种子数据包含主题卡与便签卡（不再是 cosmos 四问便签）
+      const nodes = await db.nodes.toArray();
+      const onDefault = nodes.filter((n) => (!n.canvasId || n.canvasId === 'default') && n.type !== 'ambience');
+      expect(onDefault.some((n) => n.type === 'theme')).toBe(true);
+      expect(onDefault.some((n) => n.type === 'note')).toBe(true);
+      expect(onDefault.some((n) => n.type === 'ask')).toBe(true);
     });
 
     it('渲染多种节点类型', async () => {
@@ -986,9 +968,14 @@ describe('App 组件', () => {
       await act(async () => {
         await new Promise(resolve => setTimeout(resolve, 300));
       });
-      // 种子数据包含 note 和 ai 类型节点
-      expect(screen.getByText('Spatial architecture of trauma')).toBeInTheDocument();
-      expect(screen.getByText('Non-euclidean memory leaks')).toBeInTheDocument();
+      // 默认画布：阿狸 + 主题卡 + 便签卡各 1 张，不再有 cosmos 默认便签文案
+      const nodes = await db.nodes.toArray();
+      const onDefault = nodes.filter((n) => (!n.canvasId || n.canvasId === 'default') && n.type !== 'ambience');
+      expect(onDefault.filter((n) => n.type === 'ask')).toHaveLength(1);
+      expect(onDefault.filter((n) => n.type === 'theme')).toHaveLength(1);
+      expect(onDefault.filter((n) => n.type === 'note')).toHaveLength(1);
+      expect(screen.queryByText(/自我探索 · 四问|Self-discovery · four questions/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/写下你的创伤|Write your pain/)).not.toBeInTheDocument();
     });
 
     it('新建便签按钮在数据库中创建 text 类型节点', async () => {
@@ -1025,7 +1012,6 @@ describe('App 组件', () => {
     });
 
     it('选中节点后按下 Delete 键批量删除（含关联边）', async () => {
-      const user = userEvent.setup();
       // Pre-populate two text nodes plus an edge between them. Use unique content so we can
       // locate their DOM wrappers without colliding with the seed dataset.
       await db.nodes.add({ id: 'kbd-a', canvasId: 'default', type: 'text', content: 'kbd-delete-a', x: 0, y: 0 });
@@ -1039,15 +1025,30 @@ describe('App 组件', () => {
         await new Promise(resolve => setTimeout(resolve, 200));
       });
 
-      // Selection chrome is only via the top-left check circle (not body click).
-      const aText = await screen.findByText('kbd-delete-a');
-      const bText = await screen.findByText('kbd-delete-b');
-      const aSelect = aText.closest('.group')?.querySelector<HTMLElement>('[title="选择便签"]');
-      const bSelect = bText.closest('.group')?.querySelector<HTMLElement>('[title="选择便签"]');
-      expect(aSelect).toBeTruthy();
-      expect(bSelect).toBeTruthy();
-      await act(async () => { await user.click(aSelect!); });
-      await act(async () => { await user.click(bSelect!); });
+      // Selection is marquee-only (top-left check circle removed).
+      const main = document.querySelector('main')!;
+      const marquee = screen.getByTestId('canvas-marquee-layer');
+      const aEl = (await screen.findByText('kbd-delete-a')).closest('.group') as HTMLElement;
+      const bEl = (await screen.findByText('kbd-delete-b')).closest('.group') as HTMLElement;
+      const keepEl = (await screen.findByText('kbd-keep')).closest('.group') as HTMLElement;
+      vi.spyOn(main, 'getBoundingClientRect').mockReturnValue({
+        x: 0, y: 0, left: 0, top: 0, right: 1000, bottom: 1000, width: 1000, height: 1000, toJSON: () => ({}),
+      });
+      vi.spyOn(aEl, 'getBoundingClientRect').mockReturnValue({
+        x: 100, y: 100, left: 100, top: 100, right: 200, bottom: 200, width: 100, height: 100, toJSON: () => ({}),
+      });
+      vi.spyOn(bEl, 'getBoundingClientRect').mockReturnValue({
+        x: 150, y: 150, left: 150, top: 150, right: 250, bottom: 250, width: 100, height: 100, toJSON: () => ({}),
+      });
+      vi.spyOn(keepEl, 'getBoundingClientRect').mockReturnValue({
+        x: 800, y: 800, left: 800, top: 800, right: 900, bottom: 900, width: 100, height: 100, toJSON: () => ({}),
+      });
+
+      await act(async () => {
+        marquee.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, clientX: 80, clientY: 80 }));
+        window.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: 280, clientY: 280 }));
+        window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: 280, clientY: 280 }));
+      });
 
       // Drive the canvas-level keyboard-delete handler. event.target defaults to body, which
       // is not an editing target, so the listener passes its gate and calls removeNodeIds.
@@ -1066,9 +1067,132 @@ describe('App 组件', () => {
       expect(edges.find(e => e.id === 'kbd-edge')).toBeUndefined();
     });
 
+    it('框选一张卡片后 Backspace 删除，Ctrl+Z 可恢复', async () => {
+      await db.nodes.add({
+        id: 'kbd-bs-one',
+        canvasId: 'default',
+        type: 'text',
+        content: 'kbd-backspace-one',
+        x: 0,
+        y: 0,
+      });
+      await db.nodes.add({
+        id: 'kbd-bs-keep',
+        canvasId: 'default',
+        type: 'text',
+        content: 'kbd-backspace-keep',
+        x: 0,
+        y: 0,
+      });
+
+      await act(async () => { render(<App />); });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      });
+
+      const main = document.querySelector('main')!;
+      const marquee = screen.getByTestId('canvas-marquee-layer');
+      const oneEl = (await screen.findByText('kbd-backspace-one')).closest('.group') as HTMLElement;
+      const keepEl = (await screen.findByText('kbd-backspace-keep')).closest('.group') as HTMLElement;
+      vi.spyOn(main, 'getBoundingClientRect').mockReturnValue({
+        x: 0, y: 0, left: 0, top: 0, right: 1000, bottom: 1000, width: 1000, height: 1000, toJSON: () => ({}),
+      });
+      vi.spyOn(oneEl, 'getBoundingClientRect').mockReturnValue({
+        x: 100, y: 100, left: 100, top: 100, right: 200, bottom: 200, width: 100, height: 100, toJSON: () => ({}),
+      });
+      vi.spyOn(keepEl, 'getBoundingClientRect').mockReturnValue({
+        x: 800, y: 800, left: 800, top: 800, right: 900, bottom: 900, width: 100, height: 100, toJSON: () => ({}),
+      });
+
+      await act(async () => {
+        marquee.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, clientX: 80, clientY: 80 }));
+        window.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: 220, clientY: 220 }));
+        window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: 220, clientY: 220 }));
+      });
+
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true, cancelable: true }));
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      });
+
+      expect((await db.nodes.toArray()).map((n) => n.id)).not.toContain('kbd-bs-one');
+      expect((await db.nodes.toArray()).map((n) => n.id)).toContain('kbd-bs-keep');
+
+      await act(async () => {
+        window.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'z', ctrlKey: true, bubbles: true, cancelable: true }),
+        );
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      });
+
+      expect((await db.nodes.toArray()).map((n) => n.id)).toContain('kbd-bs-one');
+      expect((await db.nodes.toArray()).map((n) => n.id)).toContain('kbd-bs-keep');
+    });
+
+    it('框选多张卡片后 Backspace 批量删除，Ctrl+Z 一并恢复（含边）', async () => {
+      await db.nodes.add({ id: 'kbd-bs-a', canvasId: 'default', type: 'text', content: 'kbd-bs-a', x: 0, y: 0 });
+      await db.nodes.add({ id: 'kbd-bs-b', canvasId: 'default', type: 'text', content: 'kbd-bs-b', x: 0, y: 0 });
+      await db.edges.add({ id: 'kbd-bs-edge', canvasId: 'default', from: 'kbd-bs-a', to: 'kbd-bs-b' });
+      await db.nodes.add({ id: 'kbd-bs-keep2', canvasId: 'default', type: 'text', content: 'kbd-bs-keep2', x: 0, y: 0 });
+
+      await act(async () => { render(<App />); });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      });
+
+      const main = document.querySelector('main')!;
+      const marquee = screen.getByTestId('canvas-marquee-layer');
+      const aEl = (await screen.findByText('kbd-bs-a')).closest('.group') as HTMLElement;
+      const bEl = (await screen.findByText('kbd-bs-b')).closest('.group') as HTMLElement;
+      const keepEl = (await screen.findByText('kbd-bs-keep2')).closest('.group') as HTMLElement;
+      vi.spyOn(main, 'getBoundingClientRect').mockReturnValue({
+        x: 0, y: 0, left: 0, top: 0, right: 1000, bottom: 1000, width: 1000, height: 1000, toJSON: () => ({}),
+      });
+      vi.spyOn(aEl, 'getBoundingClientRect').mockReturnValue({
+        x: 100, y: 100, left: 100, top: 100, right: 200, bottom: 200, width: 100, height: 100, toJSON: () => ({}),
+      });
+      vi.spyOn(bEl, 'getBoundingClientRect').mockReturnValue({
+        x: 150, y: 150, left: 150, top: 150, right: 250, bottom: 250, width: 100, height: 100, toJSON: () => ({}),
+      });
+      vi.spyOn(keepEl, 'getBoundingClientRect').mockReturnValue({
+        x: 800, y: 800, left: 800, top: 800, right: 900, bottom: 900, width: 100, height: 100, toJSON: () => ({}),
+      });
+
+      await act(async () => {
+        marquee.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, clientX: 80, clientY: 80 }));
+        window.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: 280, clientY: 280 }));
+        window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: 280, clientY: 280 }));
+      });
+
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true, cancelable: true }));
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      });
+
+      const idsAfterDelete = (await db.nodes.toArray()).map((n) => n.id);
+      expect(idsAfterDelete).not.toContain('kbd-bs-a');
+      expect(idsAfterDelete).not.toContain('kbd-bs-b');
+      expect(idsAfterDelete).toContain('kbd-bs-keep2');
+      expect((await db.edges.toArray()).find((e) => e.id === 'kbd-bs-edge')).toBeUndefined();
+
+      await act(async () => {
+        window.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'z', ctrlKey: true, bubbles: true, cancelable: true }),
+        );
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      });
+
+      const idsAfterUndo = (await db.nodes.toArray()).map((n) => n.id);
+      expect(idsAfterUndo).toContain('kbd-bs-a');
+      expect(idsAfterUndo).toContain('kbd-bs-b');
+      expect(idsAfterUndo).toContain('kbd-bs-keep2');
+      expect((await db.edges.toArray()).find((e) => e.id === 'kbd-bs-edge')).toBeDefined();
+    });
+
     // 守护 18e2c7f 的"正文点击不进入 selectedNodes"契约：
     // 若未来有人重新让 body click 触发选中，本测试会因为 Delete 删除了节点而失败。
-    it('正文点击不会把节点加入 selectedNodes（Delete 不会删除未被勾选的节点）', async () => {
+    // 选中改由框选完成，左上角勾选圈已移除。
+    it('正文点击不会把节点加入 selectedNodes（Delete 不会删除未被框选的节点）', async () => {
       const user = userEvent.setup();
       await db.nodes.add({
         id: 'body-click-a',
@@ -1101,14 +1225,12 @@ describe('App 组件', () => {
       expect(stillThere?.content).toBe('body-click-guard');
     });
 
-    // 配套守护：勾选圈 (toggle) 仍然有效。
-    it('勾选圈 toggle 仍可把节点加入 selectedNodes（避免把 body click 与 checkbox 一起误关）', async () => {
-      const user = userEvent.setup();
+    it('Shift+单击可以把漏选的卡片加入选区，再按 Delete 会删掉它', async () => {
       await db.nodes.add({
-        id: 'checkbox-a',
+        id: 'shift-click-a',
         canvasId: 'default',
         type: 'text',
-        content: 'checkbox-still-works',
+        content: 'shift-click-guard',
         x: 0,
         y: 0,
       });
@@ -1118,19 +1240,26 @@ describe('App 组件', () => {
         await new Promise(resolve => setTimeout(resolve, 200));
       });
 
-      const text = await screen.findByText('checkbox-still-works');
-      const checkbox = text.closest('.group')?.querySelector<HTMLElement>('[title="选择便签"]');
-      expect(checkbox).toBeTruthy();
-      await act(async () => { await user.click(checkbox!); });
+      const text = await screen.findByText('shift-click-guard');
+      await act(async () => {
+        text.dispatchEvent(
+          new PointerEvent('pointerdown', {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+            shiftKey: true,
+            pointerId: 1,
+          }),
+        );
+      });
 
-      // 选中后按 Delete 应当删除节点。
       await act(async () => {
         window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true }));
         await new Promise(resolve => setTimeout(resolve, 100));
       });
 
       const nodes = await db.nodes.toArray();
-      expect(nodes.find(n => n.id === 'checkbox-a')).toBeUndefined();
+      expect(nodes.find((n) => n.id === 'shift-click-a')).toBeUndefined();
     });
   });
 
@@ -1147,12 +1276,13 @@ describe('App 组件', () => {
       await user.click(historyBtn);
 
       // 点击新建画布
-      const newCanvasBtn = screen.getByText('新建画布');
+      const newCanvasBtn = screen.getByText('新建空白画布');
       await user.click(newCanvasBtn);
 
-      // 验证数据库中有新画布
-      const canvases = await db.canvases.toArray();
-      expect(canvases.length).toBeGreaterThanOrEqual(2);
+      await waitFor(async () => {
+        const canvases = await db.canvases.toArray();
+        expect(canvases.length).toBeGreaterThanOrEqual(2);
+      });
     });
 
     it('画布列表显示默认画布名称', async () => {
@@ -1184,48 +1314,114 @@ describe('App 组件', () => {
 
     it('合成文章按钮存在', async () => {
       await act(async () => { render(<App />); });
-      // 合成文章按钮在右上角
+      // 合成文章按钮在底部工具栏
       const publishBtns = screen.getAllByTitle(/合成文章/);
       expect(publishBtns.length).toBeGreaterThanOrEqual(1);
+      expect(screen.getByTestId('toolbar-publish')).toBeInTheDocument();
     });
 
-    it('画布合成按钮未选中时为白色样式', async () => {
+    it('画布合成按钮未选中或只选一张时为白色样式', async () => {
+      await db.nodes.add({
+        id: 'publish-select-a',
+        canvasId: 'default',
+        type: 'text',
+        content: 'publish-select-target',
+        x: 0,
+        y: 0,
+      });
+
       await act(async () => { render(<App />); });
       await act(async () => {
         await new Promise((resolve) => setTimeout(resolve, 200));
       });
-      const publishBtn = screen.getByTitle(/合成文章\s*\(/);
-      expect(publishBtn.className).toContain('bg-white');
-      expect(publishBtn.className).not.toContain('bg-[#C2410C]');
+      const idleBtn = screen.getByTitle(/合成文章\s*\(/);
+      expect(idleBtn.className).toContain('bg-white');
+      expect(idleBtn.className).not.toContain('bg-[#C2410C]');
+
+      const main = document.querySelector('main')!;
+      const marquee = screen.getByTestId('canvas-marquee-layer');
+      const nodeEl = (await screen.findByText('publish-select-target')).closest('.group') as HTMLElement;
+      vi.spyOn(main, 'getBoundingClientRect').mockReturnValue({
+        x: 0, y: 0, left: 0, top: 0, right: 1000, bottom: 1000, width: 1000, height: 1000, toJSON: () => ({}),
+      });
+      vi.spyOn(nodeEl, 'getBoundingClientRect').mockReturnValue({
+        x: 100, y: 100, left: 100, top: 100, right: 200, bottom: 200, width: 100, height: 100, toJSON: () => ({}),
+      });
+
+      await act(async () => {
+        marquee.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, clientX: 80, clientY: 80 }));
+        window.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: 220, clientY: 220 }));
+        window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: 220, clientY: 220 }));
+      });
+
+      const oneSelected = screen.getByTitle(/合成文章\s*\(/);
+      expect(oneSelected.className).toContain('bg-white');
+      expect(oneSelected.className).not.toContain('bg-[#C2410C]');
+      expect(oneSelected).toBeDisabled();
     });
 
-    it('画布合成按钮选中便签后为橙色样式', async () => {
-      const user = userEvent.setup();
+    it('画布合成按钮圈中两张以上便签后为橙色样式', async () => {
+      await db.nodes.bulkAdd([
+        {
+          id: 'publish-select-a',
+          canvasId: 'default',
+          type: 'text',
+          content: 'publish-select-a',
+          x: 0,
+          y: 0,
+        },
+        {
+          id: 'publish-select-b',
+          canvasId: 'default',
+          type: 'text',
+          content: 'publish-select-b',
+          x: 40,
+          y: 0,
+        },
+      ]);
+
       await act(async () => { render(<App />); });
       await act(async () => {
         await new Promise((resolve) => setTimeout(resolve, 200));
       });
 
-      let selectBtns = screen.queryAllByTitle('选择便签');
-      if (selectBtns.length === 0) {
-        await user.click(screen.getAllByTitle('新建便签')[0]);
-        await act(async () => {
-          await new Promise((resolve) => setTimeout(resolve, 150));
-        });
-        selectBtns = screen.queryAllByTitle('选择便签');
-      }
+      const main = document.querySelector('main')!;
+      const marquee = screen.getByTestId('canvas-marquee-layer');
+      const nodeA = (await screen.findByText('publish-select-a')).closest('.group') as HTMLElement;
+      const nodeB = (await screen.findByText('publish-select-b')).closest('.group') as HTMLElement;
+      vi.spyOn(main, 'getBoundingClientRect').mockReturnValue({
+        x: 0, y: 0, left: 0, top: 0, right: 1000, bottom: 1000, width: 1000, height: 1000, toJSON: () => ({}),
+      });
+      vi.spyOn(nodeA, 'getBoundingClientRect').mockReturnValue({
+        x: 100, y: 100, left: 100, top: 100, right: 200, bottom: 200, width: 100, height: 100, toJSON: () => ({}),
+      });
+      vi.spyOn(nodeB, 'getBoundingClientRect').mockReturnValue({
+        x: 210, y: 100, left: 210, top: 100, right: 310, bottom: 200, width: 100, height: 100, toJSON: () => ({}),
+      });
 
-      expect(selectBtns.length).toBeGreaterThan(0);
-      await user.click(selectBtns[0]);
+      await act(async () => {
+        marquee.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, clientX: 80, clientY: 80 }));
+        window.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: 330, clientY: 220 }));
+        window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: 330, clientY: 220 }));
+      });
 
       const publishBtn = screen.getByTitle(/合成文章\s*\(/);
       expect(publishBtn.className).toContain('bg-[#C2410C]');
+      expect(publishBtn).not.toBeDisabled();
     });
 
-    it('AI 提交输入框存在', async () => {
+    it('主工作区默认展示阿狸、主题卡和便签卡各一张', async () => {
       await act(async () => { render(<App />); });
-      const aiInput = document.querySelector('input[placeholder*="AI"]');
-      expect(aiInput).toBeInTheDocument();
+      await waitFor(async () => {
+        const nodes = await db.nodes.toArray();
+        const onDefault = nodes.filter((n) => (!n.canvasId || n.canvasId === 'default') && n.type !== 'ambience');
+        expect(onDefault.filter((n) => n.type === 'ask')).toHaveLength(1);
+        expect(onDefault.filter((n) => n.type === 'theme')).toHaveLength(1);
+        expect(onDefault.filter((n) => n.type === 'note')).toHaveLength(1);
+        // 默认画布上不再出现 cosmos 角色卡
+        expect(onDefault.some((n) => n.agentConfigId === 'cosmos_weaver')).toBe(false);
+        expect(onDefault.some((n) => n.agentConfigId === 'character_atelier')).toBe(false);
+      });
     });
 
     it('全屏按钮存在', async () => {
@@ -1234,20 +1430,12 @@ describe('App 组件', () => {
       expect(fullscreenBtn).toBeInTheDocument();
     });
 
-    it('侧边栏折叠/展开切换', async () => {
-      const user = userEvent.setup();
+    it('左侧为固定 icon rail，无折叠宽栏', async () => {
       await act(async () => { render(<App />); });
-
-      // 找到折叠按钮（ChevronLeft 图标所在的按钮）
-      const aside = document.querySelector('aside')!;
-      const toggleBtn = aside.querySelector('div.mt-auto button:first-child')!;
-
-      // 初始状态侧边栏是展开的
-      expect(aside).toHaveClass('w-36');
-
-      // 点击折叠
-      await user.click(toggleBtn);
-      expect(aside).toHaveClass('w-16');
+      const rail = getRail();
+      expect(rail).toHaveClass('fixed');
+      expect(rail.className).not.toContain('w-36');
+      expect(rail.className).not.toContain('w-16');
     });
   });
 });

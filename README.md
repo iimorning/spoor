@@ -4,7 +4,7 @@
 
 # Spoor
 
-**A local-first spatial notes canvas with AI personas and a research lab.**
+**A local-first spatial notes canvas with AI personas.**
 
 Place notes, screenshots, documents, research findings, and AI responses on one infinite canvas. Then use different AI personas to question, connect, rewrite, and research your ideas.
 
@@ -23,7 +23,6 @@ Place notes, screenshots, documents, research findings, and AI responses on one 
 - **Infinite canvas notes** — arrange ideas spatially instead of burying them in folders or chat history.
 - **AI personas on the canvas** — use different agents for critique, synthesis, language exploration, and future scenarios.
 - **Context-aware AI notes** — select notes, ask an agent to analyze them, and keep the AI response as an editable canvas note.
-- **Research Lab** — turn a research question into a plan, collect findings, synthesize a report, and send useful results back to the canvas.
 - **Long-form synthesis** — combine selected notes into article-style drafts or structured explanations.
 - **Local-first storage** — canvas data stays in IndexedDB in the browser or desktop WebView; user API keys are saved locally.
 - **Web and Windows desktop** — try the hosted web demo or install the Tauri desktop app.
@@ -36,8 +35,7 @@ Imagine you are writing about how AI changes independent creators:
 2. Ask **The Mirror of Insight** to challenge a weak assumption.
 3. Ask **The Weaver** to find the hidden connection between several notes.
 4. Use **The Smoothing Iron** to rewrite a key sentence in different tones.
-5. Use the **Research Lab** to collect supporting material.
-6. Synthesize the selected notes into a draft.
+5. Synthesize the selected notes into a draft.
 
 The key difference from a chatbot: every AI response becomes part of your visual workspace, so ideas can keep growing instead of disappearing into a transcript.
 
@@ -128,6 +126,8 @@ Built-in Doubao (Volcengine Ark) key option: see [BUILTIN_DOUBAO.md](docs/BUILTI
 | [LOCAL_LLM.md](docs/LOCAL_LLM.md) | Local llama.cpp / GGUF setup |
 | [DATA_RECOVERY.md](docs/DATA_RECOVERY.md) | Migration from older desktop identifier |
 | [AI-PROMPTS.md](docs/AI-PROMPTS.md) | AI prompts and agent behavior notes |
+| [TERMS_OF_SERVICE.md](docs/TERMS_OF_SERVICE.md) | Terms of Service |
+| [PRIVACY_POLICY.md](docs/PRIVACY_POLICY.md) | Privacy Policy |
 
 ---
 
@@ -148,7 +148,6 @@ Spoor 是一个带 AI 的无限便签画布。你可以把想法、资料、截�
 - **无限画布便签** — 拖拽、缩放、连线，把想法铺在空间里，而不是塞进文件夹。
 - **多个人格 Agent** — 真知镜负责反问，编织者负责联想，熨烫师负责文字实验，占星术负责情景推演。
 - **上下文 AI 便签** — 选中便签后让 AI 分析，结果会作为新便签留在画布上。
-- **Research Lab** — 把研究问题拆成计划，收集资料，生成报告，再沉淀回画布。
 - **长文综合** — 把多张便签整理成文章草稿、项目说明或研究总结。
 - **本地优先** — 画布数据保存在本机 IndexedDB，API Key 保存在本地设置中。
 - **网页和 Windows 桌面版** — 可在线试用，也可安装桌面版长期使用。

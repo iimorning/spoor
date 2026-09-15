@@ -1,6 +1,6 @@
 [package]
 name = "spoor"
-version = "0.1.0"
+version = "0.2.0"
 description = "雪泥 · Spoor — local-first spatial note taking"
 authors = ["AI Studio"]
 edition = "2021"
@@ -18,6 +18,16 @@ open = "5"
 # 本地推理改为子进程调用预编译 llama-cli.exe，无需从源码编译 CUDA llama.cpp
 encoding_rs = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread"] }
+
+# Voice-mode WS bridge: localhost axum server + tokio-tungstenite for upstream
+# connections that need custom auth headers (Volc ASR X-Api-* / MiniMax TTS
+# Bearer). Used only when the user isn't logged in / isn't server-managed,
+# since the Edge Function path handles logged-in users without a WS proxy.
+axum = { version = "0.7", features = ["ws", "macros"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+tower = "0.5"
+parking_lot = "0.12"
+uuid = { version = "1", features = ["v4"] }
 
 [lib]
 name = "spoor_lib"

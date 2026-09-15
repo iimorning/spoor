@@ -1,0 +1,72 @@
+{
+  "title": "雪泥",
+  "subtitle": "自由画布 · 文字创作工作台",
+  "brandLabel": "雪泥",
+  "locale": "zh-v3",
+  "ctaUrl": "spoor.ink",
+  "ctaText": "打开网页版",
+  "audioUrl": "",
+  "totalDurationSec": 75,
+  "timestampSegments": [
+    {
+      "startSec": 0,
+      "endSec": 6,
+      "en": "Sometimes a question just arrives.",
+      "zh": "有时候，你只是突然想到一个问题。"
+    },
+    {
+      "startSec": 6,
+      "endSec": 13,
+      "en": "Don’t rush to tidy it up. Put together whatever came to mind in this moment.",
+      "zh": "不用急着整理。先把这一刻想到的，都放在一起。"
+    },
+    {
+      "startSec": 13,
+      "endSec": 22,
+      "en": "Drag the photo and the note in. Ali can see what you’re looking at.",
+      "zh": "把照片、笔记拖进去。阿狸就能看见你正在看的东西。"
+    },
+    {
+      "startSec": 22,
+      "endSec": 30,
+      "en": "Talk about whatever comes to mind first.",
+      "zh": "想到什么，就先聊什么。"
+    },
+    {
+      "startSec": 30,
+      "endSec": 38,
+      "en": "Encyclopedia, essays, images appear in the chat first. Chat is the process — not the conclusion.",
+      "zh": "百科、文章、图片，会先出现在对话里。聊天是过程，还不是结论。"
+    },
+    {
+      "startSec": 38,
+      "endSec": 50,
+      "en": "What you want to keep, drag back onto the canvas. Not every answer is worth keeping.",
+      "zh": "真正想留住的，再拖回画布。不是每个回答，都值得留下。"
+    },
+    {
+      "startSec": 50,
+      "endSec": 58,
+      "en": "What you keep slowly becomes your material.",
+      "zh": "留下来的，才慢慢变成你的材料。"
+    },
+    {
+      "startSec": 58,
+      "endSec": 63,
+      "en": "Select the pieces that matter. Let AI gather them into an essay.",
+      "zh": "框选真正重要的几张。让 AI 帮你收成一篇文章。"
+    },
+    {
+      "startSec": 63,
+      "endSec": 68.5,
+      "en": "You can keep talking in the editor. Suggestions land in the draft — keep it if it fits, delete it if it doesn’t.",
+      "zh": "写着还能继续聊。建议会出现在正文里，觉得合适，就留下；不合适，就删掉。"
+    },
+    {
+      "startSec": 68.5,
+      "endSec": 75,
+      "en": "From one idea, to a long-form essay.",
+      "zh": "从一个想法，到一篇长文"
+    }
+  ]
+}

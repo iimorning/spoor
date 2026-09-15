@@ -10,6 +10,7 @@ import {
   spokenBookVoiceBranchLine,
 } from '../../src/services/spawnBookExpandCards';
 import { db } from '../../src/db';
+import { setCanvasV2Enabled } from '../../src/utils/canvasV2';
 
 describe('normalizeBookExpandPlan', () => {
   it('accepts hub + branches', () => {
@@ -23,6 +24,21 @@ describe('normalizeBookExpandPlan', () => {
     });
     expect(plan?.hub).toBe('偶像经济');
     expect(plan?.branches).toHaveLength(3);
+    expect(plan?.images).toEqual([]);
+  });
+
+  it('reads optional illustration prompts', () => {
+    const plan = normalizeBookExpandPlan({
+      hub: '偶像经济',
+      branches: [
+        { title: '一推', content: '最喜欢的成员' },
+        { title: '杰尼斯', content: '事务所体系' },
+      ],
+      images: [{ title: '应援', prompt: 'concert lightsticks in a dark arena' }],
+    });
+    expect(plan?.images).toEqual([
+      { title: '应援', prompt: 'concert lightsticks in a dark arena' },
+    ]);
   });
 
   it('rejects too few branches', () => {
@@ -110,11 +126,86 @@ describe('spawnBookExpandCards', () => {
   beforeEach(async () => {
     await db.nodes.clear();
     await db.edges.clear();
+    await db.canvasWorkZones.clear();
+    localStorage.clear();
     let n = 0;
     vi.spyOn(globalThis.crypto, 'randomUUID').mockImplementation((() => `id-${++n}`) as any);
   });
 
-  it('creates hub + branches linked from the book', async () => {
+  it('V2: stacks a collapsed pile without auto edges, scoped from the book room', async () => {
+    await db.nodes.add({
+      id: 'book-1',
+      canvasId: 'c1',
+      type: 'book',
+      content: '',
+      x: 100,
+      y: 100,
+      width: 380,
+      height: 520,
+    });
+    await db.canvasWorkZones.add({
+      id: 'zone-a',
+      canvasId: 'c1',
+      personaNodeId: 'ask-1',
+      x: 0,
+      y: 0,
+      width: 600,
+      height: 800,
+      createdAt: 0,
+    });
+
+    const result = await spawnBookExpandCards({
+      bookNodeId: 'book-1',
+      canvasId: 'c1',
+      bookPos: { x: 100, y: 100, width: 380, height: 520 },
+      plan: {
+        hub: '中心',
+        branches: [
+          { title: 'A', content: 'a' },
+          { title: 'B', content: 'b' },
+          { title: 'C', content: 'c' },
+        ],
+      },
+      staggerMs: 0,
+    });
+
+    expect(result.branchIds).toHaveLength(3);
+    expect(await db.edges.count()).toBe(0);
+
+    const hub = await db.nodes.get(result.hubId);
+    expect(hub?.bookExpandBranchesCollapsed).toBe(true);
+    expect(hub?.contextScopeAgentId).toBe('ask-1');
+
+    const stacked = await Promise.all(result.branchIds.map((id) => db.nodes.get(id)));
+    expect(stacked.every((n) => n?.contextScopeAgentId === 'ask-1')).toBe(true);
+    expect(stacked[0]?.bookExpandParentId).toBe(result.hubId);
+    expect(stacked[1]!.x - stacked[0]!.x).toBe(5);
+    expect(stacked[2]!.x - stacked[1]!.x).toBe(5);
+    expect(typeof stacked[0]?.bookExpandExpandedOffsetX).toBe('number');
+  });
+
+  it('V2: book outside every room still spawns an unscoped pile', async () => {
+    const result = await spawnBookExpandCards({
+      bookNodeId: 'book-out',
+      canvasId: 'c1',
+      bookPos: { x: 2000, y: 2000, width: 380, height: 520 },
+      plan: {
+        hub: '中心',
+        branches: [
+          { title: 'A', content: 'a' },
+          { title: 'B', content: 'b' },
+        ],
+      },
+      staggerMs: 0,
+    });
+    const hub = await db.nodes.get(result.hubId);
+    expect(hub?.contextScopeAgentId).toBeUndefined();
+    expect(hub?.bookExpandBranchesCollapsed).toBe(true);
+    expect(await db.edges.count()).toBe(0);
+  });
+
+  it('V1: creates hub + branches linked from the book', async () => {
+    setCanvasV2Enabled(false);
     const result = await spawnBookExpandCards({
       bookNodeId: 'book-1',
       canvasId: 'c1',
@@ -178,9 +269,13 @@ describe('spawnBookExpandCards', () => {
     expect(collapsedHub?.bookExpandBranchesCollapsed).toBe(true);
 
     const stacked = await Promise.all(branchIds.map((id) => db.nodes.get(id)));
-    const xs = stacked.map((n) => n!.x);
-    expect(xs[1]).toBeGreaterThan(xs[0]!);
-    expect(xs[2]).toBeGreaterThan(xs[1]!);
+    // Pile sits at the nearest branch; indices encode farthest→nearest (0 on top).
+    const byIndex = [...stacked].sort(
+      (a, b) => (a!.bookExpandIndex ?? 0) - (b!.bookExpandIndex ?? 0),
+    );
+    expect(byIndex[1]!.x - byIndex[0]!.x).toBe(5);
+    expect(byIndex[2]!.x - byIndex[1]!.x).toBe(5);
+    expect(byIndex[0]!.bookExpandIndex).toBe(0);
 
     await setBookExpandBranchesCollapsed(hubId, false, {
       nodes: await db.nodes.toArray(),
@@ -190,5 +285,173 @@ describe('spawnBookExpandCards', () => {
     const expanded = await Promise.all(branchIds.map((id) => db.nodes.get(id)));
     expect(expanded[0]!.x).toBe(expanded[1]!.x);
     expect(expanded[1]!.y).toBeGreaterThan(expanded[0]!.y);
+  });
+
+  it('stacks manually linked theme notes (either edge direction)', async () => {
+    await db.nodes.add({
+      id: 'theme-1',
+      canvasId: 'c1',
+      type: 'theme',
+      content: '核心主题',
+      x: 100,
+      y: 100,
+      height: 160,
+    });
+    await db.nodes.add({
+      id: 'note-a',
+      canvasId: 'c1',
+      type: 'note',
+      content: 'A',
+      x: 80,
+      y: 320,
+    });
+    await db.nodes.add({
+      id: 'note-b',
+      canvasId: 'c1',
+      type: 'note',
+      content: 'B',
+      x: 400,
+      y: 340,
+    });
+    // note → theme and theme → note both count
+    await db.edges.add({ id: 'e1', canvasId: 'c1', from: 'note-a', to: 'theme-1' });
+    await db.edges.add({ id: 'e2', canvasId: 'c1', from: 'theme-1', to: 'note-b' });
+
+    const nodes = await db.nodes.toArray();
+    const edges = await db.edges.toArray();
+    expect(resolveBookExpandBranches('theme-1', nodes, edges).map((n) => n.id)).toEqual([
+      'note-a',
+      'note-b',
+    ]);
+
+    await setBookExpandBranchesCollapsed('theme-1', true, { nodes, edges, hubHeight: 160 });
+    const hub = await db.nodes.get('theme-1');
+    expect(hub?.bookExpandBranchesCollapsed).toBe(true);
+    const a = await db.nodes.get('note-a');
+    const b = await db.nodes.get('note-b');
+    expect(a?.bookExpandParentId).toBe('theme-1');
+    expect(b?.bookExpandParentId).toBe('theme-1');
+    // Nearest is note-a (80,320); farthest note-b sits on top (index 0) at that anchor.
+    expect(b!.bookExpandIndex).toBe(0);
+    expect(a!.bookExpandIndex).toBe(1);
+    expect(b!.x).toBe(80);
+    expect(b!.y).toBe(320);
+    expect(a!.x).toBe(80 + 5);
+    expect(a!.y).toBe(320 + 5);
+    expect(a!.bookExpandExpandedOffsetX).toBe(80 - 100);
+    expect(b!.bookExpandExpandedOffsetX).toBe(400 - 100);
+
+    await setBookExpandBranchesCollapsed('theme-1', false, {
+      nodes: await db.nodes.toArray(),
+      edges: await db.edges.toArray(),
+      hubHeight: 160,
+    });
+    const a2 = await db.nodes.get('note-a');
+    const b2 = await db.nodes.get('note-b');
+    expect(a2!.x).toBe(80);
+    expect(a2!.y).toBe(320);
+    expect(b2!.x).toBe(400);
+    expect(b2!.y).toBe(340);
+  });
+
+  it('counts note chains under a theme (Theme→Note→Note)', async () => {
+    await db.nodes.add({
+      id: 'theme-1',
+      canvasId: 'c1',
+      type: 'theme',
+      content: '核心主题',
+      x: 100,
+      y: 100,
+    });
+    await db.nodes.add({
+      id: 'note-a',
+      canvasId: 'c1',
+      type: 'note',
+      content: 'A',
+      x: 80,
+      y: 320,
+    });
+    await db.nodes.add({
+      id: 'note-b',
+      canvasId: 'c1',
+      type: 'text',
+      content: 'B',
+      x: 400,
+      y: 340,
+    });
+    await db.nodes.add({
+      id: 'ask-1',
+      canvasId: 'c1',
+      type: 'ask',
+      x: 0,
+      y: 0,
+    });
+    await db.nodes.add({
+      id: 'side-note',
+      canvasId: 'c1',
+      type: 'note',
+      content: 'via ask',
+      x: 10,
+      y: 10,
+    });
+    await db.edges.add({ id: 'e1', canvasId: 'c1', from: 'theme-1', to: 'note-a' });
+    await db.edges.add({ id: 'e2', canvasId: 'c1', from: 'note-a', to: 'note-b' });
+    // Ask bridge must NOT pull side-note into the theme stack.
+    await db.edges.add({ id: 'e3', canvasId: 'c1', from: 'theme-1', to: 'ask-1' });
+    await db.edges.add({ id: 'e4', canvasId: 'c1', from: 'ask-1', to: 'side-note' });
+
+    const nodes = await db.nodes.toArray();
+    const edges = await db.edges.toArray();
+    expect(resolveBookExpandBranches('theme-1', nodes, edges).map((n) => n.id).sort()).toEqual([
+      'note-a',
+      'note-b',
+    ]);
+  });
+
+  it('includes a newly edged note after a prior collapse tagged only one', async () => {
+    await db.nodes.add({
+      id: 'theme-1',
+      canvasId: 'c1',
+      type: 'theme',
+      content: '核心主题',
+      x: 100,
+      y: 100,
+      bookExpandBranchesCollapsed: false,
+    });
+    await db.nodes.add({
+      id: 'note-a',
+      canvasId: 'c1',
+      type: 'note',
+      content: 'A',
+      x: 80,
+      y: 320,
+      bookExpandParentId: 'theme-1',
+      bookExpandIndex: 0,
+      bookExpandExpandedOffsetX: -20,
+      bookExpandExpandedOffsetY: 220,
+    });
+    await db.nodes.add({
+      id: 'note-b',
+      canvasId: 'c1',
+      type: 'note',
+      content: 'B',
+      x: 400,
+      y: 340,
+    });
+    await db.edges.add({ id: 'e1', canvasId: 'c1', from: 'theme-1', to: 'note-a' });
+    await db.edges.add({ id: 'e2', canvasId: 'c1', from: 'theme-1', to: 'note-b' });
+
+    const nodes = await db.nodes.toArray();
+    const edges = await db.edges.toArray();
+    expect(resolveBookExpandBranches('theme-1', nodes, edges).map((n) => n.id).sort()).toEqual([
+      'note-a',
+      'note-b',
+    ]);
+
+    await setBookExpandBranchesCollapsed('theme-1', true, { hubHeight: 160 });
+    const a = await db.nodes.get('note-a');
+    const b = await db.nodes.get('note-b');
+    expect(a?.bookExpandParentId).toBe('theme-1');
+    expect(b?.bookExpandParentId).toBe('theme-1');
   });
 });

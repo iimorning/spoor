@@ -2,6 +2,7 @@ import type { TFunction } from 'i18next';
 import type { AIConfig } from '../components/AISettingsModal';
 import { callUniversalAI } from './ai';
 import { combineSystemParts, getLocaleDirective } from '../utils/aiI18n';
+import { spoorLlmSessionId } from '../utils/openRouterPromptCache';
 import { parseLenientLlmJson } from '../utils/llmJson';
 import { deriveSearchQueryFromNoteText } from './spawnWebSearchNoteCards';
 import { enrichSearchQueryWithLinkedContext } from '../utils/linkedCardSearchContext';
@@ -121,6 +122,7 @@ export async function deriveNoteSearchQueries(
       prompt,
       temperature: 0.2,
       topP: 0.4,
+      sessionId: spoorLlmSessionId('note-search'),
     });
     if (!raw?.trim()) return fallback;
     const normalized = normalizeNoteSearchQueries(parseLenientLlmJson(raw), trimmed) ?? fallback;

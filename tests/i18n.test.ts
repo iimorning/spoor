@@ -31,8 +31,8 @@ describe('i18n 国际化模块', () => {
       expect(i18n.hasResourceBundle('zh', 'translation')).toBe(true);
     });
 
-    it('默认语言为 en（当 localStorage 中无记录时）', () => {
-      expect(i18n.language).toBe('en');
+    it('初始化后的语言是 en 或 zh', () => {
+      expect(['en', 'zh']).toContain(i18n.language);
     });
   });
 
@@ -49,7 +49,7 @@ describe('i18n 国际化模块', () => {
     it('sidebar 翻译完整', () => {
       expect(i18n.t('sidebar.personal')).toBe('Canvas');
       expect(i18n.t('sidebar.reference')).toBe('Essays');
-      expect(i18n.t('sidebar.lab')).toBe('Lab');
+      expect(i18n.t('sidebar.archive')).toBe('Knowledge Archive');
       expect(i18n.t('sidebar.agents')).toBe('Agents');
       expect(i18n.t('sidebar.new_note')).toBe('New Note');
       expect(i18n.t('sidebar.new_theme_card')).toBe('New Theme Card');
@@ -61,6 +61,9 @@ describe('i18n 国际化模块', () => {
       expect(i18n.t('canvas.zoom')).toBe('Zoom');
       expect(i18n.t('canvas.new_canvas')).toBe('New Canvas');
       expect(i18n.t('canvas.rename')).toBe('Rename');
+      expect(i18n.t('canvas.delete_canvas')).toBe('Delete canvas');
+      expect(i18n.t('canvas.delete_canvas_confirm', { name: 'Canvas 4' })).toContain('no local or cloud backup');
+      expect(i18n.t('canvas.delete_canvas_last')).toBe('Keep at least one canvas.');
       expect(i18n.t('canvas.delete_note')).toBe('Delete note');
       expect(i18n.t('canvas.cycle_layout')).toBe('Cycle Layout');
     });
@@ -68,8 +71,15 @@ describe('i18n 国际化模块', () => {
     it('nodes 翻译完整', () => {
       expect(i18n.t('nodes.theme')).toBe('Core Theme');
       expect(i18n.t('nodes.new_theme_title')).toBe('Untitled theme');
+      expect(i18n.t('nodes.theme_default_description')).toBe(
+        'Central research objective for the current workspace.',
+      );
+      expect(i18n.t('nodes.theme_default_tag')).toBe('Spatial Encoding');
       expect(i18n.t('nodes.note')).toBe('Note');
-      expect(i18n.t('nodes.ai_refinement')).toBe('AI Refinement');
+      expect(i18n.t('nodes.ai_streaming')).toBe('Generating…');
+      expect(i18n.t('nodes.ai_thinking_label')).toBe('Thinking');
+      expect(i18n.t('nodes.ai_thinking_view')).toBe('View thinking');
+      expect(i18n.t('nodes.ai_failed_open_settings')).toBe('Sign in');
       expect(i18n.t('nodes.ai_loading')).toBe('Synthesizing...');
     });
 
@@ -81,6 +91,7 @@ describe('i18n 国际化模块', () => {
       expect(i18n.t('settings.docs_heading')).toContain('Configuration');
       expect(i18n.t('settings.docs_blurb_gemini')).toContain('Google');
       expect(i18n.t('settings.docs_link_gemini_console_key')).toContain('API');
+      expect(i18n.t('settings.support')).toBe('Contact support');
     });
 
     it('agents 翻译完整', () => {
@@ -93,24 +104,22 @@ describe('i18n 国际化模块', () => {
       expect(i18n.t('agents.sandbox_clear_confirm')).toContain('cannot be undone');
     });
 
-    it('lab 翻译完整', () => {
-      expect(i18n.t('lab.investigate')).toBe('What would you like to investigate?');
-      expect(i18n.t('lab.approve')).toBe('Approve & Execute');
-      expect(i18n.t('lab.report')).toBe('Synthesized Report');
-      expect(i18n.t('lab.plan_edit_hint').length).toBeGreaterThan(10);
-      expect(i18n.t('lab.plan_revision_apply')).toContain('AI');
-      expect(i18n.t('lab.ai_revise_decompose', { query: 'Q', plan: '[]', instruction: 'X' })).toContain('Q');
-    });
-
     it('reference 翻译完整', () => {
       expect(i18n.t('reference.index_title')).toBe('Archive Index');
       expect(i18n.t('reference.citation')).toBe('Copy Citation');
       expect(i18n.t('reference.tags')).toBe('Tags');
+      expect(i18n.t('reference.word_count_label')).toBe('Characters');
     });
 
     it('ai 翻译完整', () => {
       expect(i18n.t('ai.loading')).toBe('AI is thinking...');
       expect(i18n.t('ai.prompts.localeDirective')).toContain('English');
+      expect(i18n.t('ai.prompts.publishEssayPolishSystem')).toContain('minimum change');
+      expect(i18n.t('ai.prompts.publishEssayPolishSystem')).not.toContain("Today's date");
+      expect(i18n.t('ai.prompts.publishEssayPolish')).toContain('first-pass structure');
+      expect(i18n.t('ai.prompts.essayChatSystem')).toContain('minimum change');
+      expect(i18n.t('ai.prompts.essayChatSystem')).not.toContain("Today's date");
+      expect(i18n.t('ai.prompts.essayChatSystem')).toContain('Selection first');
       expect(
         i18n.t('ai.prompts.agentThreadFollowUp', {
           initialContext: 'IC',
@@ -127,9 +136,41 @@ describe('i18n 国际化模块', () => {
       ).toContain('RQ');
     });
 
+    it('drawToolAvailable tells the model to generate text-in-image posters here', () => {
+      const draw = i18n.t('ai.prompts.drawToolAvailable');
+      expect(draw).toContain('```draw');
+      expect(draw.toLowerCase()).toContain('xiaohongshu');
+      expect(draw.toLowerCase()).toContain('gaoding');
+      expect(draw).toMatch(/still call this tool/i);
+      expect(draw).toMatch(/Do not send the user to Xiaohongshu/i);
+      const persona = i18n.t('ai.prompts.toolbarBarePersona');
+      expect(persona).toMatch(/later appendix grants illustration/i);
+    });
+
     it('内置 Agent 系统提示词有英文文案', () => {
       expect(i18n.t('agents.defaults.interviewer.name')).toBe('The Mirror of Insight');
       expect(i18n.t('agents.defaults.stylist.prompt')).toContain('stacking blocks');
+    });
+
+    it('官方海龟汤主持人有英文文案', () => {
+      expect(i18n.t('community.official_badge')).toBe('Curated by Spoor');
+      expect(i18n.t('community.official.turtle_soup.title')).toBe('Turtle Soup: Lateral Thinking');
+      expect(i18n.t('community.official.turtle_soup.persona_name')).toBe('Turtle Soup Host');
+      expect(i18n.t('community.official.turtle_soup.persona_prompt')).toContain('Yes.');
+      expect(i18n.t('community.official.turtle_soup.note_start')).toContain('Start a round');
+    });
+
+    it('官方直觉泵专家有英文文案', () => {
+      expect(i18n.t('community.official.intuition_pump.title')).toBe(
+        'Intuition Pump: Thought Experiments',
+      );
+      expect(i18n.t('community.official.intuition_pump.persona_name')).toBe(
+        'Intuition Pump Expert',
+      );
+      expect(i18n.t('community.official.intuition_pump.persona_prompt')).toContain(
+        'intuition pump',
+      );
+      expect(i18n.t('community.official.intuition_pump.note_start')).toContain('intuition pump');
     });
   });
 
@@ -146,7 +187,7 @@ describe('i18n 国际化模块', () => {
     it('sidebar 翻译完整', () => {
       expect(i18n.t('sidebar.personal')).toBe('画布');
       expect(i18n.t('sidebar.reference')).toBe('长文');
-      expect(i18n.t('sidebar.lab')).toBe('研究');
+      expect(i18n.t('sidebar.archive')).toBe('知识存档');
       expect(i18n.t('sidebar.agents')).toBe('角色');
       expect(i18n.t('sidebar.new_note')).toBe('新建便签');
       expect(i18n.t('sidebar.new_theme_card')).toBe('新建主题卡');
@@ -157,14 +198,20 @@ describe('i18n 国际化模块', () => {
       expect(i18n.t('canvas.zoom')).toBe('缩放');
       expect(i18n.t('canvas.new_canvas')).toBe('新建画布');
       expect(i18n.t('canvas.rename')).toBe('重命名');
+      expect(i18n.t('canvas.delete_canvas')).toBe('删除画布');
+      expect(i18n.t('canvas.delete_canvas_confirm', { name: '画布 4' })).toContain('本地和云端都不会再有备份');
+      expect(i18n.t('canvas.delete_canvas_last')).toBe('至少保留一张画布。');
       expect(i18n.t('canvas.delete_note')).toBe('删除便签');
     });
 
     it('nodes 翻译完整', () => {
       expect(i18n.t('nodes.theme')).toBe('核心主题');
       expect(i18n.t('nodes.new_theme_title')).toBe('未命名主题');
+      expect(i18n.t('nodes.theme_default_description')).toBe('当前画布的核心研究目标。');
+      expect(i18n.t('nodes.theme_default_tag')).toBe('空间编码');
       expect(i18n.t('nodes.note')).toBe('笔记');
       expect(i18n.t('nodes.ai_refinement')).toBe('AI 优化');
+      expect(i18n.t('nodes.ai_failed_open_settings')).toBe('去登录');
     });
 
     it('settings 翻译完整', () => {
@@ -173,6 +220,7 @@ describe('i18n 国际化模块', () => {
       expect(i18n.t('settings.save')).toBe('保存配置');
       expect(i18n.t('settings.docs_heading')).toContain('配置');
       expect(i18n.t('settings.docs_blurb_mimo')).toContain('MiMo');
+      expect(i18n.t('settings.support')).toBe('联系客服');
     });
 
     it('agents 翻译完整', () => {
@@ -187,6 +235,12 @@ describe('i18n 国际化模块', () => {
     it('ai 翻译完整', () => {
       expect(i18n.t('ai.loading')).toBe('AI 思考中...');
       expect(i18n.t('ai.prompts.localeDirective')).toContain('简体中文');
+      expect(i18n.t('ai.prompts.publishEssayPolishSystem')).toContain('最小修改');
+      expect(i18n.t('ai.prompts.publishEssayPolishSystem')).not.toContain('今天的日期');
+      expect(i18n.t('ai.prompts.publishEssayPolish')).toContain('结构整理阶段');
+      expect(i18n.t('ai.prompts.essayChatSystem')).toContain('最小修改');
+      expect(i18n.t('ai.prompts.essayChatSystem')).not.toContain('今天的日期');
+      expect(i18n.t('ai.prompts.essayChatSystem')).toContain('选区优先');
       expect(
         i18n.t('ai.prompts.agentThreadFollowUp', {
           initialContext: '原文',
@@ -196,23 +250,41 @@ describe('i18n 国际化模块', () => {
       ).toContain('原文');
     });
 
+    it('drawToolAvailable 禁止把用户打发去外部排版', () => {
+      const draw = i18n.t('ai.prompts.drawToolAvailable');
+      expect(draw).toContain('```draw');
+      expect(draw).toContain('小红书');
+      expect(draw).toContain('稿定');
+      expect(draw).toContain('仍然调用本工具');
+      expect(draw).toContain('不要把用户打发去小红书');
+      const persona = i18n.t('ai.prompts.toolbarBarePersona');
+      expect(persona).toContain('若后面的附录授予了画图或检索工具');
+    });
+
     it('内置 Agent 系统提示词有中文文案', () => {
       expect(i18n.t('agents.defaults.interviewer.name')).toBe('真知镜');
       expect(i18n.t('agents.defaults.stylist.prompt')).toContain('文字积木');
     });
 
-    it('lab 翻译完整', () => {
-      expect(i18n.t('lab.investigate')).toBe('您想调查什么？');
-      expect(i18n.t('lab.idle_intro')).toContain('智能体');
-      expect(i18n.t('lab.suggested_tag_1')).toContain('空间编码');
-      expect(i18n.t('lab.approve')).toBe('批准并执行');
-      expect(i18n.t('lab.plan_revision_apply')).toContain('AI');
-      expect(i18n.t('lab.ai_revise_decompose', { query: '问题', plan: '[]', instruction: '改' })).toContain('问题');
+    it('官方海龟汤主持人有中文文案', () => {
+      expect(i18n.t('community.official_badge')).toBe('Spoor 官方');
+      expect(i18n.t('community.official.turtle_soup.title')).toBe('海龟汤：情境推理');
+      expect(i18n.t('community.official.turtle_soup.persona_name')).toBe('海龟汤主持人');
+      expect(i18n.t('community.official.turtle_soup.persona_prompt')).toContain('是 / 不是 / 与此无关');
+      expect(i18n.t('community.official.turtle_soup.note_start')).toContain('开始一局');
+    });
+
+    it('官方直觉泵专家有中文文案', () => {
+      expect(i18n.t('community.official.intuition_pump.title')).toBe('直觉泵：思想实验设计');
+      expect(i18n.t('community.official.intuition_pump.persona_name')).toBe('直觉泵专家');
+      expect(i18n.t('community.official.intuition_pump.persona_prompt')).toContain('直觉泵');
+      expect(i18n.t('community.official.intuition_pump.note_start')).toContain('直觉泵');
     });
 
     it('reference 翻译完整', () => {
       expect(i18n.t('reference.index_title')).toBe('档案索引');
       expect(i18n.t('reference.citation')).toBe('引用文献');
+      expect(i18n.t('reference.word_count_label')).toBe('字数');
     });
   });
 

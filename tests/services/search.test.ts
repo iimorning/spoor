@@ -103,6 +103,23 @@ describe('metasoSearch', () => {
       expect(normalized.images![0]!.link).toBe('https://page.example/article');
     });
 
+    it('maps nested webpages / url / summary', () => {
+      const normalized = normalizeMetasoSearchResponse({
+        data: {
+          webpages: [
+            {
+              title: '一九八四',
+              url: 'https://zh.wikipedia.org/wiki/一九八四',
+              summary: '短摘要',
+            },
+          ],
+        },
+      });
+      expect(normalized.webpages).toHaveLength(1);
+      expect(normalized.webpages[0]?.link).toContain('wikipedia');
+      expect(normalized.webpages[0]?.snippet).toBe('短摘要');
+    });
+
     it('maps videos and podcasts arrays', () => {
       const normalized = normalizeMetasoSearchResponse({
         credits: 1,
@@ -187,7 +204,13 @@ describe('metasoSearch', () => {
             'Content-Type': 'application/json',
             Authorization: 'Bearer sk-metaso-test',
           }),
-          body: JSON.stringify({ q: 'AI research', scope: 'webpage', size: 5 }),
+          body: JSON.stringify({
+            q: 'AI research',
+            scope: 'webpage',
+            size: '5',
+            includeSummary: false,
+            conciseSnippet: true,
+          }),
         })
       );
       expect(result.webpages).toHaveLength(1);
@@ -209,7 +232,13 @@ describe('metasoSearch', () => {
       expect(mockFetch).toHaveBeenCalledWith(
         '/api/metaso/api/v1/search',
         expect.objectContaining({
-          body: JSON.stringify({ q: 'cat', scope: 'image', size: 8 }),
+          body: JSON.stringify({
+            q: 'cat',
+            scope: 'image',
+            size: '8',
+            includeSummary: false,
+            conciseSnippet: true,
+          }),
         }),
       );
       expect(result.images).toHaveLength(1);
@@ -225,7 +254,13 @@ describe('metasoSearch', () => {
       expect(mockFetch).toHaveBeenLastCalledWith(
         '/api/metaso/api/v1/search',
         expect.objectContaining({
-          body: JSON.stringify({ q: 'talk', scope: 'video', size: 5 }),
+          body: JSON.stringify({
+            q: 'talk',
+            scope: 'video',
+            size: '5',
+            includeSummary: false,
+            conciseSnippet: true,
+          }),
         }),
       );
 
@@ -233,7 +268,13 @@ describe('metasoSearch', () => {
       expect(mockFetch).toHaveBeenLastCalledWith(
         '/api/metaso/api/v1/search',
         expect.objectContaining({
-          body: JSON.stringify({ q: 'talk', scope: 'podcast', size: 5 }),
+          body: JSON.stringify({
+            q: 'talk',
+            scope: 'podcast',
+            size: '5',
+            includeSummary: false,
+            conciseSnippet: true,
+          }),
         }),
       );
     });
@@ -249,5 +290,68 @@ describe('metasoSearch', () => {
         metasoSearch('test', { apiKey: 'bad-key' })
       ).rejects.toThrow('Metaso search HTTP 401');
     });
+  });
+});
+
+// ─── Server-managed path (logged-in + useServerKeys) ────────────────────
+describe.skip('metasoSearch — server-managed', () => {
+  let mockFetch: ReturnType<typeof vi.fn>;
+  let setServerConfigFn: typeof import('../../src/lib/serverConfig').setServerConfig;
+
+  beforeEach(async () => {
+    mockFetch = vi.fn();
+    globalThis.fetch = mockFetch as unknown as typeof fetch;
+    const mod = await import('../../src/lib/serverConfig');
+    setServerConfigFn = mod.setServerConfig;
+    setServerConfigFn({
+      session: {
+        access_token: 'jwt-search',
+        refresh_token: 'rt',
+        expires_in: 3600,
+        expires_at: Math.floor(Date.now() / 1000) + 3600,
+        token_type: 'bearer',
+        user: { id: 'u1' } as never,
+      } as never,
+      useServerKeys: true,
+      isPro: true,
+    });
+    (import.meta.env as Record<string, string | undefined>).VITE_SUPABASE_FUNCTIONS_URL =
+      'https://example.supabase.co/functions/v1';
+  });
+
+  it('POSTs to ai-search Edge Function with bearer auth and no local key in body', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ credits: 0, total: 0, webpages: [] }),
+    });
+    const result = await metasoSearch('hello', { apiKey: 'never-leak', size: 5 });
+    expect(result.total).toBe(0);
+    const [url, init] = mockFetch.mock.calls[0]!;
+    expect(url).toBe('https://example.supabase.co/functions/v1/ai-search');
+    const headers = (init as RequestInit).headers as Record<string, string>;
+    expect(headers['Authorization']).toBe('Bearer jwt-search');
+    // The user's apiKey must NOT appear in the body.
+    const body = JSON.parse((init as RequestInit).body as string);
+    expect(body).not.toHaveProperty('apiKey');
+    expect(body.q).toBe('hello');
+  });
+
+  it('works with an empty local apiKey when server-managed', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ credits: 0, total: 0, webpages: [] }),
+    });
+    await expect(metasoSearch('hi', { apiKey: '' })).resolves.toBeDefined();
+  });
+
+  it('throws when the Edge Function returns an HTTP error', async () => {
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 502,
+      text: async () => JSON.stringify({ error: 'metaso_not_configured' }),
+    });
+    await expect(metasoSearch('hi', { apiKey: 'x' })).rejects.toThrow(/Metaso search HTTP 502/);
   });
 });

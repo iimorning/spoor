@@ -1,6 +1,6 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
-import { BookOpen, ChevronLeft, ChevronRight, GitBranch, Loader2, Mic, Square, StickyNote, Sparkles } from 'lucide-react';
+import { BookOpen, ChevronLeft, ChevronRight, GitBranch, Loader2, Maximize2, StickyNote, Wand2 } from 'lucide-react';
 import { db } from '../../db';
 import type { BookNodeProps } from './types';
 import { CANVAS_NODE_CONTEXT_TEXT_ATTR } from '../../utils/canvasNodeContextText';
@@ -12,26 +12,8 @@ import {
   bookChapterFlipFromWheel,
   nextBookReaderScrollTop,
 } from '../../utils/bookReaderScroll';
-import { useBookVoiceChat } from '../../hooks/useBookVoiceChat';
-import {
-  BOOK_EXPAND_CHILD_HEIGHT,
-  BOOK_EXPAND_CHILD_OFFSET_X,
-  BOOK_EXPAND_CHILD_WIDTH,
-  BOOK_EXPAND_HUB_HEIGHT,
-  BOOK_EXPAND_HUB_WIDTH,
-  bookExpandBranchLaneY,
-  bookExpandClusterSize,
-  spawnBookExpandBranchCard,
-  spawnBookExpandHubCard,
-} from '../../services/spawnBookExpandCards';
-import {
-  FLUX_IMAGE_CARD_HEIGHT,
-  FLUX_IMAGE_CARD_WIDTH,
-  fluxImageCardPos,
-  spawnFluxImageCard,
-} from '../../services/spawnFluxImageCards';
-import type { BookVoiceCardSpawner } from '../../hooks/useBookVoiceChat';
-import { findOpenCanvasPosition } from '../../utils/canvas';
+import { useTextSelectionToolbar } from '../../hooks/useTextSelectionToolbar';
+import { TextSelectionToolbar, TextSelectionToolbarButton } from '../TextSelectionToolbar';
 
 function clampPageIndex(index: number, unitCount: number): number {
   if (unitCount <= 0) return 0;
@@ -101,11 +83,8 @@ export function BookNode({
   onAskAboutSelection,
   onExpandSelection,
   isExpanding = false,
-  aiConfig,
-  voiceChatDisabled,
-  canvasTransform,
-  canvasNodes,
-  onFocusCanvasRect,
+  onOpenFullscreen,
+  layout = 'card',
 }: BookNodeProps) {
   const { t } = useTranslation();
   const book = useMemo(() => tryParseBookContent(node.content), [node.content]);
@@ -113,7 +92,6 @@ export function BookNode({
   const scrollSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const ignoreScrollPersistRef = useRef(false);
   const pageScrollLockUntilRef = useRef(0);
-  const [askUi, setAskUi] = useState<{ top: number; left: number; text: string } | null>(null);
 
   const unitCount = book?.units.length ?? 0;
   const storedIndex = typeof node.bookPageIndex === 'number' ? node.bookPageIndex : 0;
@@ -124,6 +102,23 @@ export function BookNode({
   const selectionSource = `${sourceLabel} · ${pageLabel}`;
   const storedScrollTop = typeof node.bookScrollTop === 'number' ? Math.max(0, node.bookScrollTop) : 0;
 
+  const {
+    askUi,
+    toolbarRef: askToolbarRef,
+    quoteRef: askQuoteRef,
+    updateSelectionAsk,
+    dismissSelectionToolbar,
+    clearAskUi,
+    arm: armSelectionToolbar,
+    disarm: disarmSelectionToolbar,
+  } = useTextSelectionToolbar({
+    bodyRef,
+    sourceLabel: selectionSource,
+    disabled: isExpanding,
+    positionMode: layout === 'immersive' ? 'viewport' : 'local',
+    clampSelector: layout === 'immersive' ? '[data-testid="book-fullscreen"]' : undefined,
+  });
+
   // Keep persisted index in range if book content shrinks after a re-import.
   useEffect(() => {
     if (unitCount <= 0) return;
@@ -133,7 +128,7 @@ export function BookNode({
 
   // Restore in-page scroll after refresh / page change (not on every liveQuery scroll write).
   useLayoutEffect(() => {
-    setAskUi(null);
+    clearAskUi();
     const el = bodyRef.current;
     if (!el) return;
     const top = storedScrollTop;
@@ -157,8 +152,6 @@ export function BookNode({
       if (scrollSaveTimerRef.current) clearTimeout(scrollSaveTimerRef.current);
     };
   }, []);
-
-  const clearAskUi = useCallback(() => setAskUi(null), []);
 
   const persistScrollTop = useCallback(
     (scrollTop: number) => {
@@ -277,76 +270,6 @@ export function BookNode({
     // unitCount: bodyRef only mounts once parsed book units exist.
   }, [node.id, unitCount]);
 
-  const askToolbarRef = useRef<HTMLDivElement>(null);
-  /** True while pointer is down on the ask/expand bar (selection often clears on press). */
-  const askToolbarArmedRef = useRef(false);
-  /** Latest quote snapshot so actions still work if askUi is cleared mid-gesture. */
-  const askQuoteRef = useRef<{ text: string; sourceLabel: string } | null>(null);
-
-  useEffect(() => {
-    if (askUi) {
-      askQuoteRef.current = { text: askUi.text, sourceLabel: selectionSource };
-    }
-  }, [askUi, selectionSource]);
-
-  const updateSelectionAsk = useCallback(() => {
-    if (isExpanding) {
-      setAskUi(null);
-      return;
-    }
-    // Keep the action bar mounted while interacting with it.
-    if (askToolbarArmedRef.current || askToolbarRef.current?.matches(':hover')) {
-      return;
-    }
-    const sel = window.getSelection();
-    if (!sel || sel.isCollapsed || !bodyRef.current) {
-      setAskUi(null);
-      return;
-    }
-    if (!bodyRef.current.contains(sel.anchorNode) || !bodyRef.current.contains(sel.focusNode)) {
-      setAskUi(null);
-      return;
-    }
-    const text = sel.toString().replace(/\s+/g, ' ').trim();
-    if (text.length < 2) {
-      setAskUi(null);
-      return;
-    }
-    const range = sel.getRangeAt(0);
-    const positionParent = bodyRef.current.parentElement ?? bodyRef.current;
-    const host = positionParent.getBoundingClientRect();
-    // Canvas pan/zoom scales screen coords; convert back to local CSS px.
-    const scale = host.height / Math.max(1, positionParent.offsetHeight);
-    const rects = Array.from(range.getClientRects()).filter((r) => r.width > 0 && r.height > 0);
-    const first = rects[0] ?? range.getBoundingClientRect();
-    const last = rects[rects.length - 1] ?? first;
-    const toolbarW = 188;
-    const toolbarH = 40;
-    const gap = 8;
-
-    // Prefer above the first line of the selection so the popup doesn't cover the quote.
-    let top = (first.top - host.top) / scale - toolbarH - gap;
-    if (top < 4) {
-      top = (last.bottom - host.top) / scale + gap;
-    }
-    top = Math.min(Math.max(4, top), Math.max(4, positionParent.clientHeight - toolbarH - 4));
-
-    const midX = (first.left + first.width / 2 - host.left) / scale;
-    const left = Math.min(
-      Math.max(8, midX - toolbarW / 2),
-      Math.max(8, positionParent.clientWidth - toolbarW - 8),
-    );
-
-    setAskUi({ text, top, left });
-  }, [isExpanding]);
-
-  const dismissSelectionToolbar = useCallback(() => {
-    askToolbarArmedRef.current = false;
-    askQuoteRef.current = null;
-    clearAskUi();
-    window.getSelection()?.removeAllRanges();
-  }, [clearAskUi]);
-
   const runExtractSelectionToCard = useCallback(() => {
     const quote = askQuoteRef.current;
     if (!quote || !onExtractSelectionToCard) return;
@@ -367,14 +290,6 @@ export function BookNode({
     onExpandSelection(quote.text, quote.sourceLabel);
     dismissSelectionToolbar();
   }, [onExpandSelection, dismissSelectionToolbar]);
-
-  useEffect(() => {
-    const onSelChange = () => {
-      requestAnimationFrame(updateSelectionAsk);
-    };
-    document.addEventListener('selectionchange', onSelChange);
-    return () => document.removeEventListener('selectionchange', onSelChange);
-  }, [updateSelectionAsk]);
 
   if (!book || unitCount === 0) {
     return (
@@ -400,142 +315,26 @@ export function BookNode({
     (onExtractSelectionToCard || onAskAboutSelection || onExpandSelection) &&
     !isExpanding;
 
-  const voiceHubLayoutRef = useRef<{ hubId: string; hubX: number; hubY: number } | null>(null);
-  const canvasTransformRef = useRef(canvasTransform);
-  canvasTransformRef.current = canvasTransform;
-  const canvasNodesRef = useRef(canvasNodes);
-  canvasNodesRef.current = canvasNodes;
-  const onFocusCanvasRectRef = useRef(onFocusCanvasRect);
-  onFocusCanvasRectRef.current = onFocusCanvasRect;
-
-  const voiceCardSpawner = useMemo<BookVoiceCardSpawner>(() => ({
-    spawnHub: async (hubLabel, branchCount) => {
-      const cluster = bookExpandClusterSize(branchCount);
-      const transform = canvasTransformRef.current ?? { x: 0, y: 0, scale: 1 };
-      const obstacles = (canvasNodesRef.current ?? []).filter((n) => n.id !== node.id);
-      // Reserve the full hub+lane footprint beside the book, but spiral with a
-      // hub-sized step so a nearby blocker does not fling the cluster far away.
-      const open = findOpenCanvasPosition({
-        transform,
-        obstacles: [node, ...obstacles],
-        size: cluster,
-        preferBeside: node,
-        gap: 36,
-        step: {
-          width: BOOK_EXPAND_HUB_WIDTH + 36,
-          height: BOOK_EXPAND_HUB_HEIGHT + 36,
-        },
-        maxRings: 24,
-      });
-      const hubPos = {
-        x: open.x,
-        y: open.y + Math.max(0, (cluster.height - BOOK_EXPAND_HUB_HEIGHT) / 2),
-      };
-      const placed = await spawnBookExpandHubCard({
-        bookNodeId: node.id,
-        canvasId: node.canvasId ?? 'default',
-        bookPos: {
-          x: node.x,
-          y: node.y,
-          width: node.width,
-          height: node.height,
-        },
-        hub: hubLabel,
-        hubPos,
-      });
-      voiceHubLayoutRef.current = placed;
-      onFocusCanvasRectRef.current?.({
-        x: placed.hubX,
-        y: placed.hubY,
-        width: BOOK_EXPAND_HUB_WIDTH,
-        height: BOOK_EXPAND_HUB_HEIGHT,
-      });
-      return { hubId: placed.hubId };
-    },
-    spawnBranch: async (hubId, branch, index, branchCount) => {
-      const layout = voiceHubLayoutRef.current;
-      if (!layout || layout.hubId !== hubId) return;
-      await spawnBookExpandBranchCard({
-        canvasId: node.canvasId ?? 'default',
-        hubId,
-        hubX: layout.hubX,
-        hubY: layout.hubY,
-        branch,
-        index,
-        branchCount,
-      });
-      const branchY = bookExpandBranchLaneY(layout.hubY, index, branchCount, BOOK_EXPAND_HUB_HEIGHT);
-      onFocusCanvasRectRef.current?.({
-        x: layout.hubX + BOOK_EXPAND_CHILD_OFFSET_X,
-        y: branchY,
-        width: BOOK_EXPAND_CHILD_WIDTH,
-        height: BOOK_EXPAND_CHILD_HEIGHT,
-      });
-    },
-    spawnImage: async (hubId, image, index, total) => {
-      const layout = voiceHubLayoutRef.current;
-      if (!layout || layout.hubId !== hubId) return;
-      const pos = fluxImageCardPos(
-        { x: layout.hubX, y: layout.hubY },
-        index,
-        total,
-      );
-      await spawnFluxImageCard({
-        canvasId: node.canvasId ?? 'default',
-        imageUrl: image.imageUrl,
-        description: image.title,
-        x: pos.x,
-        y: pos.y,
-        linkFromId: hubId,
-      });
-      onFocusCanvasRectRef.current?.({
-        x: pos.x,
-        y: pos.y,
-        width: FLUX_IMAGE_CARD_WIDTH,
-        height: FLUX_IMAGE_CARD_HEIGHT,
-      });
-    },
-  }), [node]);
-
-  const voice = useBookVoiceChat({
-    aiConfig: aiConfig ?? null,
-    pageContext: { text: unitText, label: selectionSource },
-    disabled: !aiConfig || voiceChatDisabled,
-    cardSpawner: voiceCardSpawner,
-  });
-  const voiceActive = voice.active;
-  const voicePhase = voice.phase;
-  const voicePartial = voice.partialTranscript;
-  const voiceToggle = voice.toggle;
-  const voiceStop = voice.stop;
-  const voiceToggleRef = useRef(voiceToggle);
-  voiceToggleRef.current = voiceToggle;
-  const voiceStopRef = useRef(voiceStop);
-  voiceStopRef.current = voiceStop;
-
-  // Stop voice chat if the book node is removed while active.
-  useEffect(() => {
-    return () => {
-      voiceStopRef.current?.();
-    };
-  }, []);
-
-  const voicePhaseLabel =
-    voicePhase === 'listening'
-      ? t('voice.phase_listening')
-      : voicePhase === 'thinking'
-        ? t('voice.phase_thinking')
-        : voicePhase === 'speaking'
-          ? t('voice.phase_speaking')
-          : t('voice.book_chat_title');
-
   return (
     <div
-      className="w-full h-full bg-white p-4 shadow-lg border-2 border-[#E6E4DF] flex flex-col min-h-[280px]"
-      style={{ outline: '1px solid transparent' }}
+      className={
+        layout === 'immersive'
+          ? 'w-full h-full min-h-0 bg-transparent flex flex-col'
+          : 'w-full h-full bg-white p-4 shadow-lg border-2 border-[#E6E4DF] flex flex-col min-h-[280px]'
+      }
+      style={layout === 'immersive' ? undefined : { outline: '1px solid transparent' }}
+      onDoubleClick={
+        layout === 'card' && onOpenFullscreen
+          ? (e) => {
+              e.stopPropagation();
+              onOpenFullscreen(node.id);
+            }
+          : undefined
+      }
     >
+      {layout === 'card' ? (
       <div className="flex items-center gap-2 mb-2 shrink-0">
-        <BookOpen className="w-4 h-4 text-[#C2410C]" />
+        <BookOpen className="w-4 h-4 text-[#C2410C] shrink-0" />
         <span className="text-[10px] font-sans font-bold uppercase tracking-wider text-[#8c8a84]">
           {t('nodes.book')}
         </span>
@@ -549,20 +348,42 @@ export function BookNode({
           </span>
         )}
         <span
-          className="text-[10px] font-mono text-[#5a5a54] ml-auto truncate max-w-[140px]"
+          className="text-[10px] font-mono text-[#5a5a54] ml-auto truncate min-w-0"
           title={sourceLabel}
         >
           {book.title || sourceLabel}
         </span>
+        {onOpenFullscreen ? (
+          <button
+            type="button"
+            data-testid={`book-open-${node.id}`}
+            data-no-drag=""
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              onOpenFullscreen(node.id);
+            }}
+            title={t('nodes.book_open')}
+            aria-label={t('nodes.book_open')}
+            className="inline-flex items-center justify-center w-7 h-7 rounded-md bg-[#C2410C] text-white hover:bg-[#a0350a] transition-colors shrink-0"
+          >
+            <Maximize2 className="w-3.5 h-3.5" aria-hidden />
+          </button>
+        ) : null}
       </div>
+      ) : null}
 
       <div className="relative flex-1 min-h-0">
         <div
           ref={bodyRef}
           data-no-drag=""
           tabIndex={-1}
-          className={`h-full overflow-y-auto min-h-0 pr-1 custom-scrollbar text-sm font-serif leading-relaxed text-[#4a4a44] select-text cursor-text focus:outline-none${
+          className={`h-full overflow-y-auto min-h-0 custom-scrollbar font-serif text-[#4a4a44] select-text cursor-text focus:outline-none${
             unit?.blocks?.length ? '' : ' whitespace-pre-wrap'
+          } ${
+            layout === 'immersive'
+              ? 'text-lg leading-[1.9] max-w-3xl mx-auto w-full px-6 py-6'
+              : 'text-sm leading-relaxed pr-1'
           }`}
           {...{ [CANVAS_NODE_CONTEXT_TEXT_ATTR]: '' }}
           onPointerDown={(e) => e.stopPropagation()}
@@ -578,127 +399,67 @@ export function BookNode({
         </div>
 
         {showSelectionActions && askUi && (
-          <div
-            ref={askToolbarRef}
-            className="absolute z-20 flex items-center gap-1 p-0.5 rounded-lg bg-white border border-[#E6E4DF] shadow-md"
-            style={{ top: askUi.top, left: askUi.left }}
-            data-no-drag=""
-            onPointerDown={(e) => {
-              // Keep selection; note: preventDefault suppresses mouse* events, so actions use pointerup.
-              e.stopPropagation();
-              e.preventDefault();
-              askToolbarArmedRef.current = true;
-            }}
-            onPointerUp={(e) => {
-              e.stopPropagation();
-              askToolbarArmedRef.current = false;
-            }}
-            onPointerCancel={() => {
-              askToolbarArmedRef.current = false;
-            }}
+          <TextSelectionToolbar
+            top={askUi.top}
+            left={askUi.left}
+            toolbarRef={askToolbarRef}
+            onArm={armSelectionToolbar}
+            onDisarm={disarmSelectionToolbar}
+            placement={layout === 'immersive' ? 'fixed' : 'absolute'}
           >
             {onExtractSelectionToCard && (
-              <button
-                type="button"
-                className="flex items-center gap-1 px-2 py-1 rounded-md bg-[#C2410C] text-white text-[11px] font-sans font-bold hover:bg-[#a0350a] transition-colors"
-                onPointerDown={(e) => {
-                  e.stopPropagation();
-                  e.preventDefault();
-                  askToolbarArmedRef.current = true;
-                }}
-                onPointerUp={(e) => {
-                  e.stopPropagation();
-                  e.preventDefault();
-                  runExtractSelectionToCard();
-                }}
+              <TextSelectionToolbarButton
+                variant="primary"
+                onArm={armSelectionToolbar}
+                onAction={runExtractSelectionToCard}
               >
                 <StickyNote className="w-3 h-3" />
                 {t('nodes.book_to_card')}
-              </button>
-            )}
-            {onAskAboutSelection && (
-              <button
-                type="button"
-                className="flex items-center gap-1 px-2 py-1 rounded-md text-[#C2410C] text-[11px] font-sans font-bold hover:bg-[#FFF7ED] transition-colors"
-                onPointerDown={(e) => {
-                  e.stopPropagation();
-                  e.preventDefault();
-                  askToolbarArmedRef.current = true;
-                }}
-                onPointerUp={(e) => {
-                  e.stopPropagation();
-                  e.preventDefault();
-                  runAskAboutSelection();
-                }}
-              >
-                <Sparkles className="w-3 h-3" />
-                {t('nodes.book_ask_ai')}
-              </button>
+              </TextSelectionToolbarButton>
             )}
             {onExpandSelection && (
-              <button
-                type="button"
-                className="flex items-center gap-1 px-2 py-1 rounded-md text-[#C2410C] text-[11px] font-sans font-bold hover:bg-[#FFF7ED] transition-colors"
-                onPointerDown={(e) => {
-                  e.stopPropagation();
-                  e.preventDefault();
-                  askToolbarArmedRef.current = true;
-                }}
-                onPointerUp={(e) => {
-                  e.stopPropagation();
-                  e.preventDefault();
-                  runExpandSelection();
-                }}
+              <TextSelectionToolbarButton
+                variant="ghost"
+                onArm={armSelectionToolbar}
+                onAction={runExpandSelection}
               >
                 <GitBranch className="w-3 h-3" />
                 {t('nodes.book_expand')}
-              </button>
+              </TextSelectionToolbarButton>
             )}
-          </div>
+            {onAskAboutSelection && (
+              <TextSelectionToolbarButton
+                variant="ghost"
+                onArm={armSelectionToolbar}
+                onAction={runAskAboutSelection}
+              >
+                <Wand2 className="w-3 h-3" />
+                {t('nodes.book_ask_ai')}
+              </TextSelectionToolbarButton>
+            )}
+          </TextSelectionToolbar>
         )}
 
       </div>
 
       <div
-        className="flex items-center justify-between gap-2 mt-2 pt-2 border-t border-[#E6E4DF] shrink-0"
+        className={`flex items-center justify-between gap-2 shrink-0 ${
+          layout === 'immersive'
+            ? 'mt-0 px-6 py-3 border-t border-[#E6E4DF] bg-white/90'
+            : 'mt-2 pt-2 border-t border-[#E6E4DF]'
+        }`}
         data-no-drag=""
         onPointerDown={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center gap-1">
-          <button
-            type="button"
-            disabled={!aiConfig || voiceChatDisabled || isExpanding}
-            className={`p-1.5 rounded-md transition-colors disabled:opacity-30 ${
-              voiceActive
-                ? 'text-[#C2410C] bg-[#FFF7ED] ring-2 ring-[#C2410C]/25'
-                : 'text-[#5a5a54] hover:bg-[#F4F1ED]'
-            }`}
-            aria-label={voiceActive ? t('voice.book_chat_stop') : t('voice.book_chat_start')}
-            title={
-              voiceActive
-                ? `${voicePhaseLabel}${voicePartial ? ` · ${voicePartial}` : ''}`
-                : t('voice.book_chat_start')
-            }
-            onClick={() => voiceToggleRef.current?.()}
-          >
-            {voicePhase === 'thinking' ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : voicePhase === 'speaking' ? (
-              <Square className="w-4 h-4" />
-            ) : (
-              <Mic className={`w-4 h-4 ${voiceActive && voicePhase === 'listening' ? 'animate-pulse' : ''}`} />
-            )}
-          </button>
-          <button
-            type="button"
-            disabled={safeIndex <= 0 || isExpanding}
-            className="p-1.5 rounded-md text-[#5a5a54] hover:bg-[#F4F1ED] disabled:opacity-30 disabled:hover:bg-transparent transition-colors"
-            aria-label={t('nodes.book_prev')}
-            onClick={() => goToPage(safeIndex - 1)}
-          >
-            <ChevronLeft className="w-4 h-4" />
-          </button>
-        </div>
+        <button
+          type="button"
+          disabled={safeIndex <= 0 || isExpanding}
+          className="p-1.5 rounded-md text-[#5a5a54] hover:bg-[#F4F1ED] disabled:opacity-30 disabled:hover:bg-transparent transition-colors"
+          aria-label={t('nodes.book_prev')}
+          onClick={() => goToPage(safeIndex - 1)}
+        >
+          <ChevronLeft className="w-4 h-4" />
+        </button>
         <span className="text-[11px] font-mono text-[#8c8a84] tabular-nums">
           {t('nodes.book_page', { current: safeIndex + 1, total: unitCount })}
           {book.format === 'pdf' ? ` · p.${pageLabel}` : ''}

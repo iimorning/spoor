@@ -1,10 +1,30 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  DOUBAO_DEFAULT_MODEL,
   formatDoubaoKeyMissingError,
   getBuiltinDoubaoApiKey,
   hasBuiltinDoubaoApiKey,
   resolveDoubaoApiKey,
+  resolveDoubaoChatModel,
 } from '../../src/constants/doubao';
+
+describe('resolveDoubaoChatModel', () => {
+  it('maps turbo / pro / mini / old ep onto lite', () => {
+    expect(resolveDoubaoChatModel('')).toBe(DOUBAO_DEFAULT_MODEL);
+    expect(resolveDoubaoChatModel('doubao-seed-2-1-turbo-260628')).toBe(
+      'doubao-seed-2-0-lite-260428',
+    );
+    expect(resolveDoubaoChatModel('doubao-seed-2-1-pro-260628')).toBe(DOUBAO_DEFAULT_MODEL);
+    expect(resolveDoubaoChatModel('doubao-seed-2-0-mini-260428')).toBe(DOUBAO_DEFAULT_MODEL);
+    expect(resolveDoubaoChatModel('ep-20260218175314-xrnrn')).toBe(DOUBAO_DEFAULT_MODEL);
+  });
+
+  it('leaves an explicit non-legacy model id unchanged', () => {
+    expect(resolveDoubaoChatModel('doubao-seed-2-0-lite-260428')).toBe(
+      'doubao-seed-2-0-lite-260428',
+    );
+  });
+});
 
 describe('doubao builtin API key', () => {
   afterEach(() => {

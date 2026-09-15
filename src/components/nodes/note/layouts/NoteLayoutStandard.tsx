@@ -4,6 +4,13 @@ import { Sparkles } from 'lucide-react';
 import type { NoteNodeProps } from '../../types';
 import { NoteBody } from '../NoteBody';
 import { WebSearchSourcesToggle } from '../../WebSearchSourcesToggle';
+import { NoteSourceFooter } from '../../NoteSourceFooter';
+import { NOTE_CARD_AUTO_MAX_HEIGHT_PX } from '../../../../utils/canvas';
+import {
+  noteContentWithoutTrailingSourceUrl,
+  resolveNoteSourceHref,
+} from '../../../../utils/noteSourceHref';
+import { useSearchImageDisplaySrc } from '../../../../services/searchImageSrc';
 
 /** 0/2/3 经典与 neo；1 毛玻璃。与 ThemeNode 相同：单层外壳 + `transition-all duration-500` 做形态过渡。 */
 export type NoteChromeLayout = 0 | 1 | 2 | 3;
@@ -20,6 +27,9 @@ export function NoteLayoutStandard({
   webSearchSourceCount = 0,
   webSearchSourcesCollapsed = false,
   onToggleWebSearchSources,
+  notePileCount = 0,
+  notePileCollapsed = false,
+  onToggleNotePile,
 }: NoteNodeProps & { layout: NoteChromeLayout }) {
   const { t } = useTranslation();
   const isGlass = layout === 1;
@@ -56,9 +66,25 @@ export function NoteLayoutStandard({
 
   const emptyBefore = isGlass ? 'empty:before:text-gray-300/80' : 'empty:before:text-gray-300';
   const editClassName = `focus:outline-none rounded px-1 -mx-1 transition-[color,font-size,line-height,font-family] duration-500 cursor-text min-h-[50px] select-text empty:before:content-['${t('nodes.type_something')}'] ${emptyBefore} ${editTypography}`;
+  const userSizedHeight = Boolean(node.height && node.height > 0);
+  const sourceHref = resolveNoteSourceHref(node);
+  const viewText = sourceHref
+    ? noteContentWithoutTrailingSourceUrl(node.content ?? '', sourceHref)
+    : undefined;
+  const previewRaw = (node.previewImageUrl || '').trim();
+  const showSearchPreview = layout === 2 && /^https?:\/\//i.test(previewRaw);
+  const previewSrc = useSearchImageDisplaySrc(
+    previewRaw,
+    node.sourceUrl,
+    showSearchPreview,
+  );
 
   return (
-    <div className={outerClass}>
+    <div
+      data-testid="note-node-shell"
+      className={`note-cjk ${outerClass}${userSizedHeight || layout === 3 ? '' : ' overflow-hidden'}`}
+      style={userSizedHeight ? undefined : { maxHeight: NOTE_CARD_AUTO_MAX_HEIGHT_PX }}
+    >
       {isGlass && (
         <>
           <div className="note-glass-wash pointer-events-none absolute inset-0" aria-hidden />
@@ -70,9 +96,12 @@ export function NoteLayoutStandard({
       )}
 
       <WebSearchSourcesToggle
-        count={webSearchSourceCount}
-        collapsed={webSearchSourcesCollapsed}
-        onToggle={onToggleWebSearchSources}
+        count={notePileCount >= 2 ? notePileCount : webSearchSourceCount}
+        collapsed={notePileCount >= 2 ? notePileCollapsed : webSearchSourcesCollapsed}
+        onToggle={notePileCount >= 2 ? onToggleNotePile : onToggleWebSearchSources}
+        minCount={2}
+        collapseTitle={notePileCount >= 2 ? t('nodes.collapse_note_pile') : undefined}
+        expandTitle={notePileCount >= 2 ? t('nodes.expand_note_pile') : undefined}
       />
 
       {isGlass && (
@@ -84,19 +113,41 @@ export function NoteLayoutStandard({
         </header>
       )}
 
+      {showSearchPreview ? (
+        <div
+          className="mb-2 h-28 shrink-0 overflow-hidden rounded-sm bg-[#EAE7E2]"
+          aria-hidden
+        >
+          <img
+            src={previewSrc}
+            alt=""
+            className="h-full w-full object-cover"
+            referrerPolicy="no-referrer"
+            loading="lazy"
+            draggable={false}
+          />
+        </div>
+      ) : null}
+
       <NoteBody
         node={node}
         editingNodeId={editingNodeId}
         setEditingNodeId={setEditingNodeId}
         editClassName={editClassName}
         viewClassName={viewTypography}
-        emptyNoteMarkdown={`_${t('nodes.empty_note')}_`}
+        emptyNotePlaceholder={t('nodes.empty_note')}
+        viewText={viewText}
         scrollAreaClassName={
           isGlass
             ? 'note-glass-markdown relative z-10 min-h-0 flex-1 overflow-y-auto px-6 pb-6 pr-7 custom-scrollbar'
             : 'flex-1 overflow-y-auto min-h-0 pr-1 custom-scrollbar'
         }
       />
+      {sourceHref ? (
+        <div className={isGlass ? 'relative z-10 px-6 pb-4' : undefined}>
+          <NoteSourceFooter href={sourceHref} />
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -3,6 +3,8 @@ import {
   VOLC_ASR_END_WINDOW_MS,
   VOLC_ASR_PROXY_PATH,
 } from '../constants/voiceWriting';
+import { isServerManaged, getFunctionsBase, resolveAccessToken, edgeFunctionHeaders, withEdgeFunctionWsParams } from '../lib/serverConfig';
+import { isTauriRuntime } from '../utils/isTauriRuntime';
 import {
   encodeAudioOnlyRequest,
   encodeFullClientRequest,
@@ -35,65 +37,163 @@ export type VolcAsrSession = {
 };
 
 /**
- * POST creds to the dev proxy, get back a short-lived opaque token. The token — not the
- * original key — is what appears in the WebSocket URL and dev-server logs. Outside the dev
- * proxy (production builds) this call hits a 404; callers should fall back to a direct
- * upstream WebSocket with custom headers via the Tauri IPC path.
+ * POST creds to the dev proxy, get back a short-lived opaque token AND the full
+ * WebSocket URL the caller should connect to. The token — not the original key —
+ * is what appears in the WebSocket URL.
+ *
+ * Three transports:
+ *   - **Server-managed** (logged-in + useServerKeys): token via Supabase Edge
+ *     Function `ai-volc-asr-token`; URL points at `ai-volc-asr-ws`.
+ *   - **Tauri production**: token via the in-process Rust proxy on
+ *     `127.0.0.1:<port>`; URL points at `/volc-asr/ws`.
+ *   - **Web dev / preview**: token via Vite dev plugin; URL points at
+ *     `/api/volc-asr` (same origin).
  */
 export async function issueVolcAsrToken(
   creds: VolcAsrCredentials,
   opts?: { signal?: AbortSignal; fetchImpl?: typeof fetch },
-): Promise<{ token: string; expiresIn: number }> {
-  const body: Record<string, string> = {};
+): Promise<{ token: string; expiresIn: number; wsUrl: string }> {
   const apiKey = (creds.apiKey ?? '').trim();
   const appId = (creds.appId ?? '').trim();
   const accessToken = (creds.accessToken ?? '').trim();
-  if (apiKey) body.apiKey = apiKey;
-  if (appId) body.appId = appId;
-  if (accessToken) body.accessToken = accessToken;
 
   const f = opts?.fetchImpl ?? fetch;
   let res: Response;
-  try {
-    res = await f('/api/volc-asr/issue-token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: opts?.signal,
-    });
-  } catch (e) {
-    throw new Error(
-      `Volc ASR token issuance failed: ${e instanceof Error ? e.message : String(e)}`,
-    );
+  let wsUrl: string;
+
+  // Prefer local Vite/Tauri ASR proxy when the user has pasted Volc keys — even
+  // while LLM calls stay server-managed. Overseas Edge often cannot reach
+  // openspeech.bytedance.com.
+  const hasLocalVolc =
+    !!(creds.apiKey ?? '').trim() ||
+    (!!(creds.appId ?? '').trim() && !!(creds.accessToken ?? '').trim());
+
+  if (isServerManaged() && !hasLocalVolc) {
+    const base = getFunctionsBase();
+    const token = await resolveAccessToken();
+    if (!base || !token) {
+      throw new Error('服务器代理未配置 (VITE_SUPABASE_FUNCTIONS_URL 缺失或会话失效)。');
+    }
+    try {
+      res = await f(`${base}/ai-volc-asr-token`, {
+        method: 'POST',
+        headers: edgeFunctionHeaders(token, { 'Content-Type': 'application/json' }),
+        body: JSON.stringify({}),
+        signal: opts?.signal,
+      });
+    } catch (e) {
+      throw new Error(
+        `Volc ASR token issuance failed: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+    const wsBase = base.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:');
+    wsUrl = `${wsBase}/ai-volc-asr-ws`;
+  } else if (isTauriRuntime()) {
+    const { invoke } = await import('@tauri-apps/api/core');
+    const port = await invoke<number | null>('voice_proxy_port');
+    if (port == null) {
+      throw new Error('Tauri 语音代理未启动 (Rust setup hook 还未绑定端口)。');
+    }
+    const body: Record<string, string> = {};
+    if (apiKey) body.apiKey = apiKey;
+    if (appId) body.appId = appId;
+    if (accessToken) body.accessToken = accessToken;
+    try {
+      res = await f(`http://127.0.0.1:${port}/volc-asr/issue-token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: opts?.signal,
+      });
+    } catch (e) {
+      throw new Error(
+        `Volc ASR token issuance failed: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+    wsUrl = `ws://127.0.0.1:${port}/volc-asr/ws`;
+  } else {
+    const body: Record<string, string> = {};
+    if (apiKey) body.apiKey = apiKey;
+    if (appId) body.appId = appId;
+    if (accessToken) body.accessToken = accessToken;
+    try {
+      res = await f('/api/volc-asr/issue-token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: opts?.signal,
+      });
+    } catch (e) {
+      throw new Error(
+        `Volc ASR token issuance failed: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    wsUrl = `${proto}//${window.location.host}${VOLC_ASR_PROXY_PATH}`;
   }
+
   if (!res.ok) {
     const text = await res.text().catch(() => '');
-    throw new Error(`Volc ASR token HTTP ${res.status}: ${text.slice(0, 240)}`);
+    let parsed: { error?: string; message?: string; hint?: string } | null = null;
+    try {
+      parsed = JSON.parse(text) as { error?: string; message?: string; hint?: string };
+    } catch {
+      /* not JSON */
+    }
+    if (parsed?.error === 'upstream_unreachable') {
+      throw new Error(
+        '服务器所在区域无法连接火山 ASR（openspeech.bytedance.com）。请在设置中填写本地火山 ASR 密钥，并用 npm run dev 或桌面端走本地代理。',
+      );
+    }
+    const detail = parsed
+      ? [parsed.error, parsed.message, parsed.hint].filter(Boolean).join(' — ')
+      : text.slice(0, 400);
+    throw new Error(`Volc ASR token HTTP ${res.status}: ${detail || 'unknown'}`);
   }
   const json = (await res.json()) as { token?: string; expiresIn?: number; error?: string };
   if (!json.token) {
     throw new Error(`Volc ASR proxy returned no token: ${json.error ?? 'unknown'}`);
   }
-  // Default to a 10-min fallback if the proxy forgot to send `expiresIn`. Must match the
-  // server's DEFAULT_TOKEN_TTL_MS so callers don't accidentally treat a stale token as fresh.
-  return { token: json.token, expiresIn: json.expiresIn ?? 10 * 60 };
-}
+  // Default to a 10-min fallback if the proxy forgot to send `expiresIn`. Must match
+  // the server's DEFAULT_TOKEN_TTL_MS so callers don't accidentally treat a stale
+  // token as fresh.
+  const expiresIn = json.expiresIn ?? 10 * 60;
 
-function buildProxyWsUrl(token: string, creds: VolcAsrCredentials): string {
-  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  // Append query params last so the host+path don't double-encode.
   const qs = new URLSearchParams();
-  qs.set('token', token);
-  qs.set(
-    'resourceId',
-    (creds.resourceId ?? '').trim() || VOLC_ASR_DEFAULT_RESOURCE_ID,
-  );
+  qs.set('token', json.token);
+  qs.set('resourceId', (creds.resourceId ?? '').trim() || VOLC_ASR_DEFAULT_RESOURCE_ID);
   qs.set('requestId', crypto.randomUUID());
-  return `${proto}//${window.location.host}${VOLC_ASR_PROXY_PATH}?${qs.toString()}`;
+  const absolute = `${wsUrl}?${qs.toString()}`;
+  // Only Edge WS URLs need the publishable `apikey` query; local Vite/Tauri proxies do not.
+  const useEdgeWs = isServerManaged() && !hasLocalVolc;
+  return {
+    token: json.token,
+    expiresIn,
+    wsUrl: useEdgeWs ? withEdgeFunctionWsParams(absolute) : absolute,
+  };
 }
 
 export function hasVolcAsrCredentials(creds: VolcAsrCredentials): boolean {
+  // Server-managed path always has credentials available server-side.
+  if (isServerManaged()) return true;
   if ((creds.apiKey ?? '').trim()) return true;
   return !!(creds.appId ?? '').trim() && !!(creds.accessToken ?? '').trim();
+}
+
+/** Map Edge/Volc relay failures to a short user-facing sentence. */
+export function formatVolcUpstreamError(raw: string): string {
+  const text = raw.trim();
+  if (/upstream_http_403/.test(text)) {
+    return '火山 ASR 拒绝了服务器连接（HTTP 403）。请核对 developer_secrets.volcAsr 是否为语音识别 Key（不是方舟 LLM Key）；若 Key 无误，则火山可能拦截了海外云 IP，需要国内中继。';
+  }
+  if (/upstream_http_401/.test(text)) {
+    return '火山 ASR 鉴权失败（HTTP 401）。请检查 developer_secrets 里的 API Key / App ID + Access Token。';
+  }
+  if (/tls_timeout|handshake_timeout|upstream_timeout/.test(text)) {
+    return '服务器连不上火山 ASR（超时）。';
+  }
+  return text.length > 280 ? `${text.slice(0, 280)}…` : text;
 }
 
 /** Join utterance texts, skipping exact duplicate segments (nostream can re-emit the same line). */
@@ -135,6 +235,11 @@ export type OpenVolcAsrSessionOptions = {
   /** Test injection: replace the global `fetch`. */
   fetchImpl?: typeof fetch;
   signal?: AbortSignal;
+  /**
+   * JSON string for `request.corpus.context`: hotwords and/or dialog_ctx from
+   * the current Ask thread (汤面, persona names, recent replies).
+   */
+  corpusContext?: string;
 };
 
 /**
@@ -150,10 +255,38 @@ export async function openVolcAsrSession(
     throw new Error('Missing Volc ASR credentials');
   }
 
-  const token =
-    opts.token ?? (await issueVolcAsrToken(creds, { signal: opts.signal, fetchImpl: opts.fetchImpl })).token;
+  // issueVolcAsrToken returns the fully-resolved wsUrl (Edge Function /
+  // localhost Rust proxy / Vite dev plugin). The URL already includes
+  // token, resourceId, requestId query params.
+  const issued = opts.token
+    ? null
+    : await issueVolcAsrToken(creds, { signal: opts.signal, fetchImpl: opts.fetchImpl });
 
-  console.log('[Spoor ASR] token issued, opening WS', { hasApiKey: !!(creds.apiKey ?? '').trim(), hasAppId: !!(creds.appId ?? '').trim(), resourceId: (creds.resourceId ?? '').trim() || VOLC_ASR_DEFAULT_RESOURCE_ID });
+  let wsUrl: string;
+  if (opts.token) {
+    // Caller pre-issued a token; build the URL ourselves. Without knowing
+    // the runtime here, use same-origin — only the Vite dev path uses this
+    // branch (tests + legacy callers).
+    const qs = new URLSearchParams();
+    qs.set('token', opts.token);
+    qs.set(
+      'resourceId',
+      (creds.resourceId ?? '').trim() || VOLC_ASR_DEFAULT_RESOURCE_ID,
+    );
+    qs.set('requestId', crypto.randomUUID());
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    wsUrl = `${proto}//${window.location.host}${VOLC_ASR_PROXY_PATH}?${qs.toString()}`;
+  } else if (issued) {
+    wsUrl = issued.wsUrl;
+  } else {
+    throw new Error('Volc ASR: failed to resolve WS URL');
+  }
+
+  console.log('[Spoor ASR] token issued, opening WS', {
+    hasApiKey: !!(creds.apiKey ?? '').trim(),
+    hasAppId: !!(creds.appId ?? '').trim(),
+    resourceId: (creds.resourceId ?? '').trim() || VOLC_ASR_DEFAULT_RESOURCE_ID,
+  });
 
   let closed = false;
   /** Only true after the server acknowledges the full client request (or ready timeout). */
@@ -165,7 +298,7 @@ export async function openVolcAsrSession(
   let writeChain: Promise<void> = Promise.resolve();
   let readyTimer: ReturnType<typeof setTimeout> | null = null;
 
-  const ws = new WebSocket(buildProxyWsUrl(token, creds));
+  const ws = new WebSocket(wsUrl);
   ws.binaryType = 'arraybuffer';
 
   const enqueueWrite = (task: () => Promise<void>) => {
@@ -200,10 +333,14 @@ export async function openVolcAsrSession(
     flushPending();
   };
 
+  let sawOpen = false;
+  let gotAck = false;
   ws.onopen = () => {
+    sawOpen = true;
     console.log('[Spoor ASR] ws.onopen');
     enqueueWrite(async () => {
       if (closed || ws.readyState !== WebSocket.OPEN) return;
+      const corpusContext = (opts.corpusContext ?? '').trim();
       const fullReq = await encodeFullClientRequest({
         user: { uid: 'spoor-voice' },
         audio: {
@@ -220,10 +357,14 @@ export async function openVolcAsrSession(
           enable_ddc: false,
           show_utterances: true,
           result_type: 'full',
-          enable_nonstream: true,
+          // Stream partials while speaking so the first words appear immediately.
+          // `true` waits for a full utterance (plus end_window) before any text.
+          enable_nonstream: false,
           // Silence window before definite. 800ms ends mid-thought on any brief pause.
           end_window_size: VOLC_ASR_END_WINDOW_MS,
-          force_to_speech_time: 1000,
+          // Don't wait a full second to confirm the start of speech.
+          force_to_speech_time: 200,
+          ...(corpusContext ? { corpus: { context: corpusContext } } : {}),
         },
       });
       if (closed || ws.readyState !== WebSocket.OPEN) return;
@@ -247,6 +388,7 @@ export async function openVolcAsrSession(
     }
 
     // Any non-error binary frame means the full client request was accepted.
+    gotAck = true;
     if (!ready) console.log('[Spoor ASR] first non-error frame → ready');
     markReadyAndFlush();
 
@@ -270,10 +412,14 @@ export async function openVolcAsrSession(
   ws.onmessage = (ev) => {
     console.log('[Spoor ASR] ws.onmessage', { kind: typeof ev.data, bytes: typeof ev.data === 'string' ? ev.data.length : ev.data.byteLength });
     if (typeof ev.data === 'string') {
+      console.log('[Spoor ASR] ws.onmessage text', ev.data.slice(0, 500));
       try {
-        const j = JSON.parse(ev.data) as { error?: string };
+        const j = JSON.parse(ev.data) as { error?: string; edge?: string };
+        if (j.edge) {
+          console.log('[Spoor ASR] edge event', j);
+        }
         if (j.error) {
-          if (!closed) handlers.onError?.(j.error);
+          if (!closed) handlers.onError?.(formatVolcUpstreamError(j.error));
         }
       } catch {
         if (!closed) handlers.onError?.(ev.data);
@@ -291,9 +437,15 @@ export async function openVolcAsrSession(
   };
 
   ws.onerror = () => {
-    console.error('[Spoor ASR] ws.onerror');
+    console.error('[Spoor ASR] ws.onerror', { sawOpen, ready });
     if (closed) return;
-    handlers.onError?.('Volc ASR WebSocket error');
+    if (!sawOpen) {
+      handlers.onError?.(
+        '火山 ASR WebSocket 握手失败（服务器无法升级连接，多半是 Edge 访问不了 openspeech.bytedance.com）。请在设置填写本地火山 ASR 密钥，并用 npm run dev / 桌面端。',
+      );
+    } else {
+      handlers.onError?.('Volc ASR WebSocket error');
+    }
     try {
       ws.close();
     } catch {
@@ -301,9 +453,21 @@ export async function openVolcAsrSession(
     }
   };
 
-  ws.onclose = () => {
-    console.log('[Spoor ASR] ws.onclose');
+  ws.onclose = (ev) => {
+    console.log('[Spoor ASR] ws.onclose', { code: ev.code, reason: ev.reason, wasClean: ev.wasClean, ready });
+    // Report even on "clean" closes: Edge often tears down after upgrade when
+    // upstream Volc is unreachable, which still looks clean to the browser.
+    const shouldReport = !closed && sawOpen && !gotAck;
     closed = true;
+    if (readyTimer) {
+      clearTimeout(readyTimer);
+      readyTimer = null;
+    }
+    if (shouldReport) {
+      handlers.onError?.(
+        '火山 ASR 未收到识别回包就断开了。请把控制台里 [Spoor ASR] edge event / ws.onmessage text 发给开发者。',
+      );
+    }
     handlers.onClose?.();
   };
 

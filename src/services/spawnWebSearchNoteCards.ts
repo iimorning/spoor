@@ -1,7 +1,13 @@
 import { db, type CanvasNode, type Edge } from '../db';
+import { stampNewCard } from '../utils/stampNewCard';
 import type { MetasoImage, MetasoMediaItem, MetasoWebpage } from './search';
 import { resolveMetasoImageUrl } from './search';
 import { resolveMediaPlayback } from '../utils/mediaEmbed';
+import {
+  buildWebSearchMediaRelation,
+  formatSearchMediaDescription,
+  type WebSearchRelationContext,
+} from '../utils/webSearchMediaCaption';
 
 const DEFAULT_STAGGER_MS = 320;
 /** Sources live in a dedicated vertical lane beside the answer, never in a fan of overlaps. */
@@ -9,6 +15,8 @@ export const SOURCE_LANE_OFFSET_X = 380;
 export const SOURCE_ROW_GAP_Y = 240;
 export const SOURCE_CARD_WIDTH = 320;
 export const SOURCE_CARD_HEIGHT = 210;
+/** Extra height when a webpage source card shows a preview image. */
+export const SOURCE_CARD_PREVIEW_EXTRA = 112;
 /** Neat deck offset when sources are collapsed (keep small so the pile stays tidy). */
 export const SOURCE_STACK_STEP = 5;
 /** Fallback when the answer card height is not measured yet (streaming / just created). */
@@ -240,11 +248,81 @@ export async function setWebSearchSourcesCollapsed(
   return sources.length;
 }
 
-function pageToMarkdown(wp: MetasoWebpage, index: number): string {
-  const title = (wp.title || 'Source').replace(/\n/g, ' ');
+function searchMediaDescription(
+  title: string,
+  snippet: string | undefined,
+  relationContext?: WebSearchRelationContext,
+): string | undefined {
+  const headline = title.replace(/\s+/g, ' ').trim();
+  const relation =
+    relationContext &&
+    buildWebSearchMediaRelation({
+      query: relationContext.query,
+      parentLabel: relationContext.parentLabel,
+      snippet,
+    });
+  if (headline && relation) return formatSearchMediaDescription(headline, relation);
+  return headline || relation || undefined;
+}
+
+export function pageToMarkdown(wp: MetasoWebpage, index: number): string {
+  const link = (wp.link || '').trim();
+  const titleRaw = (wp.title || '').replace(/\n/g, ' ').trim();
+  const title = titleRaw && titleRaw !== link ? titleRaw : hostFromUrl(link);
   const snippet = (wp.snippet || '').trim();
-  const link = wp.link || '';
-  return `### ${index}. ${title}\n\n${snippet}${link ? `\n\n[${link}](${link})` : ''}`;
+  const date = (wp.date || '').trim();
+  const blocks = [`### ${index}. ${title}`];
+  if (date) blocks.push(date);
+  if (snippet && snippet !== link) blocks.push(snippet);
+  return blocks.join('\n\n');
+}
+
+function hostFromUrl(link: string): string {
+  try {
+    return new URL(link).hostname.replace(/^www\./, '') || 'Source';
+  } catch {
+    return 'Source';
+  }
+}
+
+/**
+ * Fill missing `previewImageUrl` on already-spawned webpage source cards
+ * (e.g. Metaso hits after og:image fetch).
+ */
+export async function attachPreviewImagesToSourceCards(
+  parentId: string,
+  images: Array<{ link?: string; imageUrl?: string; thumbnail?: string }>,
+): Promise<void> {
+  const byPage = new Map<string, string>();
+  for (const img of images) {
+    const page = (img.link ?? '').trim().toLowerCase();
+    const url = (img.imageUrl || img.thumbnail || '').trim();
+    if (!page || !/^https?:\/\//i.test(url) || byPage.has(page)) continue;
+    byPage.set(page, url);
+  }
+  if (byPage.size === 0) return;
+
+  const cards = await db.nodes
+    .filter(
+      (n) =>
+        n.webSearchParentId === parentId &&
+        (n.type === 'text' || n.type === 'note') &&
+        Boolean((n.sourceUrl || '').trim()),
+    )
+    .toArray();
+
+  for (const card of cards) {
+    if ((card.previewImageUrl || '').trim()) continue;
+    const preview = byPage.get((card.sourceUrl || '').trim().toLowerCase());
+    if (!preview) continue;
+    await db.nodes.update(card.id, {
+      previewImageUrl: preview,
+      height: Math.max(
+        card.height ?? SOURCE_CARD_HEIGHT,
+        SOURCE_CARD_HEIGHT + SOURCE_CARD_PREVIEW_EXTRA,
+      ),
+    });
+  }
 }
 
 /**
@@ -276,19 +354,24 @@ export async function spawnWebSearchCardsFromPages(
     }
     const laneIndex = indexOffset + i;
     const id = crypto.randomUUID();
-    await db.nodes.add({
+    const page = list[i]!;
+    const preview = (page.imageUrl || '').trim();
+    const hasPreview = /^https?:\/\//i.test(preview);
+    await db.nodes.add(stampNewCard({
       id,
       canvasId: activeCanvasId,
       type: 'text',
-      content: pageToMarkdown(list[i]!, laneIndex + 1),
+      content: pageToMarkdown(page, laneIndex + 1),
       x: base.x + SOURCE_LANE_OFFSET_X,
       y: sourceCardY(base.y, laneIndex, laneCount, anchorHeight),
       width: SOURCE_CARD_WIDTH,
-      height: SOURCE_CARD_HEIGHT,
+      height: hasPreview ? SOURCE_CARD_HEIGHT + SOURCE_CARD_PREVIEW_EXTRA : SOURCE_CARD_HEIGHT,
       layout: 2,
+      sourceUrl: (page.link || '').trim() || undefined,
+      previewImageUrl: hasPreview ? preview : undefined,
       webSearchParentId: sourceNodeId,
       webSearchIndex: laneIndex,
-    });
+    }));
     await db.edges.add({
       id: crypto.randomUUID(),
       canvasId: activeCanvasId,
@@ -313,6 +396,8 @@ export async function spawnWebSearchCardsFromMedia(
     anchorHeight?: number;
     indexOffset?: number;
     laneCount?: number;
+    /** Why these hits sit beside the parent card (shown under the title). */
+    relationContext?: WebSearchRelationContext;
   },
 ): Promise<void> {
   const staggerMs = options?.staggerMs ?? DEFAULT_STAGGER_MS;
@@ -338,12 +423,13 @@ export async function spawnWebSearchCardsFromMedia(
     const meta = [kind === 'podcast' ? item.showName : undefined, item.authors, item.duration]
       .filter(Boolean)
       .join(' · ');
-    await db.nodes.add({
+    const headline = meta ? `${title} · ${meta}` : title;
+    await db.nodes.add(stampNewCard({
       id,
       canvasId: activeCanvasId,
       type: 'video',
       content: playback.mode === 'none' ? page : playback.src,
-      description: meta ? `${title} · ${meta}` : title,
+      description: searchMediaDescription(headline, item.snippet, options?.relationContext),
       sourceUrl: page || undefined,
       fileType: playback.mode === 'none' ? undefined : playback.mode,
       x: base.x + SOURCE_LANE_OFFSET_X,
@@ -352,7 +438,7 @@ export async function spawnWebSearchCardsFromMedia(
       height: SOURCE_CARD_HEIGHT,
       webSearchParentId: sourceNodeId,
       webSearchIndex: laneIndex,
-    });
+    }));
     await db.edges.add({
       id: crypto.randomUUID(),
       canvasId: activeCanvasId,
@@ -375,6 +461,8 @@ export async function spawnWebSearchCardsFromImages(
     anchorHeight?: number;
     indexOffset?: number;
     laneCount?: number;
+    /** Why these hits sit beside the parent card (shown under the title). */
+    relationContext?: WebSearchRelationContext;
   },
 ): Promise<void> {
   const staggerMs = options?.staggerMs ?? DEFAULT_STAGGER_MS;
@@ -406,12 +494,12 @@ export async function spawnWebSearchCardsFromImages(
     const row = list[i]!;
     const id = crypto.randomUUID();
     const pos = sourceImageScatterPos(base, laneIndex, scatterCount, anchorHeight);
-    await db.nodes.add({
+    await db.nodes.add(stampNewCard({
       id,
       canvasId: activeCanvasId,
       type: 'image',
       content: row.url,
-      description: row.title || undefined,
+      description: searchMediaDescription(row.title, undefined, options?.relationContext),
       sourceUrl: row.sourceUrl || undefined,
       x: pos.x,
       y: pos.y,
@@ -419,7 +507,7 @@ export async function spawnWebSearchCardsFromImages(
       height: SOURCE_CARD_HEIGHT,
       webSearchParentId: sourceNodeId,
       webSearchIndex: laneIndex,
-    });
+    }));
     await db.edges.add({
       id: crypto.randomUUID(),
       canvasId: activeCanvasId,

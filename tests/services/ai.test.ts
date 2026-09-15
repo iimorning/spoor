@@ -97,6 +97,18 @@ describe('callUniversalAI', () => {
       expect(arg.contents.length).toBe(2);
     });
 
+    it('第一次网络失败后自动重试并成功', async () => {
+      mockGenerateContent
+        .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+        .mockResolvedValueOnce({ text: 'Gemini response' });
+      const result = await callUniversalAI({
+        config: baseConfig,
+        prompt: 'Hello Gemini',
+      });
+      expect(result).toBe('Gemini response');
+      expect(mockGenerateContent).toHaveBeenCalledTimes(2);
+    });
+
     it('apiKey 为空且无环境变量时抛错', async () => {
       const original = process.env.GEMINI_API_KEY;
       delete process.env.GEMINI_API_KEY;
@@ -249,6 +261,27 @@ describe('callUniversalAI', () => {
       const body = JSON.parse((vi.mocked(fetch).mock.calls[0][1] as RequestInit).body as string);
       expect(body.model).toBe('deepseek-chat');
     });
+
+    it('switches to deepseek-v4-flash-vision-exp when images are attached', async () => {
+      await callUniversalAI({
+        config: {
+          ...baseConfig,
+          provider: 'deepseek',
+          apiKey: 'sk-deepseek-test',
+          baseUrl: 'https://api.deepseek.com/v1',
+          model: 'deepseek-chat',
+        },
+        prompt: 'Arrange these cards',
+        images: ['data:image/png;base64,AAAA'],
+      });
+      const body = JSON.parse((vi.mocked(fetch).mock.calls[0][1] as RequestInit).body as string);
+      expect(body.model).toBe('deepseek-v4-flash-vision-exp');
+      expect(body.messages.at(-1).content).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'image_url' }),
+        ]),
+      );
+    });
   });
 
   // --- OpenAI ---
@@ -306,6 +339,26 @@ describe('callUniversalAI', () => {
           prompt: 'Hello',
         })
       ).rejects.toThrow('Unauthorized');
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('第一次网络失败后自动重试并成功', async () => {
+      const okBody = JSON.stringify({
+        choices: [{ message: { content: 'OpenAI response' } }],
+      });
+      vi.mocked(fetch)
+        .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+        .mockResolvedValueOnce({
+          ok: true,
+          text: async () => okBody,
+          json: async () => JSON.parse(okBody),
+        } as Response);
+      const result = await callUniversalAI({
+        config: { ...baseConfig, provider: 'openai', apiKey: 'sk-test' },
+        prompt: 'Hello OpenAI',
+      });
+      expect(result).toBe('OpenAI response');
+      expect(fetch).toHaveBeenCalledTimes(2);
     });
 
     it('onStreamChunk 在 OpenAI SSE 流式响应时增量累积', async () => {
@@ -336,6 +389,36 @@ describe('callUniversalAI', () => {
       expect(result).toBe('Hello world');
       const reqBody = JSON.parse((vi.mocked(fetch).mock.calls[0][1] as RequestInit).body as string);
       expect(reqBody.stream).toBe(true);
+    });
+
+    it('onStreamChunk 把 reasoning_content 折进 think 块', async () => {
+      const TO = '<' + 'think>';
+      const TC = '</' + 'think>';
+      const enc = new TextEncoder();
+      const sse =
+        'data: {"choices":[{"delta":{"reasoning_content":"想"}}]}\n\n' +
+        'data: {"choices":[{"delta":{"content":"答"}}]}\n\n' +
+        'data: [DONE]\n\n';
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          ok: true,
+          body: new ReadableStream({
+            start(controller) {
+              controller.enqueue(enc.encode(sse));
+              controller.close();
+            },
+          }),
+        }),
+      );
+      const acc: string[] = [];
+      const result = await callUniversalAI({
+        config: { ...baseConfig, provider: 'openai', apiKey: 'sk-test' },
+        prompt: 'Hi',
+        onStreamChunk: (t) => acc.push(t),
+      });
+      expect(acc).toEqual([`${TO}想${TC}`, `${TO}想${TC}答`]);
+      expect(result).toBe(`${TO}想${TC}答`);
     });
 
     it('传递 systemInstruction 给 OpenAI', async () => {
@@ -718,6 +801,322 @@ describe('callUniversalAI', () => {
           prompt: 'Hello',
         })
       ).rejects.toThrow('Provider not supported');
+    });
+  });
+
+  // --- Server-managed path (logged-in + useServerKeys) ---
+  describe('服务器托管密钥路径 (isServerManaged)', () => {
+    let mockFetch: ReturnType<typeof vi.fn>;
+    let setServerConfigFn: typeof import('../../src/lib/serverConfig').setServerConfig;
+
+    beforeEach(async () => {
+      mockFetch = vi.fn();
+      vi.stubGlobal('fetch', mockFetch);
+      const mod = await import('../../src/lib/serverConfig');
+      setServerConfigFn = mod.setServerConfig;
+      setServerConfigFn({
+        session: {
+          access_token: 'test-jwt',
+          refresh_token: 'rt',
+          expires_in: 3600,
+          expires_at: Math.floor(Date.now() / 1000) + 3600,
+          token_type: 'bearer',
+          user: { id: 'u1' } as never,
+        } as never,
+        useServerKeys: true,
+        isPro: true,
+      });
+      // Pin the Functions base so the URL assertion is deterministic.
+      (import.meta.env as Record<string, string | undefined>).VITE_SUPABASE_FUNCTIONS_URL =
+        'https://example.supabase.co/functions/v1';
+      (import.meta.env as Record<string, string | undefined>).VITE_SUPABASE_ANON_KEY = 'test-anon-key';
+    });
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+      setServerConfigFn({ session: null, useServerKeys: false, isPro: false });
+      delete (import.meta.env as Record<string, string | undefined>).VITE_SUPABASE_FUNCTIONS_URL;
+      delete (import.meta.env as Record<string, string | undefined>).VITE_SUPABASE_ANON_KEY;
+    });
+
+    it('登录态时把请求改发到 ai-llm Edge Function 而非上游', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ text: 'hi from server proxy' }),
+      });
+      const out = await callUniversalAI({
+        config: { ...baseConfig, provider: 'openai', model: 'gpt-4o-mini' },
+        prompt: 'hello',
+        systemInstruction: 'be terse',
+      });
+      expect(out).toBe('hi from server proxy');
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      const [url, init] = mockFetch.mock.calls[0]!;
+      expect(url).toBe('https://example.supabase.co/functions/v1/ai-llm');
+      const headers = (init as RequestInit).headers as Record<string, string>;
+      expect(headers['Authorization']).toBe('Bearer test-jwt');
+      expect(headers['apikey']).toBe('test-anon-key');
+      const body = JSON.parse((init as RequestInit).body as string);
+      expect(body).toMatchObject({
+        provider: 'openai',
+        model: 'gpt-4o-mini',
+        systemInstruction: 'be terse',
+        prompt: 'hello',
+        stream: false,
+      });
+    });
+
+    it('forwards sessionId to ai-llm for OpenRouter sticky routing', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ text: 'ok' }),
+      });
+      await callUniversalAI({
+        config: { ...baseConfig, provider: 'openrouter', model: 'openai/gpt-5.6-terra' },
+        prompt: 'hello',
+        sessionId: 'spoor-ask-abc',
+      });
+      const body = JSON.parse((mockFetch.mock.calls[0]![1] as RequestInit).body as string);
+      expect(body.sessionId).toBe('spoor-ask-abc');
+    });
+
+    it('登录态把已退役的豆包模型名改写成当前 lite', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ text: 'ok' }),
+      });
+      await callUniversalAI({
+        config: {
+          ...baseConfig,
+          provider: 'doubao',
+          model: 'ep-20260218175314-xrnrn',
+        },
+        prompt: 'hello',
+      });
+      const body = JSON.parse((mockFetch.mock.calls[0]![1] as RequestInit).body as string);
+      expect(body.model).toBe('doubao-seed-2-0-lite-260428');
+    });
+
+    it('流式请求把 stream:true 写入 body 并按 SSE delta 累加', async () => {
+      const sseChunks = [
+        'data: {"delta":"你"}\n\n',
+        'data: {"delta":"好，"}\n\n',
+        'data: {"delta":"世界"}\n\n',
+        'data: [DONE]\n\n',
+      ].join('');
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        body: new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(sseChunks));
+            controller.close();
+          },
+        }),
+      });
+      const onStreamChunk = vi.fn();
+      const out = await callUniversalAI({
+        config: { ...baseConfig, provider: 'doubao', model: 'doubao-seed-2-0-lite-260428' },
+        prompt: '你好',
+        onStreamChunk,
+      });
+      expect(out).toBe('你好，世界');
+      // The body should be sent stream:true.
+      const body = JSON.parse((mockFetch.mock.calls[0]![1] as RequestInit).body as string);
+      expect(body.stream).toBe(true);
+      // onStreamChunk should fire once per chunk with the cumulative text.
+      expect(onStreamChunk).toHaveBeenNthCalledWith(1, '你');
+      expect(onStreamChunk).toHaveBeenNthCalledWith(2, '你好，');
+      expect(onStreamChunk).toHaveBeenNthCalledWith(3, '你好，世界');
+    });
+
+    it('流式请求把 reasoning 字段折进 think 块再累加', async () => {
+      const TO = '<' + 'think>';
+      const TC = '</' + 'think>';
+      const sseChunks = [
+        'data: {"reasoning":"先看"}\n\n',
+        'data: {"reasoning":"题"}\n\n',
+        'data: {"delta":"答案"}\n\n',
+        'data: [DONE]\n\n',
+      ].join('');
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        body: new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(sseChunks));
+            controller.close();
+          },
+        }),
+      });
+      const onStreamChunk = vi.fn();
+      const out = await callUniversalAI({
+        config: { ...baseConfig, provider: 'doubao', model: 'doubao-seed-2-0-lite-260428' },
+        prompt: '你好',
+        onStreamChunk,
+      });
+      expect(onStreamChunk).toHaveBeenNthCalledWith(1, `${TO}先看${TC}`);
+      expect(onStreamChunk).toHaveBeenNthCalledWith(2, `${TO}先看题${TC}`);
+      expect(onStreamChunk).toHaveBeenNthCalledWith(3, `${TO}先看题${TC}答案`);
+      expect(out).toBe(`${TO}先看题${TC}答案`);
+    });
+
+    it('上游返回非 2xx 时抛出包含 status 与错误 code 的消息', async () => {
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 502,
+        text: async () => JSON.stringify({ error: 'provider_not_configured:openai' }),
+      });
+      await expect(
+        callUniversalAI({
+          config: { ...baseConfig, provider: 'openai' },
+          prompt: 'hi',
+        })
+      ).rejects.toThrow(/502[\s\S]*provider_not_configured:openai/);
+      expect(mockFetch.mock.calls.length).toBeGreaterThanOrEqual(2);
+    });
+
+    it('登录态把 OpenRouter 隐私策略 404 展开成可读说明', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 404,
+        text: async () =>
+          JSON.stringify({
+            error: 'upstream_error',
+            body: JSON.stringify({
+              error: {
+                message:
+                  'No endpoints available matching your guardrail restrictions and data policy. Configure: https://openrouter.ai/settings/privacy',
+                code: 404,
+              },
+            }),
+          }),
+      });
+      await expect(
+        callUniversalAI({
+          config: { ...baseConfig, provider: 'openrouter' },
+          prompt: 'hello',
+        }),
+      ).rejects.toThrow(/openrouter\.ai\/settings\/privacy/);
+    });
+
+    it('登录态 DeepSeek 带图时锁到 GLM，不走 DeepSeek vision', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ text: 'ok' }),
+      });
+      await callUniversalAI({
+        config: {
+          ...baseConfig,
+          provider: 'deepseek',
+          model: 'deepseek-chat',
+        },
+        prompt: '看这张角色卡',
+        images: ['data:image/png;base64,AAAA'],
+      });
+      const body = JSON.parse((mockFetch.mock.calls[0]![1] as RequestInit).body as string);
+      expect(body.model).toBe('openai/gpt-5.6-terra');
+      expect(body.lockModel).toBe(true);
+      expect(body.images).toEqual(['data:image/png;base64,AAAA']);
+    });
+
+    it('登录态 lockModel 时不把带图请求改成 DeepSeek vision', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ text: 'ok' }),
+      });
+      await callUniversalAI({
+        config: {
+          ...baseConfig,
+          provider: 'openrouter',
+          model: 'openai/gpt-5.6-terra',
+        },
+        prompt: '排大纲',
+        images: ['data:image/png;base64,AAAA'],
+        lockModel: true,
+      });
+      const body = JSON.parse((mockFetch.mock.calls[0]![1] as RequestInit).body as string);
+      expect(body.model).toBe('openai/gpt-5.6-terra');
+      expect(body.lockModel).toBe(true);
+      expect(body.images).toEqual(['data:image/png;base64,AAAA']);
+    });
+
+    it('带图片的请求在登录态下转发给 ai-llm', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ text: '一只猫' }),
+      });
+      const out = await callUniversalAI({
+        config: { ...baseConfig, provider: 'gemini' },
+        prompt: '描述这张图',
+        images: ['data:image/png;base64,AAAA'],
+      });
+      expect(out).toBe('一只猫');
+      const body = JSON.parse((mockFetch.mock.calls[0]![1] as RequestInit).body as string);
+      expect(body.images).toEqual(['data:image/png;base64,AAAA']);
+      expect(body.prompt).toBe('描述这张图');
+    });
+
+    it('登录态把 images_not_supported 显示为可读说明', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 400,
+        text: async () =>
+          JSON.stringify({
+            error: 'images_not_supported',
+            provider: 'deepseek',
+            message: '当前托管服务商不支持在对话中附带图片。',
+          }),
+      });
+      await expect(
+        callUniversalAI({
+          config: { ...baseConfig, provider: 'deepseek' },
+          prompt: '描述这张图',
+          images: ['data:image/png;base64,AAAA'],
+        }),
+      ).rejects.toThrow(/不支持在对话中附带图片/);
+    });
+
+    it('登录态把 quota_exceeded 显示为通用托管额度说明', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 402,
+        text: async () => JSON.stringify({ error: 'quota_exceeded', kind: 'text' }),
+      });
+      await expect(
+        callUniversalAI({
+          config: { ...baseConfig, provider: 'deepseek' },
+          prompt: 'hello',
+        }),
+      ).rejects.toThrow(/hosted allowance is used up/i);
+    });
+
+    it('Functions base URL 未配置时直接报错', async () => {
+      const previousDev = (import.meta.env as Record<string, unknown>).DEV;
+      const previousProject = (import.meta.env as Record<string, string | undefined>).VITE_SUPABASE_URL;
+      delete (import.meta.env as Record<string, string | undefined>).VITE_SUPABASE_FUNCTIONS_URL;
+      delete (import.meta.env as Record<string, string | undefined>).VITE_SUPABASE_URL;
+      (import.meta.env as Record<string, unknown>).DEV = false;
+      try {
+        await expect(
+          callUniversalAI({
+            config: { ...baseConfig, provider: 'openai' },
+            prompt: 'hi',
+          })
+        ).rejects.toThrow(/服务器代理未配置/);
+        expect(mockFetch).not.toHaveBeenCalled();
+      } finally {
+        (import.meta.env as Record<string, unknown>).DEV = previousDev;
+        if (previousProject) {
+          (import.meta.env as Record<string, string | undefined>).VITE_SUPABASE_URL = previousProject;
+        }
+      }
     });
   });
 });

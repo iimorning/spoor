@@ -8,7 +8,8 @@ export const colorPresets = [
 ];
 
 export const fontPresets = [
-  { name: 'Serif', value: 'ui-serif, Georgia, Cambria, "Times New Roman", Times, serif' },
-  { name: 'Sans', value: 'ui-sans-serif, system-ui, sans-serif' },
+  { name: 'Serif', value: 'Newsreader, ui-serif, Georgia, var(--cjk-ui), serif' },
+  { name: 'Zhuque', value: 'Newsreader, "Zhuque Fangsong", ui-serif, Georgia, serif' },
+  { name: 'Sans', value: 'Manrope, var(--cjk-ui), ui-sans-serif, system-ui, sans-serif' },
   { name: 'Mono', value: 'ui-monospace, Consolas, monospace' },
 ];

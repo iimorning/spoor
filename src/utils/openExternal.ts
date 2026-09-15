@@ -16,3 +16,22 @@ export async function openExternalUrl(url: string): Promise<void> {
 
   window.open(trimmed, '_blank', 'noopener,noreferrer');
 }
+
+/**
+ * Waffo checkout must not use `window.open` after an `await`: browsers treat
+ * that as a non-gesture popup and silently block it (looks like a dead click).
+ * Same-tab navigation keeps the user gesture chain and returns via successUrl.
+ */
+export async function openCheckoutUrl(url: string): Promise<void> {
+  const trimmed = url.trim();
+  if (!/^https?:\/\//i.test(trimmed)) {
+    throw new Error('waffo_no_checkout_url');
+  }
+
+  if (isTauriRuntime()) {
+    await openExternalUrl(trimmed);
+    return;
+  }
+
+  window.location.assign(trimmed);
+}

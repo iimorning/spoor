@@ -4,6 +4,7 @@ import {
   deriveSearchQueryFromNoteText,
   isWebSearchSourceNode,
   listWebSearchSourcesForParent,
+  pageToMarkdown,
   setWebSearchSourcesCollapsed,
   sourceCardStackPos,
   sourceCardY,
@@ -16,6 +17,23 @@ import {
   SOURCE_STACK_STEP,
   webSearchSourceIndex,
 } from '../../src/services/spawnWebSearchNoteCards';
+
+describe('pageToMarkdown', () => {
+  it('keeps title and date in the body, not the URL', () => {
+    expect(
+      pageToMarkdown(
+        {
+          title: '老派约会，很有必要',
+          link: 'https://www.thepaper.cn/newsDetail_forward_30083279',
+          snippet: '',
+          score: '',
+          date: '2018年11月13日',
+        },
+        1,
+      ),
+    ).toBe(['### 1. 老派约会，很有必要', '2018年11月13日'].join('\n\n'));
+  });
+});
 
 describe('deriveSearchQueryFromNoteText', () => {
   it('returns empty for blank', () => {
@@ -270,6 +288,22 @@ describe('spawnWebSearchCardsFromImages', () => {
     expect(listed.every((n) => n.type === 'image')).toBe(true);
   });
 
+  it('writes title-only caption when image hits carry no snippet', async () => {
+    await db.nodes.add({ id: 'ai-rel', type: 'ai', userTurn: '古着怎么搭配', content: 'ack', x: 10, y: 20 });
+    await spawnWebSearchCardsFromImages(
+      'ai-rel',
+      { x: 10, y: 20 },
+      [{ title: 'Denim pile', thumbnail: 'https://cdn.example/a.jpg' }],
+      'canvas-1',
+      {
+        staggerMs: 0,
+        relationContext: { query: 'vintage denim', parentLabel: '古着怎么搭配' },
+      },
+    );
+    const image = (await db.nodes.toArray()).find((n) => n.type === 'image');
+    expect(image?.description).toBe('Denim pile');
+  });
+
   it('stacks then expands images back to the scatter (not a vertical lane)', async () => {
     await db.nodes.add({
       id: 'note-img',
@@ -339,6 +373,31 @@ describe('spawnWebSearchCardsFromImages', () => {
     expect(cards[1]?.fileType).toBe('video');
     expect(cards[1]?.content).toBe('https://cdn.example/clip.mp4');
     expect(cards[0]?.x).toBe(10 + SOURCE_LANE_OFFSET_X);
+  });
+
+  it('writes a relation caption under the video title, using the hit snippet', async () => {
+    await db.nodes.add({ id: 'ai-vrel', type: 'ai', content: 'ack', x: 10, y: 20 });
+    await spawnWebSearchCardsFromMedia(
+      'ai-vrel',
+      { x: 10, y: 20 },
+      [
+        {
+          title: 'Vintage haul',
+          link: 'https://cdn.example/clip.mp4',
+          snippet: 'A weekend looking at 90s jackets.',
+        },
+      ],
+      'canvas-1',
+      'video',
+      {
+        staggerMs: 0,
+        relationContext: { query: 'vintage', parentLabel: '古着穿搭' },
+      },
+    );
+    const card = (await db.nodes.toArray()).find((n) => n.type === 'video');
+    expect(card?.description).toMatch(/^Vintage haul\n/);
+    expect(card?.description).toContain('90s jackets');
+    expect(card?.description).not.toContain('古着穿搭');
   });
 
   it('restores user-adjusted expand positions after collapse', async () => {

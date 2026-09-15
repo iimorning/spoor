@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest';
 import {
   parseThreadWebSearchIntent,
   parseVoiceWebSearchIntent,
+  searchNoResultsI18nKey,
+  searchSpecFromWebSearchIntent,
 } from '../../src/utils/webSearchCommand';
 
 describe('parseThreadWebSearchIntent', () => {
@@ -104,5 +106,29 @@ describe('parseVoiceWebSearchIntent', () => {
   it('returns null when there is no search trigger', () => {
     expect(parseVoiceWebSearchIntent('今天天气不错')).toBeNull();
     expect(parseVoiceWebSearchIntent('我在思考搜索算法')).toBeNull();
+  });
+});
+
+describe('searchSpecFromWebSearchIntent', () => {
+  it('returns null when the command has no keywords', () => {
+    expect(searchSpecFromWebSearchIntent({ kind: 'image', explicitQuery: '' })).toBeNull();
+  });
+
+  it('keeps the command scope', () => {
+    expect(searchSpecFromWebSearchIntent({ kind: 'image', explicitQuery: '富士山' })).toEqual({
+      query: '富士山',
+      scopes: ['image'],
+    });
+    expect(searchSpecFromWebSearchIntent({ kind: 'webpage', explicitQuery: '量子计算' })).toEqual({
+      query: '量子计算',
+      scopes: ['webpage', 'image'],
+    });
+  });
+});
+
+describe('searchNoResultsI18nKey', () => {
+  it('uses scope-specific copy for a single media type', () => {
+    expect(searchNoResultsI18nKey(['image'])).toBe('nodes.search_no_images');
+    expect(searchNoResultsI18nKey(['webpage', 'image'])).toBe('nodes.search_no_results');
   });
 });

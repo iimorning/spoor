@@ -2,17 +2,22 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { AIConfig } from '../components/AISettingsModal';
 import { useAppDialog } from '../components/AppDialogProvider';
-import {
-  MINIMAX_DEFAULT_TTS_MODEL,
-  MINIMAX_DEFAULT_VOICE_ID,
-} from '../constants/voiceWriting';
+import { MINIMAX_DEFAULT_TTS_MODEL } from '../constants/voiceWriting';
 import { callUniversalAI, formatAiError } from '../services/ai';
-import { startMicCapture, type MicCapture } from '../services/micCapture';
-import { hasVolcAsrCredentials, openVolcAsrSession, type VolcAsrSession } from '../services/volcAsr';
+import type { MicCapture } from '../services/micCapture';
+import { startMicAndAsrSession } from '../services/startMicAndAsr';
+import { hasVolcAsrCredentials, type VolcAsrSession } from '../services/volcAsr';
+import { hasMinimaxTtsAccess } from '../lib/serverConfig';
 import { combineSystemParts, getLocaleDirective } from '../utils/aiI18n';
+import { spoorLlmSessionId } from '../utils/openRouterPromptCache';
 import { createTtsSentenceQueue } from '../utils/ttsSentenceQueue';
 import { parseLenientLlmJson } from '../utils/llmJson';
-import { serializeOutlineForPrompt, type PublishOutline } from '../utils/parsePublishOutlineResponse';
+import { withPublishOutlineModel } from '../utils/generateArticleFromOutline';
+import {
+  asCardOrderOutline,
+  serializeOutlineForPrompt,
+  type PublishOutline,
+} from '../utils/parsePublishOutlineResponse';
 
 export type OutlineVoicePhase = 'idle' | 'listening' | 'thinking' | 'speaking';
 
@@ -55,14 +60,14 @@ function parseVoiceRevision(raw: string): VoiceRevisionPayload | null {
     const sections: PublishOutline['sections'] = [];
     for (const seg of sectionsRaw) {
       if (!seg || typeof seg !== 'object' || Array.isArray(seg)) continue;
-      const s = seg as { cardId?: unknown; heading?: unknown; summary?: unknown };
+      const s = seg as { cardId?: unknown };
       const cardId = typeof s.cardId === 'string' ? s.cardId.trim() : '';
-      const heading = typeof s.heading === 'string' ? s.heading.trim() : '';
-      const segSummary = typeof s.summary === 'string' ? s.summary.trim() : '';
-      sections.push({ cardId, heading, summary: segSummary });
+      sections.push({ cardId, heading: '', summary: '' });
     }
     if (sections.length === 0) return null;
-    return { summary, outline: { title, sections } };
+    // Spoken `summary` is TTS confirmation only. Outline sections are card order;
+    // heading/summary on sections are ignored even if the model still emits them.
+    return { summary, outline: asCardOrderOutline({ title, sections }) };
   } catch {
     return null;
   }
@@ -74,7 +79,7 @@ export function usePublishOutlineVoiceChat({
   onOutlineRevised,
   disabled,
 }: UsePublishOutlineVoiceChatParams) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const { alert: appAlert } = useAppDialog();
 
   const [active, setActive] = useState(false);
@@ -160,7 +165,7 @@ export function usePublishOutlineVoiceChat({
       return;
     }
     const minimaxKey = (aiConfig.minimaxApiKey ?? '').trim();
-    if (!minimaxKey) {
+    if (!hasMinimaxTtsAccess(aiConfig.minimaxApiKey)) {
       appAlert({ message: t('voice.need_minimax_key') });
       stop();
       return;
@@ -179,25 +184,36 @@ export function usePublishOutlineVoiceChat({
       setPartialTranscript(text);
     };
 
-    const session = await openVolcAsrSession(creds, {
-      onPartial: replaceTranscript,
-      onDefinite: replaceTranscript,
-      onError: (message) => {
-        if (!activeRef.current) return;
-        if (suppressAsrCloseStopRef.current) return;
-        appAlert({ message });
-        stop();
+    const { mic, session } = await startMicAndAsrSession(
+      creds,
+      {
+        onPartial: replaceTranscript,
+        onDefinite: replaceTranscript,
+        onError: (message) => {
+          if (!activeRef.current) return;
+          if (suppressAsrCloseStopRef.current) return;
+          appAlert({ message });
+          stop();
+        },
+        onClose: () => {
+          if (!activeRef.current) return;
+          // finishRound / teardown close the socket on purpose — ws.onclose is async.
+          if (suppressAsrCloseStopRef.current) return;
+          stop();
+        },
       },
-      onClose: () => {
-        if (!activeRef.current) return;
-        // finishRound / teardown close the socket on purpose — ws.onclose is async.
-        if (suppressAsrCloseStopRef.current) return;
-        stop();
-      },
-    });
+      { shouldSendPcm: () => activeRef.current },
+    );
+    if (!activeRef.current) {
+      await mic.stop().catch(() => undefined);
+      try {
+        session.close();
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
     asrRef.current = session;
-
-    const mic = await startMicCapture((pcm) => asrRef.current?.sendPcm(pcm));
     micRef.current = mic;
 
     finishRoundRef.current = () => {
@@ -244,7 +260,8 @@ export function usePublishOutlineVoiceChat({
     const tts = createTtsSentenceQueue({
       apiKey: minimaxKey,
       model: aiConfig.minimaxTtsModel || MINIMAX_DEFAULT_TTS_MODEL,
-      voiceId: aiConfig.minimaxVoiceId || MINIMAX_DEFAULT_VOICE_ID,
+      voiceId: aiConfig.minimaxVoiceId,
+      language: i18n.language,
       onSpeakingChange: (speaking) => {
         if (speaking) setPhaseSync('speaking');
       },
@@ -255,16 +272,17 @@ export function usePublishOutlineVoiceChat({
     let assistantText = '';
     try {
       assistantText = await callUniversalAI({
-        config: aiConfig,
+        ...withPublishOutlineModel(aiConfig),
         systemInstruction: combineSystemParts(
-          t('ai.prompts.outlineVoicePersona'),
           getLocaleDirective(),
+          t('ai.prompts.outlineVoicePersona'),
         ),
         prompt: t('ai.prompts.outlineVoiceUser', {
           outline: outlineText,
           history: history || '',
           request: userText,
         }),
+        sessionId: spoorLlmSessionId('outline-voice'),
         onStreamChunk: (acc) => {
           assistantMsg.text = acc;
           setMessages((prev) => {

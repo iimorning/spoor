@@ -1,4 +1,5 @@
 const LOG_PREFIX = '[Scribe AI][Search]';
+import { isServerManaged, getFunctionsBase, resolveAccessToken, edgeFunctionHeaders } from '../lib/serverConfig';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -20,6 +21,8 @@ export interface MetasoWebpage {
   snippet: string;
   score: string;
   date: string;
+  /** Optional preview (Wikipedia pageimage / og:image). */
+  imageUrl?: string;
 }
 
 export interface MetasoImage {
@@ -54,6 +57,8 @@ export interface MetasoSearchResponse {
   images?: MetasoImage[];
   videos?: MetasoMediaItem[];
   podcasts?: MetasoMediaItem[];
+  /** Perplexity/Sonar assistant text — for synthesis, not a source card. */
+  brief?: string;
 }
 
 const METASO_SCOPES: readonly MetasoSearchScope[] = ['webpage', 'image', 'video', 'podcast'];
@@ -94,6 +99,83 @@ function asAuthors(raw: unknown): string {
       .join(', ');
   }
   return asText(raw);
+}
+
+/** Official playground-shaped Search API body (size is a string there). */
+export function metasoSearchRequestBody(
+  query: string,
+  scope: MetasoSearchScope,
+  size: number,
+): Record<string, unknown> {
+  return {
+    q: query,
+    scope,
+    size: String(Math.min(Math.max(size, 1), 20)),
+    includeSummary: false,
+    conciseSnippet: true,
+  };
+}
+
+function pickResultArray(root: Record<string, unknown>, keys: string[]): unknown[] {
+  for (const key of keys) {
+    const v = root[key];
+    if (Array.isArray(v)) return v;
+  }
+  const data = root.data;
+  if (Array.isArray(data)) return data;
+  if (data && typeof data === 'object') {
+    const d = data as Record<string, unknown>;
+    for (const key of keys) {
+      const v = d[key];
+      if (Array.isArray(v)) return v;
+    }
+    if (Array.isArray(d.results)) return d.results;
+  }
+  return [];
+}
+
+function normalizeMetasoWebpage(raw: unknown): MetasoWebpage | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const o = raw as Record<string, unknown>;
+  const link =
+    asHttpUrl(o.link) ||
+    asHttpUrl(o.url) ||
+    asHttpUrl(o.href) ||
+    asHttpUrl(o.sourceUrl) ||
+    asHttpUrl(o.source_url) ||
+    '';
+  const title = asText(o.title) || asText(o.name) || asText(o.headline) || link;
+  const snippet =
+    asText(o.snippet) ||
+    asText(o.summary) ||
+    asText(o.description) ||
+    asText(o.abstract) ||
+    '';
+  if (!link && !title && !snippet) return null;
+  return {
+    title: title || link || '(untitled)',
+    link,
+    snippet,
+    score: asText(o.score),
+    date: asText(o.date) || asText(o.publishDate) || asText(o.displayDate),
+  };
+}
+
+function diagnoseEmptyMetasoPayload(raw: unknown, scope: MetasoSearchScope): void {
+  const o = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+  const webRaw = pickResultArray(o, ['webpages', 'webpage', 'pages']);
+  const imgRaw = pickResultArray(o, ['images', 'image']);
+  console.warn(`${LOG_PREFIX} empty normalized hits`, {
+    scope,
+    topKeys: Object.keys(o).slice(0, 20),
+    credits: o.credits,
+    total: o.total,
+    rawWebpageCount: webRaw.length,
+    rawImageCount: imgRaw.length,
+    sampleWebpageKeys:
+      webRaw[0] && typeof webRaw[0] === 'object' ? Object.keys(webRaw[0] as object).slice(0, 12) : [],
+    error: asText(o.error) || asText(o.message) || asText(o.msg) || undefined,
+  });
 }
 
 function formatDuration(raw: unknown): string {
@@ -189,8 +271,11 @@ function normalizeMetasoMediaItem(raw: unknown): MetasoMediaItem | null {
 /** Normalize API payloads so callers see images / videos / podcasts arrays. */
 export function normalizeMetasoSearchResponse(raw: unknown): MetasoSearchResponse {
   const o = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
-  const webpages = Array.isArray(o.webpages) ? (o.webpages as MetasoWebpage[]) : [];
-  const rawImages = Array.isArray(o.images) ? o.images : [];
+  const webpages = pickResultArray(o, ['webpages', 'webpage', 'pages'])
+    .map((item) => normalizeMetasoWebpage(item))
+    .filter((item): item is MetasoWebpage => item != null);
+
+  const rawImages = pickResultArray(o, ['images', 'image']);
   const images = rawImages
     .map((item) => normalizeMetasoImage(item))
     .filter((item): item is MetasoImage => item != null);
@@ -201,12 +286,12 @@ export function normalizeMetasoSearchResponse(raw: unknown): MetasoSearchRespons
     });
   }
 
-  const rawVideos = Array.isArray(o.videos) ? o.videos : [];
+  const rawVideos = pickResultArray(o, ['videos', 'video']);
   const videos = rawVideos
     .map((item) => normalizeMetasoMediaItem(item))
     .filter((item): item is MetasoMediaItem => item != null);
 
-  const rawPodcasts = Array.isArray(o.podcasts) ? o.podcasts : [];
+  const rawPodcasts = pickResultArray(o, ['podcasts', 'podcast']);
   const podcasts = rawPodcasts
     .map((item) => normalizeMetasoMediaItem(item))
     .filter((item): item is MetasoMediaItem => item != null);
@@ -222,7 +307,7 @@ export function normalizeMetasoSearchResponse(raw: unknown): MetasoSearchRespons
     });
   }
 
-  return {
+  const out: MetasoSearchResponse = {
     credits: typeof o.credits === 'number' ? o.credits : 0,
     total:
       typeof o.total === 'number'
@@ -233,13 +318,35 @@ export function normalizeMetasoSearchResponse(raw: unknown): MetasoSearchRespons
     videos,
     podcasts,
   };
+
+  if (
+    webpages.length === 0 &&
+    images.length === 0 &&
+    videos.length === 0 &&
+    podcasts.length === 0
+  ) {
+    const sp =
+      o.searchParameters && typeof o.searchParameters === 'object'
+        ? (o.searchParameters as Record<string, unknown>)
+        : null;
+    diagnoseEmptyMetasoPayload(raw, resolveMetasoScope(sp?.scope ?? o.scope));
+  }
+
+  return out;
 }
 
 // ---------------------------------------------------------------------------
 // Core search function
 // ---------------------------------------------------------------------------
 
-const SEARCH_TIMEOUT_MS = 15_000;
+const SEARCH_TIMEOUT_MS = 30_000;
+
+function isAbortError(e: unknown): boolean {
+  return (
+    (typeof DOMException !== 'undefined' && e instanceof DOMException && e.name === 'AbortError') ||
+    (e instanceof Error && e.name === 'AbortError')
+  );
+}
 
 /**
  * Call the Metaso (秘塔) web search API.
@@ -252,7 +359,9 @@ export async function metasoSearch(
   config: MetasoSearchConfig,
 ): Promise<MetasoSearchResponse> {
   const apiKey = config.apiKey.trim();
-  if (!apiKey) {
+  // Server-managed users don't need a local apiKey — the Edge Function reads
+  // it from developer_secrets. Skip the key check for them.
+  if (!isServerManaged() && !apiKey) {
     throw new Error('Metaso API key is empty');
   }
 
@@ -260,6 +369,46 @@ export async function metasoSearch(
   const size = Math.min(Math.max(config.size ?? 5, 1), 20);
 
   console.info(`${LOG_PREFIX} metasoSearch`, { query, scope, size });
+
+  // ---- Server-managed Edge Function path (logged-in + useServerKeys) ----
+  // Wins over both Tauri and Vite-proxy paths — the Edge Function has the
+  // key server-side, so the browser never carries one.
+  if (isServerManaged()) {
+    const base = getFunctionsBase();
+    const token = await resolveAccessToken();
+    if (!base || !token) {
+      throw new Error('服务器代理未配置 (VITE_SUPABASE_FUNCTIONS_URL 缺失或会话失效)。');
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), SEARCH_TIMEOUT_MS);
+    try {
+      const response = await fetch(`${base}/ai-search`, {
+        method: 'POST',
+        headers: edgeFunctionHeaders(token, { 'Content-Type': 'application/json' }),
+        body: JSON.stringify({
+          provider: 'metaso',
+          ...metasoSearchRequestBody(query, scope, size),
+        }),
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        const text = await response.text();
+        console.error(`${LOG_PREFIX} HTTP ${response.status}`, text.slice(0, 500));
+        throw new Error(`Metaso search HTTP ${response.status}: ${text.slice(0, 200)}`);
+      }
+      const payload = await response.json();
+      return normalizeMetasoSearchResponse(payload);
+    } catch (e) {
+      if (isAbortError(e)) {
+        throw new Error(
+          `秘塔搜索超时（${SEARCH_TIMEOUT_MS / 1000}s）。服务器托管模式下由 Edge Function 访问 metaso.cn；若部署区域到国内网络不通，请改用设置里的本地秘塔 Key，或关闭「使用服务器密钥」后重试。`,
+        );
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 
   // ---- Tauri path --------------------------------------------------------
   if (isTauriRuntime()) {
@@ -292,11 +441,7 @@ export async function metasoSearch(
         Accept: 'application/json',
         Authorization: `Bearer ${apiKey}`,
       },
-      body: JSON.stringify({
-        q: query,
-        scope,
-        size,
-      }),
+      body: JSON.stringify(metasoSearchRequestBody(query, scope, size)),
       signal: controller.signal,
     });
 
@@ -307,6 +452,13 @@ export async function metasoSearch(
     }
 
     return normalizeMetasoSearchResponse(await response.json());
+  } catch (e) {
+    if (isAbortError(e)) {
+      throw new Error(
+        `秘塔搜索超时（${SEARCH_TIMEOUT_MS / 1000}s）。请检查秘塔 Key、本机网络，以及 Vite/Netlify 的 /api/metaso 代理是否可用。`,
+      );
+    }
+    throw e;
   } finally {
     clearTimeout(timer);
   }

@@ -1,12 +1,21 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import React from 'react';
 import { AgentsStudio } from '../../src/components/AgentsStudio';
 import { db } from '../../src/db';
 import type { AgentConfig } from '../../src/db';
 
+const { extractDocumentText } = vi.hoisted(() => ({
+  extractDocumentText: vi.fn(async () => '占星讲义正文'),
+}));
+
 const callAIMock = vi.fn();
+
+vi.mock('../../src/utils/extractDocumentText', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/utils/extractDocumentText')>();
+  return { ...actual, extractDocumentText };
+});
 
 vi.mock('../../src/utils/agentMarkdownKnowledge', () => ({
   AGENT_KNOWLEDGE_MAX_FILE_BYTES: 512_000,
@@ -22,6 +31,7 @@ vi.mock('react-i18next', async (importOriginal) => {
         if (key === 'agents.sandbox_title') return `Sandbox: ${opts?.name ?? ''}`;
         if (key === 'agents.message_placeholder') return `Message ${opts?.name ?? ''}`;
         if (key === 'agents.sandbox_empty') return `Empty sandbox for ${opts?.name ?? ''}`;
+        if (key === 'agents.studio.from_document_user') return `FROMDOC ${opts?.document ?? ''}`;
         return key;
       },
       i18n: { language: 'en' },
@@ -40,7 +50,7 @@ vi.mock('../../src/utils/aiI18n', () => ({
 vi.mock('lucide-react', () => {
   const names = [
     'Plus', 'Search', 'Bot', 'Wand2', 'Send', 'MessageSquare', 'X', 'FileText',
-    'Loader2', 'Trash2', 'RotateCcw',
+    'FileUp', 'Loader2', 'Trash2', 'RotateCcw', 'Image', 'Share2', 'Sparkles', 'Layers',
   ];
   const icons: Record<string, React.FC> = {};
   for (const name of names) {
@@ -75,6 +85,7 @@ const aiConfig = { provider: 'gemini', apiKey: 'k', baseUrl: '', model: 'gemini-
 function renderStudio(
   agents: AgentConfig[] = [agentA, agentB],
   setAgentConfigs = vi.fn().mockResolvedValue(undefined),
+  extra?: { onGenerateCover?: (id: string) => void; generatingCoverAgentId?: string | null },
 ) {
   return render(
     <AgentsStudio
@@ -82,6 +93,8 @@ function renderStudio(
       setAgentConfigs={setAgentConfigs}
       aiConfig={aiConfig}
       callAI={callAIMock}
+      onGenerateCover={extra?.onGenerateCover}
+      generatingCoverAgentId={extra?.generatingCoverAgentId}
     />,
   );
 }
@@ -209,5 +222,124 @@ describe('AgentsStudio 沙盒', () => {
       },
       { timeout: 3000 },
     );
+  });
+});
+
+describe('AgentsStudio 生成卡片', () => {
+  beforeEach(async () => {
+    await db.nodes.clear();
+    Element.prototype.scrollIntoView = vi.fn();
+  });
+
+  it('名称旁有生成卡片按钮，不展示插画预览区', () => {
+    renderStudio();
+    const name = screen.getByLabelText('agents.persona_name');
+    const generate = screen.getByTestId('agent-studio-generate-cover');
+    expect(generate).toHaveTextContent('agents.card_cover_generate');
+    expect(name.compareDocumentPosition(generate) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.queryByTestId('agent-studio-cover-empty')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('agent-studio-cover')).not.toBeInTheDocument();
+    expect(screen.queryByText('agents.card_cover')).not.toBeInTheDocument();
+  });
+
+  it('点击生成会把当前人格 id 交给 onGenerateCover', async () => {
+    const onGenerateCover = vi.fn();
+    const user = userEvent.setup();
+    renderStudio([agentA, agentB], vi.fn().mockResolvedValue(undefined), { onGenerateCover });
+    await user.click(screen.getByTestId('agent-studio-generate-cover'));
+    expect(onGenerateCover).toHaveBeenCalledWith('agent-a');
+  });
+
+  it('已有封面时名称旁显示封面缩略图，按钮改为重新生成', () => {
+    renderStudio([{ ...agentA, coverImageUrl: 'https://img.example/fox.jpg' }]);
+    expect(screen.getByTestId('agent-studio-generate-cover')).toHaveTextContent('agents.card_cover_regenerate');
+    expect(screen.queryByTestId('agent-studio-clear-cover')).not.toBeInTheDocument();
+    const thumbs = screen.getAllByTestId('agent-cover-thumb');
+    expect(thumbs.length).toBeGreaterThanOrEqual(1);
+    expect(thumbs[0]).toHaveAttribute('src', 'https://img.example/fox.jpg');
+  });
+
+  it('单击头像可上传本地图片并写入 coverImageUrl', async () => {
+    const setAgentConfigs = vi.fn().mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    renderStudio([agentA], setAgentConfigs);
+
+    expect(screen.getByTestId('agent-studio-upload-cover')).toHaveAttribute(
+      'aria-label',
+      'agents.card_cover_upload',
+    );
+
+    const file = new File(['avatar-bytes'], 'me.png', { type: 'image/png' });
+    await user.upload(screen.getByTestId('agent-studio-cover-input'), file);
+
+    await waitFor(() => {
+      expect(setAgentConfigs).toHaveBeenCalled();
+    });
+    const next = setAgentConfigs.mock.calls[0][0] as AgentConfig[];
+    expect(next[0].id).toBe('agent-a');
+    expect(next[0].coverImageUrl).toMatch(/^data:image\/png;base64,/);
+  });
+});
+
+describe('AgentsStudio 从文档生成提示词', () => {
+  beforeEach(() => {
+    callAIMock.mockReset();
+    callAIMock.mockResolvedValue('New Enhanced Prompt:\nYou are an astrologer.');
+    extractDocumentText.mockReset();
+    extractDocumentText.mockResolvedValue('占星讲义正文');
+    Element.prototype.scrollIntoView = vi.fn();
+  });
+
+  it('名称旁有从文档生成按钮', () => {
+    renderStudio();
+    const fromDoc = screen.getByTestId('agent-studio-prompt-from-doc');
+    const generate = screen.getByTestId('agent-studio-generate-cover');
+    expect(fromDoc).toHaveTextContent('agents.prompt_from_doc');
+    expect(fromDoc.compareDocumentPosition(generate) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('上传 Word 后把 AI 起草的系统提示词写入角色', async () => {
+    const setAgentConfigs = vi.fn().mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    renderStudio([agentA], setAgentConfigs);
+
+    const file = new File(['doc-bytes'], 'brief.docx', {
+      type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    });
+    await user.upload(screen.getByTestId('agent-studio-prompt-doc-input'), file);
+    await user.click(screen.getByRole('button', { name: 'dialog.confirm' }));
+
+    await waitFor(() => {
+      expect(extractDocumentText).toHaveBeenCalled();
+      expect(callAIMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          prompt: expect.stringContaining('占星讲义正文'),
+        }),
+      );
+    });
+    await waitFor(() => {
+      expect(setAgentConfigs).toHaveBeenCalled();
+    });
+    const next = setAgentConfigs.mock.calls.at(-1)?.[0] as AgentConfig[];
+    expect(next[0].prompt).toBe('You are an astrologer.');
+  });
+});
+
+describe('AgentsStudio 系统提示词输入法', () => {
+  it('组字过程中不写入，选字后才持久化最终汉字', async () => {
+    const setAgentConfigs = vi.fn().mockResolvedValue(undefined);
+    renderStudio([agentA], setAgentConfigs);
+    const field = screen.getByTestId('agent-studio-system-prompt');
+
+    fireEvent.compositionStart(field);
+    fireEvent.change(field, { target: { value: 'You are alpha' + 'ru' } });
+    expect(setAgentConfigs).not.toHaveBeenCalled();
+    expect(field).toHaveValue('You are alpharu');
+
+    fireEvent.change(field, { target: { value: 'You are alpha如果' } });
+    fireEvent.compositionEnd(field);
+    expect(setAgentConfigs).toHaveBeenCalled();
+    const next = setAgentConfigs.mock.calls.at(-1)?.[0] as AgentConfig[];
+    expect(next[0].prompt).toBe('You are alpha如果');
   });
 });

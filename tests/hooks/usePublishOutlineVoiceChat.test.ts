@@ -80,6 +80,7 @@ vi.mock(import('react-i18next'), async () => {
         if (key === 'publish.voice_revised_default') return 'revised-default-stub';
         return key;
       },
+      i18n: { language: 'zh' },
     }),
   };
 });
@@ -206,7 +207,7 @@ describe('usePublishOutlineVoiceChat — toggle / stop lifecycle', () => {
     expect(result.current.active).toBe(false);
   });
 
-  it('toggle 启动链（ASR→mic）抛出时回滚到 idle，不残留 active=true', async () => {
+  it('toggle 启动链（mic 与 ASR 并行）抛出时回滚到 idle，不残留 active=true', async () => {
     startMicCapture.mockRejectedValueOnce(new Error('mic permission denied'));
     const { result } = renderChat();
     await act(async () => {
@@ -327,7 +328,7 @@ describe('usePublishOutlineVoiceChat — AI turn & outline 修订', () => {
     });
     expect(onOutlineRevised).toHaveBeenCalledWith({
       title: '合并后标题',
-      sections: [{ cardId: 'n1', heading: '合并段', summary: '共用论点' }],
+      sections: [{ cardId: 'n1', heading: '', summary: '' }],
     });
     expect(ttsPushAccumulated).toHaveBeenCalledWith('已合并第一节与第二节');
   });

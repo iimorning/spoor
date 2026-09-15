@@ -4,6 +4,7 @@ import React from 'react';
 import { NoteNode } from '../../src/components/nodes/NoteNode';
 import { db } from '../../src/db';
 import type { CanvasNode } from '../../src/db';
+import { NOTE_CARD_AUTO_MAX_HEIGHT_PX, NOTE_CARD_SCROLL_MAX_HEIGHT_PX } from '../../src/utils/canvas';
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
@@ -29,7 +30,7 @@ vi.mock('lucide-react', () => {
     'Quote', 'Brain', 'Bot', 'Coffee', 'Wand2', 'Send', 'SlidersHorizontal', 'History', 'ZoomIn',
     'Focus', 'Image', 'FilePlus', 'Trash2', 'Link2', 'X', 'Camera', 'ChevronLeft',
     'ChevronRight', 'Check', 'Cpu', 'ArrowRight', 'ListChecks', 'CheckCircle2',
-    'Loader2', 'PenLine', 'Edit3', 'FileText', 'Play',
+    'Loader2', 'PenLine', 'Edit3', 'FileText', 'Play', 'Layers2',
   ];
   const icons: Record<string, React.FC> = {};
   for (const name of iconNames) {
@@ -66,6 +67,28 @@ describe('NoteNode', () => {
   it.each([0, 1, 2, 3, 4] as const)('layout %i 渲染 Markdown 正文', (layout) => {
     render(<NoteNode node={makeNode({ layout })} editingNodeId={null} setEditingNodeId={vi.fn()} />);
     expect(screen.getByTestId('markdown')).toHaveTextContent('Test content');
+  });
+
+  it('scopes CJK override to the note shell', () => {
+    render(<NoteNode node={makeNode()} editingNodeId={null} setEditingNodeId={vi.fn()} />);
+    expect(screen.getByTestId('note-node-shell')).toHaveClass('note-cjk');
+  });
+
+  it('未拖拽高度时外壳有 maxHeight，避免长粘贴把卡片撑到无限高', () => {
+    render(<NoteNode node={makeNode()} editingNodeId={null} setEditingNodeId={vi.fn()} />);
+    const shell = screen.getByTestId('note-node-shell');
+    expect(shell.style.maxHeight).toBe(`${NOTE_CARD_AUTO_MAX_HEIGHT_PX}px`);
+    expect(screen.getByTestId('note-body-scroll').style.maxHeight).toBe(
+      `${NOTE_CARD_SCROLL_MAX_HEIGHT_PX}px`,
+    );
+  });
+
+  it('用户拖拽过高度后外壳取消 maxHeight', () => {
+    render(
+      <NoteNode node={makeNode({ height: 520 })} editingNodeId={null} setEditingNodeId={vi.fn()} />,
+    );
+    expect(screen.getByTestId('note-node-shell').style.maxHeight).toBe('');
+    expect(screen.getByTestId('note-body-scroll').style.maxHeight).toBe('');
   });
 
   it('layout 1 显示毛玻璃标题文案键', () => {
@@ -137,6 +160,14 @@ describe('NoteNode', () => {
     expect(screen.getByTestId('markdown')).toHaveTextContent('Test content');
     expect(container.querySelector('.receipt-barcode')).toBeFalsy();
     expect(container.querySelector('.note-surface-receipt')).toBeFalsy();
+  });
+
+  it.each([0, 1, 2, 3, 4] as const)('layout %i 点击 Markdown 预览会进入编辑', (layout) => {
+    const setEditing = vi.fn();
+    render(<NoteNode node={makeNode({ layout })} editingNodeId={null} setEditingNodeId={setEditing} />);
+    fireEvent.click(screen.getByTestId('markdown'));
+    expect(setEditing).toHaveBeenCalledTimes(1);
+    expect(setEditing).toHaveBeenCalledWith('n1');
   });
 
   it('editingNodeId 匹配时出现 contentEditable 且内容为 node.content', () => {

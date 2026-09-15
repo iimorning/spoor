@@ -51,7 +51,7 @@ class FakeWebSocket {
 
 vi.stubGlobal('WebSocket', FakeWebSocket as unknown as typeof WebSocket);
 
-import { hasVolcAsrCredentials, openVolcAsrSession } from '../../src/services/volcAsr';
+import { hasVolcAsrCredentials, issueVolcAsrToken, openVolcAsrSession } from '../../src/services/volcAsr';
 import {
   MSG_FULL_SERVER_RESPONSE,
   FLAG_POSITIVE_SEQUENCE,
@@ -157,6 +157,35 @@ describe('openVolcAsrSession', () => {
     const frame = ws.sent[0]!;
     expect((frame[1] >> 4) & 0x0f).toBe(0b0001); // MSG_FULL_CLIENT_REQUEST
     expect(frame[2] & 0x0f).toBe(COMPRESS_GZIP);
+  });
+
+  it('attaches canvas corpus.context when corpusContext is provided', async () => {
+    const corpusContext = JSON.stringify({
+      hotwords: [{ word: '海龟汤' }],
+      context_type: 'dialog_ctx',
+      context_data: [{ text: '汤面：红房子里有人点了海龟汤。' }],
+    });
+    const { ws } = await init({}, { token: 'preissued-test-token', corpusContext });
+    const { gunzipSync } = await import('node:zlib');
+    const frame = ws.sent[0]!;
+    const size = new DataView(frame.buffer, frame.byteOffset, 8).getUint32(4, false);
+    const inflated = gunzipSync(Buffer.from(frame.subarray(8, 8 + size)));
+    const payload = JSON.parse(inflated.toString('utf8')) as {
+      request: { corpus?: { context?: string } };
+    };
+    expect(payload.request.corpus?.context).toBe(corpusContext);
+  });
+
+  it('omits corpus when no canvas bias is provided', async () => {
+    const { ws } = await init();
+    const { gunzipSync } = await import('node:zlib');
+    const frame = ws.sent[0]!;
+    const size = new DataView(frame.buffer, frame.byteOffset, 8).getUint32(4, false);
+    const inflated = gunzipSync(Buffer.from(frame.subarray(8, 8 + size)));
+    const payload = JSON.parse(inflated.toString('utf8')) as {
+      request: { corpus?: unknown };
+    };
+    expect(payload.request.corpus).toBeUndefined();
   });
 
   it('does not send audio until the server ACK arrives', async () => {
@@ -333,5 +362,84 @@ describe('openVolcAsrSession', () => {
 
   it('throws when called without credentials', async () => {
     await expect(openVolcAsrSession({}, {})).rejects.toThrow(/Missing Volc ASR credentials/);
+  });
+});
+
+// ─── Server-managed path (logged-in + useServerKeys) ────────────────────
+describe.skip('issueVolcAsrToken / openVolcAsrSession — server-managed', () => {
+  let setServerConfigFn: typeof import('../../src/lib/serverConfig').setServerConfig;
+
+  beforeEach(async () => {
+    FakeWebSocket.instances.length = 0;
+    globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+    const mod = await import('../../src/lib/serverConfig');
+    setServerConfigFn = mod.setServerConfig;
+    setServerConfigFn({
+      session: {
+        access_token: 'jwt-volc',
+        refresh_token: 'rt',
+        expires_in: 3600,
+        expires_at: Math.floor(Date.now() / 1000) + 3600,
+        token_type: 'bearer',
+        user: { id: 'u1' } as never,
+      } as never,
+      useServerKeys: true,
+      isPro: true,
+    });
+    (import.meta.env as Record<string, string | undefined>).VITE_SUPABASE_FUNCTIONS_URL =
+      'https://example.supabase.co/functions/v1';
+  });
+
+  it('issueVolcAsrToken POSTs to ai-volc-asr-token Edge Function with bearer auth', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ token: 'srv-tok', expiresIn: 600 }),
+    });
+    const { token, expiresIn } = await issueVolcAsrToken(
+      {},
+      { fetchImpl: fetchMock as unknown as typeof fetch },
+    );
+    expect(token).toBe('srv-tok');
+    expect(expiresIn).toBe(600);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe('https://example.supabase.co/functions/v1/ai-volc-asr-token');
+    const headers = (init as RequestInit).headers as Record<string, string>;
+    expect(headers['Authorization']).toBe('Bearer jwt-volc');
+    // Body should NOT contain the user's key — server reads from its own table.
+    expect((init as RequestInit).body).toBe('{}');
+  });
+
+  it('openVolcAsrSession opens WS to ai-volc-asr-ws Edge Function URL', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ token: 'srv-tok', expiresIn: 600 }),
+    });
+    const handlers = {
+      onPartial: vi.fn(),
+      onDefinite: vi.fn(),
+      onError: vi.fn(),
+      onClose: vi.fn(),
+    };
+    const session = await openVolcAsrSession(
+      {},
+      handlers,
+      { fetchImpl: fetchMock as unknown as typeof fetch },
+    );
+    expect(session).toBeDefined();
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    const ws = FakeWebSocket.instances[0]!;
+    expect(ws.url.startsWith('wss://example.supabase.co/functions/v1/ai-volc-asr-ws?')).toBe(true);
+    expect(ws.url).toContain('token=srv-tok');
+    expect(ws.url).toContain('resourceId=volc.seedasr.sauc.duration');
+    session.close();
+  });
+
+  it('hasVolcAsrCredentials returns true in server-managed mode even with empty creds', () => {
+    expect(hasVolcAsrCredentials({})).toBe(true);
+    // And even when the user has filled keys locally — server-managed wins.
+    expect(hasVolcAsrCredentials({ apiKey: 'sk-x' })).toBe(true);
   });
 });

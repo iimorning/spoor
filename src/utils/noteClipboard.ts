@@ -4,7 +4,7 @@ export const STICKY_CLIPBOARD_KIND = 'scribe-sticky-v1' as const;
 
 export type StickyClipboardNodeV1 = Pick<
   CanvasNode,
-  'type' | 'content' | 'layout' | 'width' | 'height'
+  'type' | 'content' | 'layout' | 'width' | 'height' | 'rotation'
 > & {
   x: number;
   y: number;
@@ -58,6 +58,7 @@ export function buildStickyClipboardPayload(nodes: CanvasNode[]): StickyClipboar
       layout: n.layout,
       width: n.width,
       height: n.height,
+      rotation: n.rotation,
       x: n.x,
       y: n.y,
     })),
@@ -85,6 +86,7 @@ export function parseStickyClipboardPayload(raw: string): StickyClipboardPayload
         layout: typeof n.layout === 'number' ? n.layout : undefined,
         width: typeof n.width === 'number' ? n.width : undefined,
         height: typeof n.height === 'number' ? n.height : undefined,
+        rotation: typeof n.rotation === 'number' ? n.rotation : undefined,
         x,
         y,
       });

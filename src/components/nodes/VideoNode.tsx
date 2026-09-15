@@ -1,30 +1,41 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import { ExternalLink, Headphones, Video } from 'lucide-react';
-import type { NodeContentProps } from './types';
+import { ExternalLink, FileText, Headphones, Loader2, Video } from 'lucide-react';
+import type { VideoNodeProps } from './types';
+import { MediaCardCaption } from './MediaCardCaption';
 import { openExternalUrl } from '../../utils/openExternal';
-import type { MediaPlaybackMode } from '../../utils/mediaEmbed';
+import { looksLikeDirectAudio, type MediaPlaybackMode } from '../../utils/mediaEmbed';
+import { isCanvasAudioCard } from '../../utils/canvasAudioCard';
+import { parseSearchMediaDescription } from '../../utils/webSearchMediaCaption';
 
 function asHttpUrl(raw: string | undefined): string {
   const s = (raw || '').trim();
   return /^https?:\/\//i.test(s) ? s : '';
 }
 
-function playbackMode(node: NodeContentProps['node']): MediaPlaybackMode | 'none' {
+function playbackMode(node: VideoNodeProps['node']): MediaPlaybackMode | 'none' {
   const ft = (node.fileType || '').trim();
   if (ft === 'iframe' || ft === 'video' || ft === 'audio') return ft;
+  const src = (node.content || '').trim();
+  if (ft.startsWith('audio/') || src.startsWith('data:audio/')) return 'audio';
+  const href = asHttpUrl(src);
+  if (href && looksLikeDirectAudio(href)) return 'audio';
   // Local uploads / legacy: treat content as a direct video file.
-  if (asHttpUrl(node.content) || (node.content || '').startsWith('data:video/')) return 'video';
+  if (href || src.startsWith('data:video/')) return 'video';
   return 'none';
 }
 
-export function VideoNode({ node }: NodeContentProps) {
+export function VideoNode({ node, onTranscribeAudio, isTranscribingAudio }: VideoNodeProps) {
   const { t } = useTranslation();
-  const title = (node.description || '').trim();
   const href = asHttpUrl(node.sourceUrl) || asHttpUrl(node.content);
   const mode = playbackMode(node);
   const src = (node.content || '').trim();
   const isSearchCard = Boolean(node.webSearchParentId) || typeof node.webSearchIndex === 'number';
+  const parsed = isSearchCard
+    ? parseSearchMediaDescription(node.description)
+    : { title: (node.description || '').trim(), relation: '' };
+  const title = parsed.title;
+  const relation = parsed.relation;
 
   const openSource = (e: React.MouseEvent | React.PointerEvent) => {
     e.stopPropagation();
@@ -33,6 +44,59 @@ export function VideoNode({ node }: NodeContentProps) {
       console.error('[Spoor] open media source failed', err),
     );
   };
+
+  const showTranscribe = isCanvasAudioCard(node) && Boolean(onTranscribeAudio);
+  const transcribeLabel = isTranscribingAudio
+    ? t('nodes.audio_transcribing')
+    : t('nodes.audio_transcribe');
+  const transcribeBtn = showTranscribe ? (
+    <button
+      type="button"
+      data-testid="audio-transcribe"
+      disabled={isTranscribingAudio}
+      onClick={(e) => {
+        e.stopPropagation();
+        onTranscribeAudio?.(node.id);
+      }}
+      onPointerDown={(e) => e.stopPropagation()}
+      title={transcribeLabel}
+      aria-label={transcribeLabel}
+      className="shrink-0 inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[10px] font-sans font-medium text-[#C2410C] hover:bg-[#C2410C]/8 transition-colors disabled:opacity-50"
+    >
+      {isTranscribingAudio ? (
+        <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
+      ) : (
+        <FileText className="h-3 w-3" aria-hidden />
+      )}
+      <span>{t('nodes.audio_transcribe_short')}</span>
+    </button>
+  ) : null;
+
+  const sourceBtn = href ? (
+    <button
+      type="button"
+      onClick={openSource}
+      onPointerDown={(e) => e.stopPropagation()}
+      title={href}
+      aria-label={t('nodes.image_open_source')}
+      className="shrink-0 inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[10px] font-sans font-medium text-[#C2410C] hover:bg-[#C2410C]/8 transition-colors"
+    >
+      <ExternalLink className="h-3 w-3" aria-hidden />
+      <span>{t('nodes.image_open_source_short')}</span>
+    </button>
+  ) : null;
+
+  const trailing =
+    transcribeBtn || sourceBtn ? (
+      <div className="flex shrink-0 items-center gap-1">
+        {transcribeBtn}
+        {sourceBtn}
+      </div>
+    ) : undefined;
+
+  const showCaption = Boolean(
+    title || relation || (isSearchCard && href && mode !== 'none') || trailing,
+  );
 
   return (
     <div
@@ -83,30 +147,9 @@ export function VideoNode({ node }: NodeContentProps) {
         )}
       </div>
 
-      {(title || (isSearchCard && href && mode !== 'none')) && (
-        <div className="mt-1.5 flex items-center gap-1.5 min-w-0 px-0.5">
-          {title ? (
-            <p className="min-w-0 flex-1 text-[10px] font-sans text-[#8c8a84] truncate" title={title}>
-              {title}
-            </p>
-          ) : (
-            <span className="min-w-0 flex-1" />
-          )}
-          {href ? (
-            <button
-              type="button"
-              onClick={openSource}
-              onPointerDown={(e) => e.stopPropagation()}
-              title={href}
-              aria-label={t('nodes.image_open_source')}
-              className="shrink-0 inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[10px] font-sans font-medium text-[#C2410C] hover:bg-[#C2410C]/8 transition-colors"
-            >
-              <ExternalLink className="h-3 w-3" aria-hidden />
-              <span>{t('nodes.image_open_source_short')}</span>
-            </button>
-          ) : null}
-        </div>
-      )}
+      {showCaption ? (
+        <MediaCardCaption title={title} relation={relation} trailing={trailing} />
+      ) : null}
     </div>
   );
 }

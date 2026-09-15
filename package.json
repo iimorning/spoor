@@ -23,16 +23,27 @@
     "remotion:render:spoor": "npm run remotion:render:spoor --prefix remotion-kit",
     "remotion:render:spoor-zh": "npm run remotion:render:spoor-zh --prefix remotion-kit",
     "setup:mimo-key": "node scripts/setup-builtin-mimo.mjs",
-    "setup:doubao-key": "node scripts/setup-builtin-doubao.mjs"
+    "setup:doubao-key": "node scripts/setup-builtin-doubao.mjs",
+    "setup:note-hand-fonts": "node scripts/fetch-note-hand-fonts.mjs",
+    "dump:official": "tsx scripts/dump-official-payload.ts"
   },
   "dependencies": {
     "@google/genai": "^1.51.0",
     "@tailwindcss/vite": "^4.1.14",
     "@tauri-apps/api": "^2.11.0",
     "@tauri-apps/cli": "^2.11.0",
+    "@tiptap/core": "3.30.2",
+    "@tiptap/extension-image": "3.30.2",
+    "@tiptap/extension-link": "3.30.2",
+    "@tiptap/extension-placeholder": "3.30.2",
+    "@tiptap/markdown": "3.30.2",
+    "@tiptap/pm": "3.30.2",
+    "@tiptap/react": "3.30.2",
+    "@tiptap/starter-kit": "3.30.2",
     "@vitejs/plugin-react": "^5.0.4",
     "dexie": "^4.4.2",
     "dexie-react-hooks": "^4.4.0",
+    "docx": "^9.7.1",
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
     "i18next": "^26.0.8",
@@ -45,7 +56,10 @@
     "react-dom": "^19.0.1",
     "react-i18next": "^17.0.6",
     "react-markdown": "^10.1.0",
+    "rehype-raw": "^7.0.0",
+    "rehype-sanitize": "^6.0.0",
     "remark-breaks": "^4.0.0",
+    "remark-gfm": "^4.0.1",
     "vite": "^6.2.3",
     "ws": "^8.21.1"
   },
@@ -64,6 +78,11 @@
     "tsx": "^4.21.0",
     "typescript": "~5.8.2",
     "vite": "^6.2.3",
-    "vitest": "^4.1.5"
+    "vitest": "^4.1.5",
+    "wawoff2": "^2.0.1"
+  },
+  "overrides": {
+    "@tiptap/core": "3.30.2",
+    "@tiptap/pm": "3.30.2"
   }
 }

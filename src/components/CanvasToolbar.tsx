@@ -1,587 +1,619 @@
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   Plus,
-  Sparkles,
+  MapPin,
   Bot,
-  Wand2,
-  ZoomIn,
-  FileText as FileTextIcon,
-  Loader2,
+  Edit3,
   Mic,
-  Square,
+  ZoomIn,
+  Scan,
+  FileText as FileTextIcon,
+  PenLine,
+  Loader2,
+  Check,
+  SquareDashed,
+  ChevronRight,
+  BookOpen,
 } from 'lucide-react';
 import type { AgentConfig } from '../db';
 import { db } from '../db';
-import { getCanvasCenterPosition } from '../utils/canvas';
+import { AGENT_NODE_SIZE, getCanvasCenterPosition, PUBLISH_MIN_SELECTION } from '../utils/canvas';
+import { CANVAS_FILE_UPLOAD_ACCEPT } from '../utils/chatPanelFileUpload';
+import { stampNewCard } from '../utils/stampNewCard';
 import { resolveAgentLocalizedName } from '../utils/aiI18n';
-import type { VoicePhase } from '../hooks/useVoiceWritingMode';
+import type { CanvasVoicePersona } from '../utils/canvasAskContext';
 import { AgentIcon } from './AgentIcon';
+import askFoxUrl from '../assets/ask-fox.png';
+import { useAdaptiveLayout } from '../hooks/useAdaptiveLayout';
+import { isTextEditingTarget } from '../utils/noteClipboard';
+import { canvasOverlayProps } from '../utils/canvasOverlay';
 import {
-  CANVAS_TOOLBAR_COLLAPSED_SIZE,
-  canvasToolbarDockPosition,
-  clampCanvasToolbarPosition,
-  defaultCanvasToolbarLayout,
-  isCanvasToolbarInDockZone,
-  loadCanvasToolbarLayout,
-  saveCanvasToolbarLayout,
-  type CanvasToolbarLayout,
-  type CanvasToolbarOrientation,
-} from '../utils/canvasToolbarLayout';
+  readVoiceListenHintSeen,
+  writeVoiceListenHintSeen,
+} from '../utils/voiceListenHint';
 
 export interface CanvasToolbarProps {
-  isToolbarAiLoading: boolean;
-  isInputDisabled: boolean;
-  aiPrompt: string;
-  setAiPrompt: (prompt: string) => void;
-  handleAiSubmit: () => void;
   addTextNode: () => void;
   addThemeNode: () => void;
+  addEssayNode: () => void;
+  addAskNode: () => void;
   addFileNode: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  /** Activate voice mode on an Ask card (existing or freshly spawned). */
+  onActivateVoice: () => void;
+  /** Pin a canvas agent for toolbar voice (`null` = default Ask character). */
+  onSelectVoicePersona?: (agentNodeId: string | null) => void;
+  /** Agent cards currently on the active canvas — shown on mic hover. */
+  canvasVoicePersonas?: CanvasVoicePersona[];
+  /** True when an Ask card is on the canvas — only then offer 阿狸 in the mic picker. */
+  showAskVoiceOption?: boolean;
+  /** Pinned agent node id; `null` means the default Ask character. */
+  pinnedVoiceAgentNodeId?: string | null;
+  /** True while voice mode is active — drives the toolbar mic's active styling. */
+  voiceModeActive?: boolean;
+  /** Current voice loop phase; used to show live ASR above the mic. */
+  voicePhase?: 'idle' | 'listening' | 'thinking' | 'speaking';
+  /** Latest Volc ASR transcript while listening (updates as you speak). */
+  liveTranscript?: string;
   agentConfigs: AgentConfig[];
   canvasTransform: { x: number; y: number; scale: number };
   setCanvasTransform: React.Dispatch<React.SetStateAction<{ x: number; y: number; scale: number }>>;
   transformRef: React.MutableRefObject<{ x: number; y: number; scale: number }>;
   activeCanvasId: string;
-  voiceModeActive?: boolean;
-  voicePhase?: VoicePhase;
-  onToggleVoiceMode?: () => void;
-  /** Phase-chip stop: finish listen / stop TTS / cancel thinking */
-  onStopVoiceActivity?: () => void;
-  /** Quoted passage from a book node, used as AI context on next submit. */
-  pendingQuote?: { text: string; sourceLabel?: string } | null;
-  onClearPendingQuote?: () => void;
+  /** Fit every card into the current viewport. */
+  onFitCanvas?: () => void;
+  /** Open the synthesize / publish outline flow. */
+  onPublish: () => void;
+  /** Number of currently selected canvas nodes (shown in title). */
+  selectedCount: number;
+  /** True while any AI job (incl. outline dialog) is busy. */
+  publishDisabled?: boolean;
+  /** True while the outline dialog is open / synthesizing. */
+  publishBusy?: boolean;
+  /** V2: toolbar toggle for drawing persona work zones. */
+  canvasV2Enabled?: boolean;
+  workZoneDrawMode?: boolean;
+  onToggleWorkZoneDraw?: () => void;
 }
 
-function isToolbarInteractiveTarget(target: EventTarget | null): boolean {
+function shouldIgnoreVoiceMicShortcut(target: EventTarget | null): boolean {
+  if (isTextEditingTarget(target)) return true;
   if (!(target instanceof Element)) return false;
   return Boolean(
     target.closest(
-      'button, a, input, textarea, label, select, option, [contenteditable="true"], [data-no-toolbar-drag]',
+      'button, [role="button"], a[href], summary, [role="menuitem"], [role="dialog"], [aria-modal="true"], [data-testid="settings-backdrop"], [data-testid="app-dialog-backdrop"]',
     ),
   );
 }
 
 export function CanvasToolbar({
-  isToolbarAiLoading,
-  isInputDisabled,
-  aiPrompt,
-  setAiPrompt,
-  handleAiSubmit,
   addTextNode,
   addThemeNode,
+  addEssayNode,
+  onActivateVoice,
+  onSelectVoicePersona,
+  canvasVoicePersonas = [],
+  showAskVoiceOption = false,
+  pinnedVoiceAgentNodeId = null,
+  voiceModeActive = false,
+  voicePhase = 'idle',
+  liveTranscript = '',
+  addAskNode,
   addFileNode,
   agentConfigs,
   canvasTransform,
   setCanvasTransform,
   transformRef,
   activeCanvasId,
-  voiceModeActive = false,
-  voicePhase = 'idle',
-  onToggleVoiceMode,
-  onStopVoiceActivity,
-  pendingQuote = null,
-  onClearPendingQuote,
+  onFitCanvas,
+  onPublish,
+  selectedCount,
+  publishDisabled = false,
+  publishBusy = false,
+  canvasV2Enabled = false,
+  workZoneDrawMode = false,
+  onToggleWorkZoneDraw,
 }: CanvasToolbarProps) {
   const { t } = useTranslation();
-  const panelRef = useRef<HTMLDivElement>(null);
-  const shellRef = useRef<HTMLDivElement>(null);
-  const dragRef = useRef<{
-    pointerId: number;
-    startX: number;
-    startY: number;
-    originX: number;
-    originY: number;
-    moved: boolean;
-  } | null>(null);
-  const suppressFlipRef = useRef(false);
-
-  const [layout, setLayout] = useState<CanvasToolbarLayout>(() => {
-    const saved = loadCanvasToolbarLayout();
-    if (saved) return saved;
-    return defaultCanvasToolbarLayout(672, 72);
-  });
-  const [dragging, setDragging] = useState(false);
-
-  const isVertical = layout.orientation === 'vertical';
-
-  const persistLayout = useCallback((next: CanvasToolbarLayout) => {
-    setLayout(next);
-    saveCanvasToolbarLayout(next);
-  }, []);
-
-  const collapsed = Boolean(layout.collapsed);
-
-  const clampToViewport = useCallback(
-    (
-      x: number,
-      y: number,
-      orientation: CanvasToolbarOrientation = layout.orientation,
-      asCollapsed = collapsed,
-    ) => {
-      if (asCollapsed) {
-        const size = CANVAS_TOOLBAR_COLLAPSED_SIZE;
-        return clampCanvasToolbarPosition(x, y, size, size);
-      }
-      const el = panelRef.current;
-      const w = el?.offsetWidth ?? (orientation === 'vertical' ? 240 : 672);
-      const h = el?.offsetHeight ?? (orientation === 'vertical' ? 320 : 72);
-      return clampCanvasToolbarPosition(x, y, w, h);
-    },
-    [collapsed, layout.orientation],
-  );
-
-  const expandToolbar = useCallback(() => {
-    const next = defaultCanvasToolbarLayout(672, 72);
-    next.orientation = layout.orientation;
-    persistLayout(next);
-  }, [layout.orientation, persistLayout]);
-
-  useLayoutEffect(() => {
-    const el = panelRef.current;
-    if (!el) return;
-    const clamped = clampCanvasToolbarPosition(layout.x, layout.y, el.offsetWidth, el.offsetHeight);
-    if (clamped.x !== layout.x || clamped.y !== layout.y) {
-      persistLayout({ ...layout, ...clamped });
-    }
-    const onResize = () => {
-      const current = panelRef.current;
-      if (!current) return;
-      setLayout((prev) => {
-        const nextClamp = clampCanvasToolbarPosition(
-          prev.x,
-          prev.y,
-          current.offsetWidth,
-          current.offsetHeight,
-        );
-        const next = { ...prev, ...nextClamp };
-        saveCanvasToolbarLayout(next);
-        return next;
-      });
+  const { compact, touchChrome } = useAdaptiveLayout();
+  const [voicePickerOpen, setVoicePickerOpen] = useState(false);
+  const [voicePickerHoverLocked, setVoicePickerHoverLocked] = useState(false);
+  const [readyNudge, setReadyNudge] = useState(false);
+  const voiceGroupRef = useRef<HTMLDivElement>(null);
+  const sawStartupWaitRef = useRef(false);
+  useEffect(() => {
+    if (canvasV2Enabled) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.key !== ' ' && event.code !== 'Space') || event.repeat) return;
+      if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+      if (shouldIgnoreVoiceMicShortcut(event.target)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      onActivateVoice();
     };
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [canvasV2Enabled, onActivateVoice]);
+
+  const plusMenuPos = 'absolute bottom-full left-0 mb-2 w-52';
+  const pinnedPersona = canvasVoicePersonas.find((p) => p.nodeId === pinnedVoiceAgentNodeId);
+  const micLabel = pinnedPersona
+    ? t('voice.toolbar_mic_with_persona', { name: pinnedPersona.name })
+    : t('voice.toolbar_mic');
+  const showVoicePicker = canvasVoicePersonas.length > 0;
+  const showWaitForChime = voiceModeActive && voicePhase === 'idle';
+  const showReadyNudge = readyNudge && voicePhase === 'listening' && !voicePickerOpen;
+  const showLiveCaption =
+    voiceModeActive && voicePhase === 'listening' && !voicePickerOpen && !showReadyNudge;
+  const showPersonaChip = voiceModeActive && showVoicePicker && !voicePickerOpen;
+
+  const chipName = pinnedPersona
+    ? pinnedPersona.name
+    : t('voice.toolbar_mic_default', { name: t('ask.character_name') });
 
   useEffect(() => {
-    const el = panelRef.current;
-    if (!el || collapsed) return;
-    const clamped = clampCanvasToolbarPosition(layout.x, layout.y, el.offsetWidth, el.offsetHeight);
-    if (clamped.x !== layout.x || clamped.y !== layout.y) {
-      persistLayout({ ...layout, ...clamped });
-    }
-  }, [layout.orientation]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Auto-expand when voice / intent / book quote needs the full bar.
-  useEffect(() => {
-    if (!collapsed) return;
-    if (voiceModeActive || pendingQuote?.text) {
-      expandToolbar();
-    }
-  }, [collapsed, voiceModeActive, pendingQuote?.text, expandToolbar]);
-
-  const toggleOrientation = useCallback(() => {
-    if (collapsed) return;
-    const nextOrientation: CanvasToolbarOrientation =
-      layout.orientation === 'horizontal' ? 'vertical' : 'horizontal';
-    persistLayout({ ...layout, orientation: nextOrientation, collapsed: false });
-    requestAnimationFrame(() => {
-      const el = panelRef.current;
-      if (!el) return;
-      const clamped = clampCanvasToolbarPosition(layout.x, layout.y, el.offsetWidth, el.offsetHeight);
-      persistLayout({
-        x: clamped.x,
-        y: clamped.y,
-        orientation: nextOrientation,
-        collapsed: false,
-      });
-    });
-  }, [collapsed, layout, persistLayout]);
-
-  const onShellPointerDown = (e: React.PointerEvent<HTMLElement>) => {
-    if (e.button !== 0) return;
-    if (!collapsed && isToolbarInteractiveTarget(e.target)) return;
-    e.preventDefault();
-    e.stopPropagation();
-    dragRef.current = {
-      pointerId: e.pointerId,
-      startX: e.clientX,
-      startY: e.clientY,
-      originX: layout.x,
-      originY: layout.y,
-      moved: false,
+    if (!voicePickerOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (voiceGroupRef.current?.contains(event.target as Node)) return;
+      setVoicePickerOpen(false);
+      setVoicePickerHoverLocked(false);
     };
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-    setDragging(true);
-  };
+    window.addEventListener('pointerdown', onPointerDown);
+    return () => window.removeEventListener('pointerdown', onPointerDown);
+  }, [voicePickerOpen]);
 
-  const onShellPointerMove = (e: React.PointerEvent<HTMLElement>) => {
-    const drag = dragRef.current;
-    if (!drag || drag.pointerId !== e.pointerId) return;
-    e.preventDefault();
-    e.stopPropagation();
-    const dx = e.clientX - drag.startX;
-    const dy = e.clientY - drag.startY;
-    if (!drag.moved && dx * dx + dy * dy > 9) {
-      drag.moved = true;
-      suppressFlipRef.current = true;
-    }
-    const clamped = clampToViewport(drag.originX + dx, drag.originY + dy);
-    setLayout((prev) => ({ ...prev, ...clamped }));
-  };
-
-  const endShellDrag = (e: React.PointerEvent<HTMLElement>) => {
-    const drag = dragRef.current;
-    if (!drag || drag.pointerId !== e.pointerId) return;
-    const wasMoved = drag.moved;
-    dragRef.current = null;
-    setDragging(false);
-    try {
-      (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
-    } catch {
-      // already released
-    }
-
-    // Collapsed FAB: click (no move) expands back to the default bar.
-    if (collapsed && !wasMoved) {
-      expandToolbar();
+  useEffect(() => {
+    if (!voiceModeActive) {
+      sawStartupWaitRef.current = false;
+      setReadyNudge(false);
       return;
     }
+    if (voicePhase === 'idle') sawStartupWaitRef.current = true;
+  }, [voiceModeActive, voicePhase]);
 
-    setLayout((prev) => {
-      const size = prev.collapsed
-        ? CANVAS_TOOLBAR_COLLAPSED_SIZE
-        : panelRef.current?.offsetWidth ?? (prev.orientation === 'vertical' ? 240 : 672);
-      const height = prev.collapsed
-        ? CANVAS_TOOLBAR_COLLAPSED_SIZE
-        : panelRef.current?.offsetHeight ?? (prev.orientation === 'vertical' ? 320 : 72);
-      const clamped = clampCanvasToolbarPosition(prev.x, prev.y, size, height);
-      const inDock = isCanvasToolbarInDockZone(clamped.x, clamped.y, size, height);
+  useEffect(() => {
+    if (!voiceModeActive || voicePhase !== 'listening') return;
+    if (!sawStartupWaitRef.current) return;
+    if (readVoiceListenHintSeen()) return;
+    setReadyNudge(true);
+    writeVoiceListenHintSeen(true);
+    const timer = window.setTimeout(() => setReadyNudge(false), 2800);
+    return () => window.clearTimeout(timer);
+  }, [voiceModeActive, voicePhase]);
 
-      if (inDock) {
-        const dock = canvasToolbarDockPosition();
-        const next: CanvasToolbarLayout = {
-          ...prev,
-          ...dock,
-          collapsed: true,
-        };
-        saveCanvasToolbarLayout(next);
-        return next;
-      }
-
-      const next: CanvasToolbarLayout = {
-        ...prev,
-        ...clamped,
-        collapsed: false,
-      };
-      saveCanvasToolbarLayout(next);
-      return next;
-    });
+  const selectVoicePersona = (agentNodeId: string | null) => {
+    onSelectVoicePersona?.(agentNodeId);
+    setVoicePickerOpen(false);
+    setVoicePickerHoverLocked(true);
   };
-
-  const onShellDoubleClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (collapsed) return;
-    if (isToolbarInteractiveTarget(e.target)) return;
-    if (suppressFlipRef.current) {
-      suppressFlipRef.current = false;
-      return;
-    }
-    e.preventDefault();
-    e.stopPropagation();
-    toggleOrientation();
-  };
-
-  const phaseLabel =
-    voicePhase === 'listening'
-      ? t('voice.phase_listening')
-      : voicePhase === 'thinking'
-        ? t('voice.phase_thinking')
-        : voicePhase === 'speaking'
-          ? t('voice.phase_speaking')
-          : t('voice.phase_idle');
-
-  const stopLabel =
-    voicePhase === 'listening'
-      ? t('voice.stop_listening')
-      : voicePhase === 'speaking'
-        ? t('voice.stop_speaking')
-        : t('voice.stop_thinking');
-
-  const plusMenuPos = isVertical
-    ? 'absolute left-full top-0 ml-2 w-52'
-    : 'absolute bottom-full left-0 mb-2 w-52';
 
   return (
     <>
       <div
-        ref={panelRef}
-        className="fixed z-40 flex flex-col"
-        style={{
-          left: layout.x,
-          top: layout.y,
-          width: collapsed
-            ? CANVAS_TOOLBAR_COLLAPSED_SIZE
-            : isVertical
-              ? undefined
-              : 'min(42rem, calc(100vw - 16px))',
-        }}
+        {...canvasOverlayProps}
+        className="fixed bottom-3 left-1/2 z-40 -translate-x-1/2"
         data-no-drag=""
       >
-        {collapsed ? (
-          <button
-            type="button"
-            title={t('canvas.toolbar_expand')}
-            aria-label={t('canvas.toolbar_expand')}
-            onPointerDown={onShellPointerDown}
-            onPointerMove={onShellPointerMove}
-            onPointerUp={endShellDrag}
-            onPointerCancel={endShellDrag}
-            className={`w-12 h-12 rounded-full shadow-md border border-[#E6E4DF] flex items-center justify-center transition-all ${
-              dragging ? 'cursor-grabbing touch-none' : 'cursor-grab'
-            } ${
-              isToolbarAiLoading
-                ? 'bg-[#C2410C] text-white'
-                : 'bg-white text-[#C2410C] hover:bg-[#FFF7ED]'
-            }`}
-          >
-            {isToolbarAiLoading ? (
-              <Loader2 className="w-5 h-5 animate-spin" />
-            ) : (
-              <Wand2 className="w-5 h-5" />
-            )}
-          </button>
-        ) : (
-          <div className={`relative ${isVertical ? 'w-56' : 'w-full'}`}>
-            {/* Float above the input so overlays don't push the bar off-screen. */}
-            {(voiceModeActive || pendingQuote?.text) && (
-              <div className="absolute bottom-full left-0 right-0 mb-2 flex flex-col gap-2 pointer-events-auto">
-                {voiceModeActive && (
-                  <div className="self-center flex items-center gap-2 pl-3 pr-1.5 py-1 rounded-full bg-[#1a1a1a]/85 text-white text-[11px] font-mono tracking-wide shadow-lg">
-                    <span>{phaseLabel}</span>
-                    <button
-                      type="button"
-                      title={stopLabel}
-                      aria-label={stopLabel}
-                      onClick={onStopVoiceActivity}
-                      className="w-6 h-6 flex items-center justify-center rounded-full bg-white/15 hover:bg-[#C2410C] transition-colors"
-                    >
-                      <Square className="w-2.5 h-2.5 fill-current" />
-                    </button>
-                  </div>
-                )}
-                {pendingQuote?.text && (
-                  <div className="flex items-start gap-2 px-3 py-2 rounded-xl bg-[#FFF7ED] border border-[#FDBA74] text-[12px] text-[#9a3412] shadow-sm">
-                    <Sparkles className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-                    <div className="min-w-0 flex-1">
-                      <div className="font-sans font-bold text-[10px] uppercase tracking-wider text-[#C2410C] mb-0.5">
-                        {pendingQuote.sourceLabel
-                          ? t('ai.quote_chip_with_source', { source: pendingQuote.sourceLabel })
-                          : t('ai.quote_chip')}
-                      </div>
-                      <p className="font-serif leading-snug line-clamp-2 break-words">{pendingQuote.text}</p>
-                    </div>
-                    {onClearPendingQuote && (
-                      <button
-                        type="button"
-                        title={t('ai.quote_clear')}
-                        aria-label={t('ai.quote_clear')}
-                        onClick={onClearPendingQuote}
-                        className="shrink-0 text-[#C2410C]/70 hover:text-[#C2410C] font-bold px-1"
-                      >
-                        ×
-                      </button>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
-
+          <div className="relative">
         <div
-          ref={shellRef}
-          title={t('canvas.toolbar_move_hint')}
-          onPointerDown={onShellPointerDown}
-          onPointerMove={onShellPointerMove}
-          onPointerUp={endShellDrag}
-          onPointerCancel={endShellDrag}
-          onDoubleClick={onShellDoubleClick}
-          className={`bg-white rounded-2xl shadow-2xl border border-[#E6E4DF] p-2 transition-all ${
-            dragging ? 'cursor-grabbing touch-none' : 'cursor-grab'
-          } ${isToolbarAiLoading ? 'opacity-80' : ''} ${voiceModeActive ? 'opacity-90' : ''} ${
-            isVertical
-              ? 'flex flex-col items-stretch gap-2 w-full'
-              : 'flex items-center space-x-2 w-full'
-          }`}
+          className="flex items-center space-x-2 bg-white rounded-2xl border border-[#E6E4DF] p-2"
         >
           <div
-            className={`flex items-center gap-1 relative group ${
-              isVertical
-                ? 'justify-center border-b border-[#E6E4DF] pb-2'
-                : 'pl-2 border-r border-[#E6E4DF] pr-3 mr-1'
-            }`}
+            className="flex items-center gap-1 relative group pl-2 pr-2"
           >
             <div className="relative group/plus">
               <button
                 type="button"
                 onClick={addTextNode}
                 title={t('sidebar.new_note')}
-                className="w-8 h-8 flex items-center justify-center text-[#5a5a54] hover:text-[#1a1a1a] hover:bg-[#F4F1ED] rounded-lg cursor-pointer transition-colors"
+                data-testid="toolbar-plus"
+                className={`flex items-center justify-center text-[#5a5a54] hover:text-[#1a1a1a] hover:bg-[#F4F1ED] rounded-lg cursor-pointer transition-colors ${
+                  touchChrome ? 'w-10 h-10' : 'w-8 h-8'
+                }`}
               >
-                <Plus className="w-4 h-4" />
+                <Plus className={touchChrome ? 'w-5 h-5' : 'w-4 h-4'} />
               </button>
               <div
-                className={`${plusMenuPos} bg-white border border-[#E6E4DF] rounded-xl shadow-xl opacity-0 invisible group-hover/plus:opacity-100 group-hover/plus:visible transition-all flex flex-col p-1 z-50`}
+                {...canvasOverlayProps}
+                className={`${plusMenuPos} bg-white border border-[#E6E4DF] rounded-xl shadow-xl opacity-0 invisible group-hover/plus:opacity-100 group-hover/plus:visible transition-all flex flex-col p-1 z-50 overflow-visible`}
               >
                 <button
                   type="button"
                   onClick={addTextNode}
+                  data-testid="toolbar-plus-new-note"
                   className="text-left px-3 py-2 text-sm text-[#1a1a1a] hover:bg-[#F4F1ED] rounded-lg mb-1 flex items-center gap-2 min-w-0"
                 >
-                  <Plus className="w-3.5 h-3.5 shrink-0 text-[#5a5a54]" />
+                  <Plus className="w-3.5 h-3.5 shrink-0 text-[#C2410C]" />
                   <span className="font-bold truncate">{t('sidebar.new_note')}</span>
                 </button>
                 <button
                   type="button"
                   onClick={addThemeNode}
+                  data-testid="toolbar-plus-new-theme"
                   className="text-left px-3 py-2 text-sm text-[#1a1a1a] hover:bg-[#F4F1ED] rounded-lg mb-1 flex items-center gap-2 min-w-0"
                 >
-                  <Sparkles className="w-3.5 h-3.5 shrink-0 text-[#C2410C]" />
+                  <MapPin className="w-3.5 h-3.5 shrink-0 text-[#C2410C]" />
                   <span className="font-bold truncate">{t('sidebar.new_theme_card')}</span>
                 </button>
+                <button
+                  type="button"
+                  onClick={addEssayNode}
+                  data-testid="toolbar-plus-new-essay"
+                  className="text-left px-3 py-2 text-sm text-[#1a1a1a] hover:bg-[#F4F1ED] rounded-lg mb-1 flex items-center gap-2 min-w-0"
+                >
+                  <BookOpen className="w-3.5 h-3.5 shrink-0 text-[#C2410C]" />
+                  <span className="font-bold truncate">{t('canvas.add_essay_card')}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={addAskNode}
+                  data-testid="toolbar-plus-add-ask"
+                  className="text-left px-3 py-2 text-sm text-[#1a1a1a] hover:bg-[#F4F1ED] rounded-lg mb-1 flex items-center gap-2 min-w-0"
+                >
+                  <Edit3 className="w-3.5 h-3.5 shrink-0 text-[#C2410C]" />
+                  <span className="font-bold truncate">{t('canvas.add_ask_card')}</span>
+                </button>
                 <div className="my-1 border-t border-[#E6E4DF]" />
-                <div className="px-3 py-2 text-[10px] font-bold text-[#8c8a84] uppercase tracking-wider font-mono flex items-center gap-1.5">
-                  <Bot className="w-3.5 h-3.5" />
-                  {t('sidebar.agents')}
-                </div>
-                {agentConfigs.map((agent) => (
-                  <button
-                    key={agent.id}
-                    onClick={async () => {
-                      const { x, y } = getCanvasCenterPosition(transformRef.current);
-                      await db.nodes.add({
-                        id: crypto.randomUUID(),
-                        canvasId: activeCanvasId,
-                        type: 'agent',
-                        agentConfigId: agent.id,
-                        x,
-                        y,
-                      });
-                    }}
-                    className="text-left px-3 py-2 text-sm text-[#1a1a1a] hover:bg-[#F4F1ED] rounded-lg mb-1 flex items-center gap-2 min-w-0"
+                <div className="relative group/agents" data-testid="toolbar-plus-agents">
+                  <div className="px-3 py-2 text-sm text-[#1a1a1a] hover:bg-[#F4F1ED] rounded-lg flex items-center gap-2 min-w-0 cursor-default">
+                    <Bot className="w-3.5 h-3.5 shrink-0 text-[#C2410C]" />
+                    <span className="font-bold truncate flex-1">{t('sidebar.agents')}</span>
+                    <ChevronRight className="w-3.5 h-3.5 shrink-0 text-[#8c8a84]" />
+                  </div>
+                  <div
+                    data-testid="toolbar-plus-agents-submenu"
+                    className="absolute left-full bottom-0 z-50 pl-1 opacity-0 invisible group-hover/agents:opacity-100 group-hover/agents:visible"
                   >
-                    <span className="w-5 h-5 rounded-md bg-[#FFF7ED] border border-[#E6E4DF] flex items-center justify-center shrink-0 overflow-hidden">
-                      <AgentIcon
-                        agentId={agent.id}
-                        className="w-full h-full"
-                        imageClassName="scale-[1.32]"
-                        fallbackClassName="text-[#C2410C]"
-                      />
-                    </span>
-                    <span className="font-bold truncate">{resolveAgentLocalizedName(agent)}</span>
-                  </button>
-                ))}
+                    <div className="w-52 bg-white border border-[#E6E4DF] rounded-xl shadow-xl flex flex-col p-1 max-h-72 overflow-y-auto overscroll-contain">
+                      {agentConfigs.map((agent) => (
+                        <button
+                          key={agent.id}
+                          type="button"
+                          onClick={async () => {
+                            const { x, y } = getCanvasCenterPosition(transformRef.current);
+                            const hasCover = Boolean((agent.coverImageUrl ?? '').trim());
+                            await db.nodes.add(stampNewCard({
+                              id: crypto.randomUUID(),
+                              canvasId: activeCanvasId,
+                              type: 'agent',
+                              agentConfigId: agent.id,
+                              x,
+                              y,
+                              ...(hasCover
+                                ? { width: AGENT_NODE_SIZE.width, height: AGENT_NODE_SIZE.height }
+                                : {}),
+                            }));
+                          }}
+                          className="text-left px-3 py-2 text-sm text-[#1a1a1a] hover:bg-[#F4F1ED] rounded-lg mb-1 last:mb-0 flex items-center gap-2 min-w-0"
+                        >
+                          <span className="w-5 h-5 rounded-md bg-[#FFF7ED] border border-[#E6E4DF] flex items-center justify-center shrink-0 overflow-hidden">
+                            <AgentIcon
+                              agentId={agent.id}
+                              coverUrl={agent.coverImageUrl}
+                              className="w-full h-full"
+                              imageClassName="scale-[1.32]"
+                              fallbackClassName="text-[#C2410C]"
+                            />
+                          </span>
+                          <span className="font-bold truncate">{resolveAgentLocalizedName(agent)}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
             <label
-              title="Upload File"
-              className="w-8 h-8 flex items-center justify-center text-[#5a5a54] hover:text-[#1a1a1a] hover:bg-[#F4F1ED] rounded-lg cursor-pointer transition-colors m-0"
+              title={t('canvas.upload_file')}
+              aria-label={t('canvas.upload_file')}
+              data-testid="toolbar-upload"
+              className={`flex items-center justify-center text-[#5a5a54] hover:text-[#1a1a1a] hover:bg-[#F4F1ED] rounded-lg cursor-pointer transition-colors m-0 ${
+                touchChrome ? 'w-10 h-10' : 'w-8 h-8'
+              }`}
             >
-              <FileTextIcon className="w-4 h-4" />
+              <FileTextIcon className={touchChrome ? 'w-5 h-5' : 'w-4 h-4'} />
               <input
                 type="file"
-                accept="image/*,video/*,.docx,.txt,.md,.pdf,.epub,application/pdf,application/epub+zip"
+                multiple
+                accept={CANVAS_FILE_UPLOAD_ACCEPT}
                 className="hidden"
                 onChange={addFileNode}
               />
             </label>
-          </div>
-
-          <div
-            className={`relative min-w-0 flex ${
-              isVertical ? 'flex-col items-stretch gap-2' : 'flex-1 items-center'
-            }`}
-          >
-            {isVertical ? (
-              <textarea
-                className="w-full bg-transparent border-none focus:outline-none focus:ring-0 font-sans text-sm py-2 pr-1 text-[#1a1a1a] placeholder-[#8c8a84] disabled:opacity-50 resize-none min-h-[7.5rem] cursor-text"
-                placeholder={voiceModeActive ? t('voice.input_placeholder') : t('ai.input_placeholder')}
-                value={aiPrompt}
-                onChange={(e) => setAiPrompt(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    handleAiSubmit();
-                  }
-                }}
-                disabled={isInputDisabled || voiceModeActive}
-                rows={5}
-              />
-            ) : (
-              <input
-                className="w-full bg-transparent border-none focus:outline-none focus:ring-0 font-sans text-sm py-3 pr-11 text-[#1a1a1a] placeholder-[#8c8a84] disabled:opacity-50 cursor-text"
-                placeholder={voiceModeActive ? t('voice.input_placeholder') : t('ai.input_placeholder')}
-                type="text"
-                value={aiPrompt}
-                onChange={(e) => setAiPrompt(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleAiSubmit()}
-                disabled={isInputDisabled || voiceModeActive}
-              />
-            )}
+            {canvasV2Enabled ? (
+              <button
+                type="button"
+                title={t('canvas.v2.draw_work_zone')}
+                aria-label={t('canvas.v2.draw_work_zone')}
+                aria-pressed={workZoneDrawMode}
+                data-testid="toolbar-draw-work-zone"
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={onToggleWorkZoneDraw}
+                className={`flex items-center justify-center rounded-lg cursor-pointer transition-colors ${
+                  touchChrome ? 'w-10 h-10' : 'w-8 h-8'
+                } ${
+                  workZoneDrawMode
+                    ? 'bg-[#C2410C] text-white hover:bg-[#a0350a]'
+                    : 'text-[#5a5a54] hover:text-[#1a1a1a] hover:bg-[#F4F1ED]'
+                }`}
+              >
+                <SquareDashed className={touchChrome ? 'w-5 h-5' : 'w-4 h-4'} aria-hidden />
+              </button>
+            ) : null}
+            {canvasV2Enabled ? null : (
+            <div
+              ref={voiceGroupRef}
+              className="relative"
+              onPointerEnter={() => {
+                if (!showVoicePicker || voicePickerHoverLocked) return;
+                if (voiceModeActive && voicePhase === 'listening') return;
+                setVoicePickerOpen(true);
+              }}
+              onPointerLeave={() => {
+                setVoicePickerOpen(false);
+                setVoicePickerHoverLocked(false);
+              }}
+            >
             <button
               type="button"
-              title={
-                !voiceModeActive
-                  ? t('voice.toggle_on')
-                  : voicePhase === 'listening'
-                    ? t('voice.finish_turn')
-                    : t('voice.toggle_off')
-              }
-              onClick={onToggleVoiceMode}
-              className={`${
-                isVertical
-                  ? 'self-end'
-                  : 'absolute right-1 top-1/2 -translate-y-1/2'
-              } w-8 h-8 flex items-center justify-center rounded-lg cursor-pointer transition-colors ${
+              title={micLabel}
+              aria-label={micLabel}
+              aria-keyshortcuts="Space"
+              aria-pressed={voiceModeActive}
+              aria-haspopup={showVoicePicker ? 'menu' : undefined}
+              aria-expanded={showVoicePicker ? voicePickerOpen : undefined}
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={onActivateVoice}
+              data-testid="toolbar-voice"
+              className={`flex items-center justify-center rounded-lg cursor-pointer transition-colors ${
+                touchChrome ? 'w-10 h-10' : 'w-8 h-8'
+              } ${
                 voiceModeActive
                   ? 'text-white bg-[#C2410C] hover:bg-[#a0350a]'
                   : 'text-[#5a5a54] hover:text-[#1a1a1a] hover:bg-[#F4F1ED]'
               }`}
             >
-              <Mic className="w-4 h-4" />
+              <Mic className={touchChrome ? 'w-5 h-5' : 'w-4 h-4'} aria-hidden />
+            </button>
+            {showWaitForChime || showLiveCaption || showReadyNudge || showPersonaChip ? (
+              <div className="pointer-events-none absolute bottom-full left-1/2 z-50 flex w-max max-w-[min(18rem,70vw)] -translate-x-1/2 flex-col items-stretch gap-1.5 pb-4">
+                {showWaitForChime ? (
+                  <div
+                    {...canvasOverlayProps}
+                    role="status"
+                    aria-live="polite"
+                    data-testid="toolbar-voice-wait-chime"
+                    className="w-max max-w-[min(18rem,70vw)] shrink-0 rounded-xl border border-[#E6E4DF] bg-white px-3 py-2 shadow-lg"
+                  >
+                    <div className="whitespace-normal text-sm font-serif leading-snug text-[#1a1a1a]">
+                      {t('voice.wait_for_chime')}
+                    </div>
+                  </div>
+                ) : null}
+                {showReadyNudge ? (
+                  <div
+                    {...canvasOverlayProps}
+                    role="status"
+                    aria-live="polite"
+                    data-testid="toolbar-voice-ready-nudge"
+                    className="w-max max-w-[min(18rem,70vw)] shrink-0 rounded-xl border border-[#C2410C]/30 bg-[#FFF7ED] px-3 py-2 shadow-lg"
+                  >
+                    <div className="whitespace-normal text-sm font-serif leading-snug text-[#C2410C]">
+                      {t('voice.ready_to_speak')}
+                    </div>
+                  </div>
+                ) : null}
+                {showLiveCaption ? (
+                  <div
+                    {...canvasOverlayProps}
+                    role="status"
+                    aria-live="polite"
+                    data-testid="toolbar-voice-live-caption"
+                    className="w-max max-w-[min(18rem,70vw)] shrink-0 rounded-xl border border-[#E6E4DF] bg-white px-3 py-2 shadow-lg"
+                  >
+                    <div className="mb-1 text-[9px] font-mono font-bold uppercase tracking-wider text-[#C2410C]">
+                      {t('voice.phase_listening')}
+                    </div>
+                    <div className="max-h-24 overflow-y-auto whitespace-pre-wrap break-words text-sm font-serif leading-snug text-[#1a1a1a]">
+                      {liveTranscript.trim() || '…'}
+                    </div>
+                  </div>
+                ) : null}
+                {showPersonaChip ? (
+                  <button
+                    type="button"
+                    title={chipName}
+                    aria-label={chipName}
+                    aria-haspopup="menu"
+                    data-testid="toolbar-voice-persona-chip"
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setVoicePickerHoverLocked(false);
+                      setVoicePickerOpen(true);
+                    }}
+                    className="flex max-w-[7.5rem] items-center gap-1 rounded-lg border border-[#E6E4DF] bg-white px-1.5 py-1 shadow-sm hover:border-[#C2410C]/40"
+                  >
+                    <span className="flex h-5 w-5 shrink-0 items-center justify-center overflow-hidden rounded-md border border-[#E6E4DF] bg-[#FFF7ED]">
+                      {pinnedPersona ? (
+                        <AgentIcon
+                          agentId={pinnedPersona.agentConfigId}
+                          coverUrl={pinnedPersona.coverUrl}
+                          className="h-full w-full"
+                          imageClassName="scale-[1.32]"
+                          fallbackClassName="text-[#C2410C]"
+                        />
+                      ) : (
+                        <img src={askFoxUrl} alt="" className="h-full w-full object-cover" />
+                      )}
+                    </span>
+                    <span className="truncate text-[10px] font-bold leading-none text-[#1a1a1a]">
+                      {chipName}
+                    </span>
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+            {showVoicePicker ? (
+              <div
+                {...canvasOverlayProps}
+                role="menu"
+                aria-label={t('voice.toolbar_mic_pick')}
+                aria-hidden={!voicePickerOpen}
+                data-testid="toolbar-voice-personas"
+                className={`absolute bottom-full left-1/2 z-50 w-52 -translate-x-1/2 pb-4 transition-all ${
+                  voicePickerOpen
+                    ? 'visible pointer-events-auto opacity-100'
+                    : 'invisible pointer-events-none opacity-0'
+                }`}
+              >
+                <div className="flex max-h-72 flex-col overflow-y-auto overscroll-contain rounded-xl border border-[#E6E4DF] bg-white p-1 shadow-xl">
+                  {showAskVoiceOption ? (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    aria-checked={pinnedVoiceAgentNodeId === null}
+                    data-testid="toolbar-voice-persona-ask"
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      selectVoicePersona(null);
+                    }}
+                    className={`mb-1 flex min-w-0 items-center gap-2 rounded-lg px-3 py-2 text-left text-sm ${
+                      pinnedVoiceAgentNodeId === null
+                        ? 'bg-[#FFF7ED] text-[#C2410C]'
+                        : 'text-[#1a1a1a] hover:bg-[#F4F1ED]'
+                    }`}
+                  >
+                    <span className="flex h-5 w-5 shrink-0 items-center justify-center overflow-hidden rounded-md border border-[#E6E4DF] bg-[#FFF7ED]">
+                      <img src={askFoxUrl} alt="" className="h-full w-full object-cover" />
+                    </span>
+                    <span className="flex-1 truncate font-bold">
+                      {t('voice.toolbar_mic_default', { name: t('ask.character_name') })}
+                    </span>
+                    {pinnedVoiceAgentNodeId === null ? (
+                      <Check className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                    ) : null}
+                  </button>
+                  ) : null}
+                  {canvasVoicePersonas.map((persona) => {
+                    const selected = pinnedVoiceAgentNodeId === persona.nodeId;
+                    return (
+                      <button
+                        key={persona.nodeId}
+                        type="button"
+                        role="menuitem"
+                        aria-checked={selected}
+                        data-testid={`toolbar-voice-persona-${persona.nodeId}`}
+                        onPointerDown={(e) => e.stopPropagation()}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          selectVoicePersona(persona.nodeId);
+                        }}
+                        className={`mb-1 flex min-w-0 items-center gap-2 rounded-lg px-3 py-2 text-left text-sm ${
+                          selected
+                            ? 'bg-[#FFF7ED] text-[#C2410C]'
+                            : 'text-[#1a1a1a] hover:bg-[#F4F1ED]'
+                        }`}
+                      >
+                        <span className="flex h-5 w-5 shrink-0 items-center justify-center overflow-hidden rounded-md border border-[#E6E4DF] bg-[#FFF7ED]">
+                          <AgentIcon
+                            agentId={persona.agentConfigId}
+                            coverUrl={persona.coverUrl}
+                            className="h-full w-full"
+                            imageClassName="scale-[1.32]"
+                            fallbackClassName="text-[#C2410C]"
+                          />
+                        </span>
+                        <span className="flex-1 truncate font-bold">{persona.name}</span>
+                        {selected ? <Check className="h-3.5 w-3.5 shrink-0" aria-hidden /> : null}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : null}
+            </div>
+            )}
+            <button
+              type="button"
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={onPublish}
+              disabled={selectedCount < PUBLISH_MIN_SELECTION || publishDisabled}
+              title={`${t('sidebar.publish')} (${selectedCount})`}
+              aria-label={`${t('sidebar.publish')} (${selectedCount})`}
+              data-testid="toolbar-publish"
+              className={`flex items-center justify-center rounded-lg transition-colors ${
+                touchChrome ? 'w-10 h-10' : 'w-8 h-8'
+              } ${
+                selectedCount >= PUBLISH_MIN_SELECTION
+                  ? 'bg-[#C2410C] text-white hover:bg-[#a0350a] disabled:opacity-50'
+                  : 'bg-white text-[#5a5a54] hover:text-[#C2410C] hover:bg-[#F4F1ED] disabled:opacity-50'
+              }`}
+            >
+              {publishBusy ? (
+                <Loader2 className={touchChrome ? 'w-5 h-5' : 'w-4 h-4'} aria-hidden />
+              ) : (
+                <PenLine className={touchChrome ? 'w-5 h-5' : 'w-4 h-4'} aria-hidden />
+              )}
             </button>
           </div>
 
-          <button
-            onClick={handleAiSubmit}
-            disabled={isInputDisabled || voiceModeActive}
-            className={`bg-[#C2410C] text-white p-2.5 rounded-xl font-sans text-sm font-bold shadow-md flex items-center justify-center hover:bg-[#a0350a] transition-colors disabled:opacity-75 shrink-0 cursor-pointer ${
-              isVertical ? 'w-full' : ''
-            }`}
-          >
-            {isToolbarAiLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Wand2 className="w-5 h-5" />}
-          </button>
+          {/* AI input / send / voice moved to the Ask card on the canvas. */}
         </div>
           </div>
-        )}
       </div>
 
       {/* Zoom Controls */}
-      <div className="absolute bottom-8 right-6 flex items-center bg-white/80 backdrop-blur-sm border border-[#E6E4DF] rounded-md px-3 py-1.5 shadow-sm font-sans text-[10px] font-bold text-[#8c8a84] space-x-3 z-40">
+      <div
+        {...canvasOverlayProps}
+        className={`fixed flex items-center bg-white/80 backdrop-blur-sm border border-[#E6E4DF] rounded-md shadow-sm font-sans text-[10px] font-bold text-[#8c8a84] z-40 bottom-[max(0.75rem,env(safe-area-inset-bottom))] ${
+          compact
+            ? 'right-[max(1rem,env(safe-area-inset-right))] px-3 py-2 space-x-2 text-xs'
+            : 'right-[max(1.5rem,env(safe-area-inset-right))] px-3 py-1.5 space-x-3'
+        }`}
+      >
         <button
-          className="hover:text-[#1a1a1a] transition-colors"
+          type="button"
+          className={`hover:text-[#1a1a1a] transition-colors flex items-center justify-center ${
+            touchChrome ? 'min-w-9 min-h-9 text-base' : ''
+          }`}
           onClick={() => setCanvasTransform((p) => ({ ...p, scale: Math.max(0.1, p.scale / 1.1) }))}
+          title={`${t('canvas.zoom')} -`}
+          aria-label={`${t('canvas.zoom')} -`}
+          data-testid="canvas-zoom-out"
         >
-          {t('canvas.zoom')} -
+          −
         </button>
-        <span className="flex items-center gap-1 w-12 justify-center">
-          <ZoomIn className="w-3 h-3" /> {Math.round(canvasTransform.scale * 100)}%
+        <span className={`flex items-center gap-1 justify-center ${touchChrome ? 'w-14' : 'w-12'}`}>
+          <ZoomIn className={touchChrome ? 'w-4 h-4' : 'w-3 h-3'} aria-hidden /> {Math.round(canvasTransform.scale * 100)}%
         </span>
         <button
-          className="hover:text-[#1a1a1a] transition-colors"
+          type="button"
+          className={`hover:text-[#1a1a1a] transition-colors flex items-center justify-center ${
+            touchChrome ? 'min-w-9 min-h-9 text-base' : ''
+          }`}
           onClick={() => setCanvasTransform((p) => ({ ...p, scale: Math.min(5, p.scale * 1.1) }))}
+          title={`${t('canvas.zoom')} +`}
+          aria-label={`${t('canvas.zoom')} +`}
+          data-testid="canvas-zoom-in"
         >
-          {t('canvas.zoom')} +
+          +
         </button>
+        {onFitCanvas ? (
+          <button
+            type="button"
+            className={`hover:text-[#C2410C] transition-colors flex items-center justify-center border-l border-[#E6E4DF] ${
+              touchChrome ? 'min-w-9 min-h-9 pl-3' : 'pl-3'
+            }`}
+            onClick={onFitCanvas}
+            title={t('canvas.fit_view')}
+            aria-label={t('canvas.fit_view')}
+            data-testid="canvas-fit-view"
+          >
+            <Scan className={touchChrome ? 'w-4 h-4' : 'w-3.5 h-3.5'} aria-hidden />
+          </button>
+        ) : null}
       </div>
     </>
   );

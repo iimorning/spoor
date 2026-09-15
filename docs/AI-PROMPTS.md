@@ -50,9 +50,20 @@ Context to analyze:
 
 `contextText` 来自该节点卡片根 DOM：若存在带 `data-canvas-node-context-text` 的区域（仅用户内容，排除「笔记」等 UI 标签），则使用该区域的 `innerText`；否则回退为整卡 `innerText` / `textContent`（见 `src/utils/canvasNodeContextText.ts`）。
 
-**邻接图片（多模态）**：与**该便签**或**当前 Agent 卡**通过边相连的 `image` 节点（`content` 为 `data:image/...;base64,...`）会被 [`collectAgentContextImagePayload`](src/utils/canvasContextImages.ts) 收集，随 `callUniversalAI` 的 `images` 一并发给模型（最多 4 张，超大 data URL 会跳过并 `console.warn`）。因此「图片—Agent—便签」星型连线也能把图送进模型。需使用支持视觉的在线模型；**本地 GGUF** 路径下若存在邻接图会**直接报错**（`local_llama` 不传图）。OpenAI 兼容接口使用 `image_url` + data URL；Gemini 使用 `inlineData`；Anthropic 使用 base64 `image` block。
+**工作区图片（多模态）**：Canvas V2 侧栏 / 角色对话从 [`collectWorkZoneContextPayload`](src/utils/agentWorkZone.ts) 收集工作区内的 `image` 节点（`contextScopeAgentId` 指向当前 Ask/Agent），随 `callUniversalAI` 的 `images` 一并发给模型（无张数上限；单张过大或压缩后仍过大的 data URL 会跳过并 `console.warn`）。需使用支持视觉的在线模型；**本地 GGUF** 路径下若存在附图会**直接报错**（`local_llama` 不传图）。OpenAI 兼容接口使用 `image_url` + data URL；Gemini 使用 `inlineData`；Anthropic 使用 base64 `image` block。
 
-首张 AI 卡入库时会写入 `threadRootContextNodeId`（源便签 id）、`threadAgentConfigId`（`AgentConfig.id`），若首轮带了图还会写入 `threadContextImageNodeIds`（邻接 `image` 节点 id 列表）；追问链上子卡从父卡复制这些字段，并在每次 Agent 链追问中按 id 解析当前画布上的 data URL 再次传入 `images`。
+### 2.3 画布 · Canvas V2 侧栏混排 Composer
+
+| 项目 | 内容 |
+|------|------|
+| **触发** | 侧栏 [`sendPersonaMessage`](src/hooks/useAiActions.ts)；composer 由 [`CanvasChatPanel`](src/components/canvas/CanvasChatPanel.tsx) 的 card/text 片段混排 |
+| **system** | 仅 [`buildWorkZoneBackgroundText`](src/utils/agentWorkZone.ts)：`【工作区背景】` + 未圈选文本；无圈选时等同整区文本（与旧逻辑一致） |
+| **user** | [`serializeComposerSegments`](src/utils/chatComposer.ts) 按 composer 顺序输出 `[1] 卡片全文 … 用户文字 … [2] …`；线程里存完整 serialize 文本供多轮回放 |
+| **侧栏展示** | user 气泡用 [`formatUserMessageForDisplay`](src/utils/chatComposer.ts) 折叠 `[n]` 材料块为短预览 |
+| **附图** | 仅 composer 中 card 片段对应的 `image` 节点，按 card 顺序进入 `callUniversalAI` 的 `images` |
+| **检索/绘图** | 搜索与 draw 的 `userQuestion` 只用 text 片段拼接，不含 `[n]` 全文 |
+
+多 Agent **讨论**仍会在画布上生成 AI 卡链；首轮会把 `threadRootContextNodeId`（触发讨论的便签 id）与 `threadContextImageNodeIds`（当时工作区图片 id 列表）写入卡片，后续轮次按 hub Agent 的工作区重新解析图片。
 
 ### 2.1 画布 · Agent 链上的 AI 便签「追问」
 
@@ -64,6 +75,18 @@ Context to analyze:
 | **temperature / topP** | 与对应 Agent 卡配置一致 |
 | **user** | `ai.prompts.agentThreadFollowUp`：`initialContext` 为源便签节点当前 DOM 的 `getCanvasNodeContextText`（便签已删时用 `agentThreadContextMissing` 占位）、`dialogueHistory` 由 [`collectAiThreadChain`](src/utils/agentThreadContext.ts) + `formatAgentThreadDialogueHistory` 生成、`request` 为用户本条输入；**`images`**：由父卡或链首卡上的 `threadContextImageNodeIds` 经 [`resolveImageDataUrlsFromNodeIds`](src/utils/canvasContextImages.ts) 解析，与首轮一致 |
 | **回退** | 非 Agent 链（如工具栏生成的 AI 卡）仍用 `ai.prompts.threadFollowUp`，`systemInstruction` 仅为 `getLocaleDirective()` |
+
+### 2.2 画布 · 多 Agent 讨论（回合制）
+
+| 项目 | 内容 |
+|------|------|
+| **触发** | Agent 卡「讨论」按钮 → [`startAgentDiscussion`](src/hooks/useAiActions.ts)；需入口 Agent 邻接 ≥1 其他 Agent + ≥1 有正文的非 Agent 卡（见 [`resolveAgentDiscussionParticipants`](src/utils/agentDiscussion.ts)） |
+| **轮次** | 固定 2 轮（一对一来回一次），按 `AgentConfig.id` 排序后轮流发言；串行（`analyzingAgentNodeId` / `streamingAiNodeId`） |
+| **system** | 当轮发言人的 `buildAgentSystemInstruction` |
+| **user** | `ai.prompts.agentDiscussionTurn`：`speakerName`、`otherSpeakers`、`initialContext`、`dialogueHistory`（[`formatAgentDiscussionDialogueHistory`](src/utils/agentThreadContext.ts)）、`turnNumber` / `turnTotal` |
+| **落库** | 纵向 AI 卡：`userTurn` = 发言人名设；`threadDiscussionId` / `threadDiscussionAgentIds` / `threadDiscussionTurnIndex`；边：入口 Agent→首卡，其后卡→卡 |
+| **继续下一轮** | 讨论末卡「继续下一轮」→ [`continueAgentDiscussion`](src/hooks/useAiActions.ts)；再跑 2 轮，接在末卡之后，沿用同一 `threadDiscussionId` 与完整对话记录 |
+| **旁听追问** | 末卡 `submitAiThreadFollowUp`：若有 `threadDiscussionId`，下一人设用 `ai.prompts.agentDiscussionFollowUp`（`request` 为用户插入） |
 
 ---
 
@@ -103,66 +126,7 @@ User message: {用户输入}
 
 ---
 
-## 4. 研究实验室 · 生成三步研究计划
-
-| 项目 | 内容 |
-|------|------|
-| **触发** | 提交研究问题后生成计划 / `generatePlan` |
-| **代码** | `src/components/ResearchLab.tsx` → `generatePlan` |
-| **系统提示词** | *无* |
-| **用户提示词** | 单条 `prompt`（`{query}` 为输入框中的研究主题）： |
-
-```
-You are a senior research strategist helping an author who is writing a manuscript.  
-Their research question is: "{query}".
-
-Design a logically connected 3‑step research plan that will help the author deeply investigate this topic and integrate the findings into their manuscript.  
-
-For each step, return a JSON object with:
-- "title": a short, descriptive title (5–7 words),
-- "desc": a 2–3 sentence description that clearly states:
-  - the specific goal of this step,
-  - the key methods, sources, or analytical techniques to be used,
-  - how the output of this step directly feeds into the manuscript.
-
-The three steps should follow a natural research progression, such as:  
-(1) scoping & literature foundation, (2) core analysis or evidence gathering, (3) synthesis, implications, or argument construction.  
-Tailor the progression to the nature of the query (e.g., empirical paper, review, theoretical essay, policy report).
-
-Respond ONLY with a valid JSON array in the following format (no additional text):
-[
-  {"title": "Step 1 Title", "desc": "Step 1 Description"},
-  {"title": "Step 2 Title", "desc": "Step 2 Description"},
-  {"title": "Step 3 Title", "desc": "Step 3 Description"}
-]
-```
-
----
-
-## 5. 研究实验室 · 生成研究报告
-
-| 项目 | 内容 |
-|------|------|
-| **触发** | 执行研究 / `executeResearch` |
-| **代码** | `src/components/ResearchLab.tsx` → `executeResearch` |
-| **系统提示词** | *无* |
-| **用户提示词** |  |
-
-```
-You are a research synthesizing agent. Based on the user's query: "{query}", generate a detailed research report.
-Respond ONLY in valid JSON format matching this structure:
-{
-  "intro": "Introduction paragraph",
-  "points": [
-    {"title": "Point 1 Title", "text": "Detailed analysis of this point"}
-  ],
-  "conclusion": "Conclusion paragraph with actionable next steps"
-}
-```
-
----
-
-## 6. Agents 工作室 · AI 增强系统提示词
+## 4. Agents 工作室 · AI 增强系统提示词
 
 | 项目 | 内容 |
 |------|------|
@@ -197,7 +161,7 @@ New Enhanced Prompt:
 
 ---
 
-## 7. Agents 工作室 · 测试沙盒对话
+## 5. Agents 工作室 · 测试沙盒对话
 
 | 项目 | 内容 |
 |------|------|
@@ -214,7 +178,7 @@ You are a helpful assistant.
 
 ---
 
-## 8. 通用调用层说明
+## 6. 通用调用层说明
 
 | 项目 | 内容 |
 |------|------|

@@ -7,6 +7,8 @@ import {
   isCanvasToolbarInDockZone,
   loadCanvasToolbarLayout,
   saveCanvasToolbarLayout,
+  reanchorCanvasToolbarPosition,
+  canvasToolbarViewportSize,
 } from '../../src/utils/canvasToolbarLayout';
 
 describe('canvasToolbarLayout', () => {
@@ -48,7 +50,51 @@ describe('canvasToolbarLayout', () => {
   it('docks collapsed FAB above zoom controls', () => {
     expect(canvasToolbarDockPosition(1200, 800)).toEqual({
       x: 1200 - 48 - 24,
-      y: 800 - 48 - 88,
+      y: 800 - 48 - 68,
+    });
+  });
+
+  it('reanchors a bottom-centered bar to the new bottom when the viewport grows', () => {
+    const prev = { width: 1200, height: 800 };
+    const next = { width: 1200, height: 1080 };
+    const pos = reanchorCanvasToolbarPosition(300, 704, 600, 64, prev, next);
+    expect(pos.x).toBe(300);
+    expect(pos.y).toBe(1080 - 64 - (800 - 704 - 64));
+    expect(pos.y).toBe(984);
+  });
+
+  it('keeps a top-left bar put when the viewport grows', () => {
+    const pos = reanchorCanvasToolbarPosition(
+      16,
+      20,
+      200,
+      56,
+      { width: 1200, height: 800 },
+      { width: 1400, height: 1080 },
+    );
+    expect(pos).toEqual({ x: 16, y: 20 });
+  });
+
+  it('keeps a bottom-right dock glued to the bottom-right', () => {
+    const prev = { width: 1200, height: 800 };
+    const next = { width: 1600, height: 1000 };
+    const pos = reanchorCanvasToolbarPosition(1128, 664, 48, 48, prev, next);
+    expect(pos.x).toBe(1600 - 48 - (1200 - 1128 - 48));
+    expect(pos.y).toBe(1000 - 48 - (800 - 664 - 48));
+  });
+
+  it('uses the fullscreen element size when present', () => {
+    const host = document.createElement('div');
+    Object.defineProperty(host, 'clientWidth', { value: 1920, configurable: true });
+    Object.defineProperty(host, 'clientHeight', { value: 1080, configurable: true });
+    Object.defineProperty(document, 'fullscreenElement', {
+      configurable: true,
+      get: () => host,
+    });
+    expect(canvasToolbarViewportSize()).toEqual({ width: 1920, height: 1080 });
+    Object.defineProperty(document, 'fullscreenElement', {
+      configurable: true,
+      get: () => null,
     });
   });
 });

@@ -1,6 +1,6 @@
 # Spoor App
 
-Spoor is a local-first spatial notes canvas with AI personas and a research lab. It is designed for people who think by arranging fragments, connecting ideas, and gradually turning scattered material into structured knowledge.
+Spoor is a local-first spatial notes canvas with AI personas. It is designed for people who think by arranging fragments, connecting ideas, and gradually turning scattered material into structured knowledge.
 
 ## Problem
 
@@ -40,10 +40,6 @@ Each agent has its own prompt, tone, and reasoning role.
 ### Contextual AI Follow-Up
 
 AI notes can be followed up with additional questions. Spoor preserves the original note context and agent identity so the conversation can continue without losing its place on the canvas.
-
-### Research Lab
-
-The Research Lab helps users turn a question into a structured investigation. It can generate a research plan, run web-assisted exploration, synthesize a report, and bring useful findings back into the canvas.
 
 ### Long-Form Synthesis
 

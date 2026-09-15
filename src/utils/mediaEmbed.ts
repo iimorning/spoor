@@ -14,7 +14,7 @@ function looksLikeDirectVideo(url: string): boolean {
   return /\.(mp4|webm|ogg|mov|m4v)(\b|$)/i.test(path);
 }
 
-function looksLikeDirectAudio(url: string): boolean {
+export function looksLikeDirectAudio(url: string): boolean {
   const path = url.split('?')[0]?.split('#')[0] ?? url;
   return /\.(mp3|m4a|aac|wav|ogg|opus|flac)(\b|$)/i.test(path);
 }

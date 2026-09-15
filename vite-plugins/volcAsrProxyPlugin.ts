@@ -2,6 +2,7 @@
  * Vite plugin: dev-only two-leg proxy for Volcengine streaming ASR.
  *
  *   - POST /api/volc-asr/issue-token  →  issues a short-lived opaque token.
+ *   - POST /api/volc-asr/recognize-flash → file ASR (openspeech flash HTTP).
  *   - WS   /api/volc-asr?token=…       →  looks up the credentials by token and
  *                                         opens an upstream WebSocket to
  *                                         `wss://openspeech.bytedance.com` with
@@ -30,10 +31,13 @@ import type { IncomingMessage } from 'http';
 import type { Duplex } from 'stream';
 import { randomUUID } from 'node:crypto';
 import { createTokenStore, DEFAULT_TOKEN_TTL_MS } from './volcAsrTokenStore';
+import { forwardVolcFlashRecognize } from './volcAsrFlashUpstream';
 
 const UPSTREAM_URL = 'wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async';
 const ISSUE_PATH = '/api/volc-asr/issue-token';
+const FLASH_PATH = '/api/volc-asr/recognize-flash';
 const WS_PATH = '/api/volc-asr';
+const FLASH_MAX_BODY = 28 * 1024 * 1024;
 
 // Single shared store across dev / preview servers. Reset on process restart.
 const tokenStore = createTokenStore();
@@ -72,7 +76,8 @@ function attachIssueEndpoint(server: {
   middlewares: { use: (fn: (req: IncomingMessage, res: any, next: (err?: unknown) => void) => void) => void };
 }) {
   server.middlewares.use(async (req, res, next) => {
-    if (req.method !== 'POST' || req.url !== ISSUE_PATH) {
+    const path = (req.url || '').split('?')[0];
+    if (req.method !== 'POST' || path !== ISSUE_PATH) {
       return next();
     }
     try {
@@ -111,6 +116,57 @@ function attachIssueEndpoint(server: {
   });
 }
 
+function attachFlashEndpoint(server: {
+  middlewares: { use: (fn: (req: IncomingMessage, res: any, next: (err?: unknown) => void) => void) => void };
+}) {
+  server.middlewares.use(async (req, res, next) => {
+    const path = (req.url || '').split('?')[0];
+    if (req.method !== 'POST' || path !== FLASH_PATH) return next();
+    try {
+      const raw = await new Promise<Buffer>((resolve, reject) => {
+        const chunks: Buffer[] = [];
+        let total = 0;
+        req.on('data', (chunk: Buffer | string) => {
+          const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          total += buf.length;
+          if (total > FLASH_MAX_BODY) {
+            reject(new Error('payload_too_large'));
+            return;
+          }
+          chunks.push(buf);
+        });
+        req.on('end', () => resolve(Buffer.concat(chunks)));
+        req.on('error', reject);
+      });
+      const parsed = JSON.parse(raw.toString('utf8')) as {
+        apiKey?: string;
+        appId?: string;
+        accessToken?: string;
+        format?: string;
+        data?: string;
+      };
+      const creds = pickCreds(parsed);
+      const format = (parsed.format ?? '').trim();
+      const data = (parsed.data ?? '').trim();
+      if (!creds || !data) {
+        res.statusCode = 400;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ error: 'missing_volc_asr_credentials_or_audio' }));
+        return;
+      }
+      const result = await forwardVolcFlashRecognize(creds, format || 'mp3', data);
+      res.statusCode = result.ok ? 200 : result.status;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(result.ok ? JSON.stringify({ text: result.text }) : JSON.stringify({ error: result.error }));
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      res.statusCode = msg === 'payload_too_large' ? 413 : 500;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ error: msg }));
+    }
+  });
+}
+
 function attachVolcAsrUpgrade(server: {
   httpServer?: { on: (event: string, listener: (...args: any[]) => void) => void } | null;
 }) {
@@ -118,7 +174,8 @@ function attachVolcAsrUpgrade(server: {
 
   const onUpgrade = (req: IncomingMessage, socket: Duplex, head: Buffer) => {
     const url = req.url || '';
-    if (!url.startsWith(WS_PATH)) return;
+    const path = url.split('?')[0];
+    if (!path.startsWith(WS_PATH) || path === ISSUE_PATH || path === FLASH_PATH) return;
 
     const qs = readQuery(url);
     const token = (qs.get('token') || '').trim();
@@ -259,10 +316,12 @@ export function volcAsrProxyPlugin(): Plugin {
     name: 'spoor-volc-asr-proxy',
     configureServer(server) {
       attachIssueEndpoint(server);
+      attachFlashEndpoint(server);
       attachVolcAsrUpgrade(server);
     },
     configurePreviewServer(server) {
       attachIssueEndpoint(server);
+      attachFlashEndpoint(server);
       attachVolcAsrUpgrade(server);
     },
   };

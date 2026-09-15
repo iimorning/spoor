@@ -54,3 +54,39 @@ describe('openExternalUrl', () => {
     expect(openSpy).not.toHaveBeenCalled();
   });
 });
+
+describe('openCheckoutUrl', () => {
+  let openSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    openSpy = vi.spyOn(window, 'open').mockReturnValue(null);
+    mockInvoke.mockClear().mockResolvedValue(undefined);
+    Reflect.deleteProperty(window as Window & { __TAURI_INTERNALS__?: unknown }, '__TAURI_INTERNALS__');
+  });
+
+  afterEach(() => {
+    openSpy.mockRestore();
+    Reflect.deleteProperty(window as Window & { __TAURI_INTERNALS__?: unknown }, '__TAURI_INTERNALS__');
+  });
+
+  it('navigates the current tab on the web so checkout is not popup-blocked', async () => {
+    const assign = vi.fn();
+    vi.stubGlobal('location', { assign, href: 'https://spoor.ink/pricing' });
+    const { openCheckoutUrl } = await import('../../src/utils/openExternal');
+    await openCheckoutUrl('https://waffo.test/pay/wx');
+    expect(assign).toHaveBeenCalledWith('https://waffo.test/pay/wx');
+    expect(openSpy).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it('opens the system browser in Tauri instead of assigning location', async () => {
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: {}, configurable: true });
+    const assign = vi.fn();
+    vi.stubGlobal('location', { assign, href: 'https://spoor.ink/pricing' });
+    const { openCheckoutUrl } = await import('../../src/utils/openExternal');
+    await openCheckoutUrl('https://waffo.test/pay/wx');
+    expect(mockInvoke).toHaveBeenCalledWith('open_external_url', { url: 'https://waffo.test/pay/wx' });
+    expect(assign).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+});

@@ -32,6 +32,18 @@ The Smoothing Iron is a language experiment agent. It takes a sentence or draft 
 
 The Star-Gazer is a scenario thinking agent. It turns uncertain situations into short future-facing reflections, naming possible forks, early signals, second-order effects, and overlooked uncertainty.
 
+### Cosmos Weaver（造宇宙）
+
+Cosmos Weaver turns plain-language pain notes into a science-fiction or fantasy narrative cosmos using open narrative grammar (core structure → metaphor map → role → extensions). It ships with a short Markdown knowledge file of templates and **creative boundaries**: it is a co-author, not a therapist — no diagnosis, prescriptions, or crisis-care claims.
+
+### Character Atelier（角色工坊）
+
+Character Atelier expands cast, scenes, props, and small rituals inside an existing cosmos on the canvas. It shares the same narrative-grammar knowledge base and stays inside the metaphor universe already established by linked notes.
+
+## Trauma Inner Cosmos canvas template
+
+From the canvas history menu, users can create a **Trauma Inner Cosmos** workspace (`Canvas.template = 'cosmos'`) in addition to a blank canvas. The template seeds two theme zones (world / characters), starter notes (four questions + pain prompt), and pre-placed Cosmos Weaver / Character Atelier agent cards with guide edges. The default Main Workspace first-run seed (Memory Architect) is unchanged.
+
 ## Canvas Workflow
 
 Agents are designed to work inside a spatial note-taking flow:
@@ -55,16 +67,13 @@ When an agent creates an AI note, Spoor stores enough thread metadata to support
 
 This gives each agent continuity without forcing the user into a linear chat-only interface.
 
-## Research Agent Flow
+## Multi-Agent Discussion
 
-Spoor also includes a Research Lab that behaves like a structured research assistant:
+When an agent card is linked to **at least one other agent** and **one note with content**, a **Discussion** control appears beside Run analysis. Starting a discussion runs one back-and-forth (two turns): each turn becomes a vertical AI card whose `userTurn` shows the speaking persona. Cards share `threadDiscussionId` / `threadDiscussionAgentIds`. The latest reply shows **Continue for another round**, which appends another two-turn exchange. The listener can also interrupt on the leaf card; the next persona in rotation answers with the full discussion transcript.
 
-- It turns a research question into a three-step plan.
-- It can perform web-assisted investigation through the app's search layer.
-- It synthesizes findings into a report.
-- It can send useful results back to the canvas as reusable knowledge nodes.
+## Canvas web search
 
-The research flow is meant for writers, students, builders, and independent researchers who want AI assistance that leaves behind organized material instead of disposable chat output.
+There is no separate Research Lab. Live retrieval happens on the canvas: when Metaso (or hosted search after sign-in) is available, an agent reply can request web, image, video, or podcast hits, and the app attaches them as linked materials.
 
 ## Provider Support
 

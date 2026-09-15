@@ -33,25 +33,12 @@ vi.mock('lucide-react', () => {
     GitBranch: icon('GitBranch'),
     Loader2: icon('Loader2'),
     StickyNote: icon('StickyNote'),
+    Wand2: icon('Wand2'),
+    Maximize2: icon('Maximize2'),
     Mic: icon('Mic'),
-    MicOff: icon('MicOff'),
     Square: icon('Square'),
   };
 });
-
-// Stub voice-chat hook — jsdom has no WebAudio/MediaRecorder and these aren't the
-// component being tested. Each test injects its own implementation via variable.
-const voiceChatMock = vi.hoisted(() => ({
-  active: false,
-  phase: 'idle',
-  messages: [] as Array<{ role: string; text: string }>,
-  partialTranscript: '',
-  toggle: vi.fn(),
-  stop: vi.fn(),
-}));
-vi.mock('../../src/hooks/useBookVoiceChat', () => ({
-  useBookVoiceChat: () => voiceChatMock,
-}));
 
 function makeBookNode(overrides: Partial<CanvasNode> = {}): CanvasNode {
   return {
@@ -121,7 +108,6 @@ describe('BookNode', () => {
   });
 
   it('arrow keys on body flip pages directly', async () => {
-    voiceChatMock.active = false;
     const { container } = render(
       <BookNode node={makeBookNode()} editingNodeId={null} setEditingNodeId={vi.fn()} />,
     );
@@ -134,8 +120,29 @@ describe('BookNode', () => {
     });
   });
 
+  it('does not render a microphone control', () => {
+    const { queryByTestId } = render(
+      <BookNode node={makeBookNode()} editingNodeId={null} setEditingNodeId={vi.fn()} />,
+    );
+    expect(queryByTestId('icon-Mic')).not.toBeInTheDocument();
+    expect(queryByTestId('icon-Square')).not.toBeInTheDocument();
+  });
+
+  it('calls onOpenFullscreen from the top-right control', () => {
+    const onOpenFullscreen = vi.fn();
+    const { getByTestId } = render(
+      <BookNode
+        node={makeBookNode()}
+        editingNodeId={null}
+        setEditingNodeId={vi.fn()}
+        onOpenFullscreen={onOpenFullscreen}
+      />,
+    );
+    fireEvent.click(getByTestId('book-open-b1'));
+    expect(onOpenFullscreen).toHaveBeenCalledWith('b1');
+  });
+
   it('arrow left flips back to previous page', async () => {
-    voiceChatMock.active = false;
     // Start from page 1 so the left-arrow test has somewhere to go.
     await db.nodes.update('b1', { bookPageIndex: 1 });
     const { container } = render(
@@ -147,38 +154,5 @@ describe('BookNode', () => {
       const saved = await db.nodes.get('b1');
       expect(saved?.bookPageIndex).toBe(0);
     });
-  });
-
-  it('disables voice mic when aiConfig missing', () => {
-    voiceChatMock.active = false;
-    const { getByLabelText } = render(
-      <BookNode
-        node={makeBookNode()}
-        editingNodeId={null}
-        setEditingNodeId={vi.fn()}
-        voiceChatDisabled={true}
-        aiConfig={undefined}
-      />,
-    );
-    const btn = getByLabelText('voice.book_chat_start') as HTMLButtonElement;
-    expect(btn.disabled).toBe(true);
-  });
-
-  it('active voice keeps the toolbar mic (no full-page overlay) and toggles via toggle()', () => {
-    voiceChatMock.active = true;
-    voiceChatMock.phase = 'listening';
-    voiceChatMock.toggle = vi.fn();
-    const { getByLabelText, queryByText } = render(
-      <BookNode
-        node={makeBookNode()}
-        editingNodeId={null}
-        setEditingNodeId={vi.fn()}
-        aiConfig={{} as never}
-      />,
-    );
-    // Overlay copy removed — book page stays visible; only the toolbar control flips state.
-    expect(queryByText('You')).toBeNull();
-    fireEvent.click(getByLabelText('voice.book_chat_stop'));
-    expect(voiceChatMock.toggle).toHaveBeenCalled();
   });
 });

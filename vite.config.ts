@@ -1,9 +1,11 @@
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
-import {defineConfig, loadEnv} from 'vite';
+import {defineConfig, loadEnv, type Plugin} from 'vite';
 import {volcAsrProxyPlugin} from './vite-plugins/volcAsrProxyPlugin';
 import {minimaxTtsProxyPlugin} from './vite-plugins/minimaxTtsProxyPlugin';
+import {fetchPageProxyPlugin} from './vite-plugins/fetchPageProxyPlugin';
+import {geoPrerenderPlugin} from './vite-plugins/geoPrerenderPlugin';
 
 /** 与 tp- Token 套餐控制台一致；开发代理转发到此前缀 */
 const MIMO_PROXY_TARGET = 'https://token-plan-cn.xiaomimimo.com/v1';
@@ -49,7 +51,52 @@ const apiProxy = {
     changeOrigin: true,
     rewrite: (p: string) => p.replace(/^\/api\/302/, ''),
   },
+  '/api/openrouter': {
+    target: 'https://openrouter.ai/api/v1',
+    changeOrigin: true,
+    rewrite: (p: string) => p.replace(/^\/api\/openrouter/, ''),
+  },
+  // Generated-image CDNs (not the JSON API). Prefixes must not start with /api/302.
+  '/api/file-302cn': {
+    target: 'https://file.302ai.cn',
+    changeOrigin: true,
+    rewrite: (p: string) => p.replace(/^\/api\/file-302cn/, ''),
+  },
+  '/api/file-302ai': {
+    target: 'https://file.302.ai',
+    changeOrigin: true,
+    rewrite: (p: string) => p.replace(/^\/api\/file-302ai/, ''),
+  },
 };
+
+/**
+ * Chrome sometimes answers Vite's 304 with net::ERR_CACHE_READ_FAILURE
+ * (corrupt disk cache) and the page stays blank. Never 304 /src modules in
+ * dev; always send a body with Cache-Control: no-store.
+ */
+function disableChromeModule304(): Plugin {
+  return {
+    name: 'disable-chrome-module-304',
+    apply: 'serve',
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        const url = req.url ?? '';
+        if (
+          url.includes('/src/') ||
+          url.includes('/@fs/') ||
+          url.includes('/@vite/') ||
+          url.includes('/@react-refresh') ||
+          url.includes('/node_modules/')
+        ) {
+          delete req.headers['if-none-match'];
+          delete req.headers['if-modified-since'];
+          res.setHeader('Cache-Control', 'no-store');
+        }
+        next();
+      });
+    },
+  };
+}
 
 export default defineConfig(({mode, command}) => {
   const env = loadEnv(mode, '.', '');
@@ -62,7 +109,15 @@ export default defineConfig(({mode, command}) => {
     );
   }
   return {
-    plugins: [react(), tailwindcss(), volcAsrProxyPlugin(), minimaxTtsProxyPlugin()],
+    plugins: [
+      disableChromeModule304(),
+      react(),
+      tailwindcss(),
+      volcAsrProxyPlugin(),
+      minimaxTtsProxyPlugin(),
+      fetchPageProxyPlugin(),
+      geoPrerenderPlugin(),
+    ],
     define: {
       'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
     },
@@ -73,6 +128,9 @@ export default defineConfig(({mode, command}) => {
     },
     server: {
       hmr: process.env.DISABLE_HMR !== 'true',
+      headers: {
+        'Cache-Control': 'no-store',
+      },
       proxy: apiProxy,
     },
     preview: {

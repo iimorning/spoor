@@ -1,0 +1,60 @@
+{
+  "title": "雪泥",
+  "subtitle": "自由画布 · 文字创作工作台",
+  "brandLabel": "雪泥",
+  "locale": "zh-v2",
+  "ctaUrl": "spoor.ink",
+  "ctaText": "打开网页版",
+  "audioUrl": "",
+  "totalDurationSec": 59,
+  "timestampSegments": [
+    {
+      "startSec": 0,
+      "endSec": 5,
+      "en": "Sometimes, a question just occurs to you.",
+      "zh": "有时候，我们只是突然想到一个问题。"
+    },
+    {
+      "startSec": 5,
+      "endSec": 13,
+      "en": "No need to structure it first — just say the line that's in your head.",
+      "zh": "不用急着去想大纲。想到什么，就先写下来。"
+    },
+    {
+      "startSec": 13,
+      "endSec": 22,
+      "en": "Talk it through with AI — not to think for you, but to dig where you're stuck.",
+      "zh": "像和老朋友聊天一样，把那些模糊的感觉，一层层聊透。"
+    },
+    {
+      "startSec": 22,
+      "endSec": 29,
+      "en": "Then let AI go looking. Encyclopedia, images, videos — brought straight back onto the canvas.",
+      "zh": "聊着聊着，需要的背景、老照片、视频资料，都能顺手抓进视野里。"
+    },
+    {
+      "startSec": 29,
+      "endSec": 37,
+      "en": "And not just the web — your photos, notes, files, and half-formed thoughts can come in too.",
+      "zh": "还有你过去的旧照片、随手记下的碎片……别担心乱，全铺在这里。"
+    },
+    {
+      "startSec": 37,
+      "endSec": 45,
+      "en": "When the canvas is full, keep what actually matters for the writing ahead.",
+      "zh": "思绪全在眼前了。圈出真正打动你的那些，脉络就自然浮现出来。"
+    },
+    {
+      "startSec": 45,
+      "endSec": 51,
+      "en": "Finally, hand the important pieces to AI and let it compose the article — every key idea still traces back to its source.",
+      "zh": "最后，把真正重要的内容交给 AI，让它帮你整理成一篇文章。而文章里的每一个重要想法，都可以回到它最初的来源。"
+    },
+    {
+      "startSec": 51,
+      "endSec": 59,
+      "en": "From one idea, to a long-form essay.",
+      "zh": "从一个想法，到一篇长文"
+    }
+  ]
+}

@@ -1,11 +1,30 @@
 import * as RTL from '@testing-library/react-impl';
 import React from 'react';
 import { AppDialogProvider } from '../src/components/AppDialogProvider';
+import { AuthProvider } from '../src/contexts/AuthContext';
+import { AppEntryGateProvider } from '../src/contexts/AppEntryGateContext';
+import { BillingProvider } from '../src/contexts/BillingContext';
 
 export * from '@testing-library/react-impl';
 
-function AppDialogWrapper({ children }: { children: React.ReactNode }) {
-  return <AppDialogProvider>{children}</AppDialogProvider>;
+/**
+ * Default auth state for tests: Supabase env vars are absent in jsdom, so
+ * `AuthProvider` returns the unauthenticated, unconfigured defaults without
+ * attempting a real `getSession()` / network call. Components that need to
+ * override auth state (e.g. AISettingsModal tests) keep using `vi.mock` on
+ * `../../src/contexts/AuthContext`, which Vitest applies before this wrapper
+ * resolves its imports.
+ */
+function TestProviders({ children }: { children: React.ReactNode }) {
+  return (
+    <AuthProvider>
+      <AppEntryGateProvider>
+        <BillingProvider>
+          <AppDialogProvider>{children}</AppDialogProvider>
+        </BillingProvider>
+      </AppEntryGateProvider>
+    </AuthProvider>
+  );
 }
 
 function mergeWrapper(
@@ -29,7 +48,7 @@ export function render(
   const { wrapper: inner, ...rest } = options ?? {};
   return RTL.render(ui, {
     ...rest,
-    wrapper: mergeWrapper(AppDialogWrapper, inner),
+    wrapper: mergeWrapper(TestProviders, inner),
   });
 }
 
@@ -40,6 +59,6 @@ export function renderHook<TResult, TProps>(
   const { wrapper: inner, ...rest } = options ?? {};
   return RTL.renderHook(hook, {
     ...rest,
-    wrapper: mergeWrapper(AppDialogWrapper, inner),
+    wrapper: mergeWrapper(TestProviders, inner),
   });
 }

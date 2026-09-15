@@ -2,11 +2,11 @@ import React, {
   createContext,
   useCallback,
   useContext,
-  useEffect,
   useRef,
   useState,
 } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useOverlayDismiss } from '../hooks/useOverlayDismiss';
 
 export interface AppConfirmOptions {
   title?: string;
@@ -66,14 +66,11 @@ export function AppDialogProvider({ children }: { children: React.ReactNode }) {
     [],
   );
 
-  useEffect(() => {
+  const dismissOverlay = useCallback(() => {
     if (!dialog) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && dialog.kind === 'confirm') close(false);
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    close(dialog.kind === 'confirm' ? false : true);
   }, [dialog, close]);
+  const { onBackdropMouseDown } = useOverlayDismiss(Boolean(dialog), dismissOverlay);
 
   const title =
     dialog?.kind === 'confirm'
@@ -90,11 +87,10 @@ export function AppDialogProvider({ children }: { children: React.ReactNode }) {
       {children}
       {dialog ? (
         <div
-          className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/20 backdrop-blur-[2px]"
+          className="fixed inset-0 z-[128] flex items-center justify-center p-4 bg-black/20 backdrop-blur-[2px]"
           role="presentation"
-          onMouseDown={(e) => {
-            if (e.target === e.currentTarget && dialog.kind === 'confirm') close(false);
-          }}
+          data-testid="app-dialog-backdrop"
+          onMouseDown={onBackdropMouseDown}
         >
           <div
             role="dialog"

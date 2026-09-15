@@ -2,6 +2,7 @@ import React from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, fireEvent } from '@testing-library/react';
 import { NoteBody } from '../../src/components/nodes/note/NoteBody';
+import { NOTE_CARD_SCROLL_MAX_HEIGHT_PX } from '../../src/utils/canvas';
 
 const updateMock = vi.fn();
 
@@ -44,7 +45,7 @@ describe('NoteBody', () => {
         setEditingNodeId={setEditing}
         editClassName="edit"
         viewClassName="view"
-        emptyNoteMarkdown="_empty_"
+        emptyNotePlaceholder="_empty_"
       />
     );
 
@@ -69,7 +70,7 @@ describe('NoteBody', () => {
         setEditingNodeId={setEditing}
         editClassName="edit"
         viewClassName="view"
-        emptyNoteMarkdown="_empty_"
+        emptyNotePlaceholder="_empty_"
       />
     );
 
@@ -80,7 +81,55 @@ describe('NoteBody', () => {
     expect(setEditing).toHaveBeenCalledWith(null);
   });
 
-  it('预览区把单 \\n 渲染为 <br>（remark-breaks 防回归，避免用户回车被吞）', () => {
+  it('点击预览区进入编辑（核心：view onClick → setEditingNodeId）', () => {
+    const setEditing = vi.fn();
+    const { container } = render(
+      <NoteBody
+        node={{ ...baseNode, content: 'click me' }}
+        editingNodeId={null}
+        setEditingNodeId={setEditing}
+        editClassName="edit"
+        viewClassName="view"
+        emptyNotePlaceholder="_empty_"
+      />,
+    );
+
+    const preview = container.querySelector('.cursor-text') as HTMLElement;
+    expect(preview).toBeTruthy();
+    fireEvent.click(preview);
+    expect(setEditing).toHaveBeenCalledTimes(1);
+    expect(setEditing).toHaveBeenCalledWith('n1');
+  });
+
+  it('未拖拽高度时正文区有 maxHeight，长粘贴在卡内滚动', () => {
+    const { getByTestId } = render(
+      <NoteBody
+        node={{ ...baseNode, content: '很长的一段' }}
+        editingNodeId={null}
+        setEditingNodeId={vi.fn()}
+        editClassName="edit"
+        viewClassName="view"
+        emptyNotePlaceholder="_empty_"
+      />,
+    );
+    expect(getByTestId('note-body-scroll').style.maxHeight).toBe(`${NOTE_CARD_SCROLL_MAX_HEIGHT_PX}px`);
+  });
+
+  it('用户拖拽过高度后取消正文 maxHeight，由卡片外壳约束', () => {
+    const { getByTestId } = render(
+      <NoteBody
+        node={{ ...baseNode, content: '很长的一段', height: 520 }}
+        editingNodeId={null}
+        setEditingNodeId={vi.fn()}
+        editClassName="edit"
+        viewClassName="view"
+        emptyNotePlaceholder="_empty_"
+      />,
+    );
+    expect(getByTestId('note-body-scroll').style.maxHeight).toBe('');
+  });
+
+  it('预览与编辑都用 pre-wrap 纯文本，单行回车不会被 Markdown 吞掉', () => {
     const { container } = render(
       <NoteBody
         node={{ ...baseNode, content: '我\n要么\n这样的？' }}
@@ -88,16 +137,17 @@ describe('NoteBody', () => {
         setEditingNodeId={vi.fn()}
         editClassName="edit"
         viewClassName="view"
-        emptyNoteMarkdown="_empty_"
+        emptyNotePlaceholder="_empty_"
       />
     );
 
     const preview = container.querySelector('.cursor-text') as HTMLElement;
     expect(preview).toBeTruthy();
-    expect(preview.querySelectorAll('br').length).toBeGreaterThanOrEqual(2);
+    expect(preview.style.whiteSpace).toBe('pre-wrap');
+    expect(preview.textContent).toBe('我\n要么\n这样的？');
   });
 
-  it('从编辑切到预览后，预览区只剩 Markdown（编辑用 contentEditable 已卸载）', () => {
+  it('从编辑切到预览后卸掉 contentEditable，正文仍是同一段纯文本', () => {
     const setEditing = vi.fn();
 
     function Harness({ editingId, content }: { editingId: string | null; content: string }) {
@@ -108,7 +158,7 @@ describe('NoteBody', () => {
           setEditingNodeId={setEditing}
           editClassName="edit"
           viewClassName="view"
-          emptyNoteMarkdown="_empty_"
+          emptyNotePlaceholder="_empty_"
         />
       );
     }
@@ -126,6 +176,65 @@ describe('NoteBody', () => {
     expect((preview.textContent ?? '').split(typed).length - 1).toBe(1);
   });
 
+  it('从预览滚到底再点进编辑，滚动位置保持不变', () => {
+    const setEditing = vi.fn();
+    const long = `${'段落开头。\n'.repeat(8)}段落结尾。`;
+
+    function Harness({ editingId }: { editingId: string | null }) {
+      return (
+        <NoteBody
+          node={{ ...baseNode, content: long }}
+          editingNodeId={editingId}
+          setEditingNodeId={setEditing}
+          editClassName="edit"
+          viewClassName="view"
+          emptyNotePlaceholder="_empty_"
+        />
+      );
+    }
+
+    const { container, rerender } = render(<Harness editingId={null} />);
+    const scroller = container.firstElementChild as HTMLElement;
+    Object.defineProperty(scroller, 'scrollHeight', { configurable: true, value: 800 });
+    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 200 });
+    scroller.scrollTop = 420;
+
+    fireEvent.click(container.querySelector('.cursor-text') as HTMLElement);
+    expect(setEditing).toHaveBeenCalledWith('n1');
+
+    rerender(<Harness editingId="n1" />);
+    expect((container.firstElementChild as HTMLElement).scrollTop).toBe(420);
+  });
+
+  it('退出编辑时也把滚动位置还给预览', () => {
+    const setEditing = vi.fn();
+    const long = `${'段落开头。\n'.repeat(8)}段落结尾。`;
+
+    function Harness({ editingId }: { editingId: string | null }) {
+      return (
+        <NoteBody
+          node={{ ...baseNode, content: long }}
+          editingNodeId={editingId}
+          setEditingNodeId={setEditing}
+          editClassName="edit"
+          viewClassName="view"
+          emptyNotePlaceholder="_empty_"
+        />
+      );
+    }
+
+    const { container, rerender } = render(<Harness editingId="n1" />);
+    const scroller = container.firstElementChild as HTMLElement;
+    Object.defineProperty(scroller, 'scrollHeight', { configurable: true, value: 800 });
+    Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 200 });
+    scroller.scrollTop = 360;
+
+    const editable = container.querySelector('[contenteditable="true"]') as HTMLElement;
+    fireEvent.blur(editable);
+    rerender(<Harness editingId={null} />);
+    expect((container.firstElementChild as HTMLElement).scrollTop).toBe(360);
+  });
+
   it('编辑态显式设置 white-space: pre-wrap（避免 node.content 里的 \\n 在 contentEditable 中被折叠成空格）', () => {
     const { container } = render(
       <NoteBody
@@ -134,7 +243,7 @@ describe('NoteBody', () => {
         setEditingNodeId={vi.fn()}
         editClassName="edit"
         viewClassName="view"
-        emptyNoteMarkdown="_empty_"
+        emptyNotePlaceholder="_empty_"
       />
     );
     const editable = container.querySelector('[contenteditable="true"]') as HTMLElement;
@@ -153,7 +262,7 @@ describe('NoteBody', () => {
           setEditingNodeId={setEditing}
           editClassName="edit"
           viewClassName="view"
-          emptyNoteMarkdown="_empty_"
+          emptyNotePlaceholder="_empty_"
         />
       );
     }
@@ -184,7 +293,7 @@ describe('NoteBody', () => {
             setEditingNodeId={vi.fn()}
             editClassName="edit"
             viewClassName="view"
-            emptyNoteMarkdown="_empty_"
+            emptyNotePlaceholder="_empty_"
           />
         </div>
       );
@@ -214,7 +323,7 @@ describe('NoteBody', () => {
           setEditingNodeId={setEditing}
           editClassName="edit"
           viewClassName="view"
-          emptyNoteMarkdown="_empty_"
+          emptyNotePlaceholder="_empty_"
         />
       );
     }
@@ -252,7 +361,7 @@ describe('NoteBody', () => {
             setEditingNodeId={vi.fn()}
             editClassName="edit"
             viewClassName="view"
-            emptyNoteMarkdown="_empty_"
+            emptyNotePlaceholder="_empty_"
           />
         </div>
       );
@@ -273,6 +382,86 @@ describe('NoteBody', () => {
     rerender(<Harness tick={2} content="起始" />);
     ed = container.querySelector('[contenteditable="true"]') as HTMLElement;
     expect(ed.textContent).toBe('输入1输入2');
+  });
+
+  it('进入编辑时种 pendingContent，而不是仍滞后的 node.content', () => {
+    persistenceDisabled.mockReturnValue(false);
+    const setEditing = vi.fn();
+
+    function Harness({ editingId, content }: { editingId: string | null; content: string }) {
+      return (
+        <NoteBody
+          node={{ ...baseNode, content }}
+          editingNodeId={editingId}
+          setEditingNodeId={setEditing}
+          editClassName="edit"
+          viewClassName="view"
+          emptyNotePlaceholder="_empty_"
+        />
+      );
+    }
+
+    const { container, rerender } = render(<Harness editingId="n1" content="旧稿" />);
+    const editable = container.querySelector('[contenteditable="true"]') as HTMLDivElement;
+    editable.innerText = '平台。\n而是\nskill就行。\n\n单独做一个AI软件成本很高。';
+    fireEvent.blur(editable);
+
+    rerender(<Harness editingId={null} content="旧稿" />);
+    const preview = container.querySelector('.cursor-text') as HTMLElement;
+    expect(preview.textContent ?? '').toContain('单独做一个AI软件成本很高。');
+
+    rerender(<Harness editingId="n1" content="旧稿" />);
+    const again = container.querySelector('[contenteditable="true"]') as HTMLElement;
+    expect(again.textContent).toContain('单独做一个AI软件成本很高。');
+    expect(again.textContent).not.toBe('旧稿');
+  });
+
+  it('预览和编辑看到同一段正文（含空行后的第二段）', () => {
+    const raw = '平台。\n而是\nskill就行。\n\n单独做一个AI软件成本很高，周期长，会\n有很多东西。';
+    const view = render(
+      <NoteBody
+        node={{ ...baseNode, content: raw }}
+        editingNodeId={null}
+        setEditingNodeId={vi.fn()}
+        editClassName="edit"
+        viewClassName="view"
+        emptyNotePlaceholder="_empty_"
+      />,
+    );
+    expect(view.container.querySelector('.cursor-text')?.textContent).toBe(raw);
+    view.unmount();
+
+    const edit = render(
+      <NoteBody
+        node={{ ...baseNode, content: raw }}
+        editingNodeId="n1"
+        setEditingNodeId={vi.fn()}
+        editClassName="edit"
+        viewClassName="view"
+        emptyNotePlaceholder="_empty_"
+      />,
+    );
+    expect(edit.container.querySelector('[contenteditable="true"]')?.textContent).toBe(raw);
+  });
+
+  it('进入编辑时把 HTML 段落展成可见纯文本，而不是丢掉', () => {
+    const raw =
+      '平台。\n而是\nskill就行。\n\n<p>单独做一个AI软件成本很高，周期长，会\n有很多东西。</p>';
+    const { container } = render(
+      <NoteBody
+        node={{ ...baseNode, content: raw }}
+        editingNodeId="n1"
+        setEditingNodeId={vi.fn()}
+        editClassName="edit"
+        viewClassName="view"
+        emptyNotePlaceholder="_empty_"
+      />,
+    );
+
+    const editable = container.querySelector('[contenteditable="true"]') as HTMLElement;
+    expect(editable.textContent).toContain('单独做一个AI软件成本很高，周期长，会');
+    expect(editable.textContent).toContain('有很多东西。');
+    expect(editable.textContent).not.toMatch(/<\/?p>/i);
   });
 });
 

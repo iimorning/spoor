@@ -1,15 +1,22 @@
 import i18n from '../i18n';
 import type { AgentConfig } from '../db';
 import { LEGACY_AGENT_PROMPTS, SYSTEM_AGENT_IDS, type SystemAgentId } from '../constants/defaultAgents';
+import { communityOfficialEn, communityOfficialZh } from '../i18n/communityOfficialContent';
+import { LEGACY_OFFICIAL_TURTLE_SOUP_PROMPTS } from '../i18n/legacyOfficialTurtleSoupPrompts';
 import { formatAgentMarkdownKnowledgeBlock } from './agentMarkdownKnowledge';
+import { isTurtleSoupHostAgent } from './agentPersonaSource';
+import { localCalendarIsoDate } from './localCalendarDate';
 
 function norm(s: string): string {
   return s.replace(/\s+/g, ' ').trim();
 }
 
-/** Global system line so model matches app language (e.g. 简体中文 when UI is zh). */
-export function getLocaleDirective(): string {
-  return i18n.t('ai.prompts.localeDirective');
+/** Language + device calendar date so “now / latest” is not the model’s training cutoff. */
+export function getLocaleDirective(now = new Date()): string {
+  return combineSystemParts(
+    i18n.t('ai.prompts.localeDirective'),
+    i18n.t('ai.prompts.clockDirective', { date: localCalendarIsoDate(now) }),
+  );
 }
 
 export function combineSystemParts(...parts: (string | undefined | null)[]): string {
@@ -50,6 +57,18 @@ export function resolveAgentLocalizedRole(agent: AgentConfig): string {
  * Custom user edits are left as-is (locale directive still applies separately).
  */
 export function resolveAgentSystemPrompt(agent: AgentConfig): string {
+  if (isTurtleSoupHostAgent(agent)) {
+    const current = norm(agent.prompt ?? '');
+    const stock = new Set<string>([
+      norm(communityOfficialEn.turtle_soup.persona_prompt),
+      norm(communityOfficialZh.turtle_soup.persona_prompt),
+      ...LEGACY_OFFICIAL_TURTLE_SOUP_PROMPTS.map((prompt) => norm(prompt)),
+    ]);
+    if (!current || stock.has(current)) {
+      return i18n.t('community.official.turtle_soup.persona_prompt');
+    }
+  }
+
   const id = agent.id;
   if (!isBuiltinAgentId(id)) return agent.prompt ?? '';
 
@@ -70,12 +89,16 @@ export function resolveAgentSystemPrompt(agent: AgentConfig): string {
 /**
  * 人设场景的完整 system：语言指令 + 解析后的系统提示词（可选 fallback）+ Markdown 知识块。
  */
-export function buildAgentSystemInstruction(agent: AgentConfig, options?: { fallbackPrompt?: string }): string {
+export function buildAgentSystemInstruction(
+  agent: AgentConfig,
+  options?: { fallbackPrompt?: string; extraParts?: Array<string | undefined | null> },
+): string {
   const resolved = resolveAgentSystemPrompt(agent).trim();
   const promptPart = resolved || options?.fallbackPrompt?.trim() || undefined;
   return combineSystemParts(
     getLocaleDirective(),
     promptPart,
     formatAgentMarkdownKnowledgeBlock(agent),
+    ...(options?.extraParts ?? []),
   );
 }

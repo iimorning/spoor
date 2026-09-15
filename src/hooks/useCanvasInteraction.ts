@@ -1,10 +1,26 @@
-import { useState, useRef, useEffect, type RefObject } from 'react';
+import { useState, useRef, useEffect, useLayoutEffect, type RefObject } from 'react';
+import { CANVAS_OVERLAY_ATTR, CANVAS_EDIT_LOCK_ATTR } from '../utils/canvasOverlay';
+import {
+  createNestedScrollChainLatch,
+  decideNestedScrollChain,
+  wheelOverflowDirection,
+} from '../utils/nestedScrollChain';
 import { loadCanvasViewport, saveCanvasViewport } from '../utils/canvasViewport';
+import { readNodeDragOffset } from '../utils/nodeDragVisual';
+import { edgeLineGeomEqual, edgeVisibleSegmentAnchor, writeSvgLineGeom } from '../utils/edgeGeometry';
+import { placeLinkNoteGhost } from '../utils/linkNoteGhost';
 
 export interface CanvasTransform {
   x: number;
   y: number;
   scale: number;
+}
+
+/** Debounce React commit after wheel nudge so toolbar/node scale catch up without per-tick re-renders. */
+const WHEEL_COMMIT_MS = 100;
+
+function formatViewportTransform(t: CanvasTransform): string {
+  return `translate(${t.x}px, ${t.y}px) scale(${t.scale})`;
 }
 
 /**
@@ -21,6 +37,10 @@ function getNodeLayoutBox(el: HTMLElement, container: HTMLElement) {
     top += cur.offsetTop;
     cur = cur.offsetParent as HTMLElement | null;
   }
+  // Drag uses CSS translate vars (not left/top); fold that into edge endpoints.
+  const drag = readNodeDragOffset(el);
+  left += drag.x;
+  top += drag.y;
   const width = el.offsetWidth;
   const height = el.offsetHeight;
   return {
@@ -49,30 +69,90 @@ export function useCanvasInteraction(
    * Otherwise Ctrl+wheel falls through to the browser and zooms the whole UI.
    */
   enabled: boolean = true,
+  /** Link-mode note ghost: positioned on the edge rAF path (no React per pointermove). */
+  linkGhostRef?: RefObject<HTMLDivElement | null>,
 ) {
   const [canvasTransform, setCanvasTransformState] = useState<CanvasTransform>(() =>
     loadCanvasViewport(canvasId),
   );
   const transformRef = useRef<CanvasTransform>(canvasTransform);
   const mousePosRef = useRef({ x: 0, y: 0 });
+  const wheelCommitTimerRef = useRef<number | null>(null);
+
+  const applyTransformToDom = (t: CanvasTransform) => {
+    const el = contentContainerRef.current;
+    if (el) {
+      el.style.transform = formatViewportTransform(t);
+    }
+  };
+
+  const clearWheelCommitTimer = () => {
+    if (wheelCommitTimerRef.current != null) {
+      window.clearTimeout(wheelCommitTimerRef.current);
+      wheelCommitTimerRef.current = null;
+    }
+  };
+
+  /** Hot path: update ref + DOM only (no React re-render). */
+  const nudgeTransform = (next: CanvasTransform) => {
+    transformRef.current = next;
+    applyTransformToDom(next);
+  };
+
+  /** Commit ref + DOM + React state (toolbar zoom %, node scale prop, persist). */
+  const commitTransform = (next: CanvasTransform) => {
+    clearWheelCommitTimer();
+    transformRef.current = next;
+    applyTransformToDom(next);
+    setCanvasTransformState(next);
+  };
 
   // Keep transformRef in lockstep with state (including inside the updater) so
   // edge math never reads a one-frame-stale scale during zoom/pan.
   const setCanvasTransform = (
     update: CanvasTransform | ((prev: CanvasTransform) => CanvasTransform),
   ) => {
-    setCanvasTransformState((prev) => {
-      const next = typeof update === 'function' ? update(prev) : update;
-      transformRef.current = next;
-      return next;
-    });
+    const prev = transformRef.current;
+    const next = typeof update === 'function' ? update(prev) : update;
+    commitTransform(next);
   };
+
+  const scheduleWheelCommit = () => {
+    clearWheelCommitTimer();
+    wheelCommitTimerRef.current = window.setTimeout(() => {
+      wheelCommitTimerRef.current = null;
+      setCanvasTransformState(transformRef.current);
+    }, WHEEL_COMMIT_MS);
+  };
+
+  // Sync DOM when React state commits (fit/focus, canvas switch, wheel debounce).
+  // Does not run on unrelated App re-renders — critical so pan/zoom nudges are not overwritten.
+  useLayoutEffect(() => {
+    applyTransformToDom(canvasTransform);
+  }, [canvasTransform]);
+
+  // Leaving archive/agents unmounts the canvas host. React transform state
+  // often does not change, so the effect above would not write CSS onto the
+  // new element — restore from the live ref, and flush persist so a pending
+  // wheel debounce cannot lose the viewport.
+  useLayoutEffect(() => {
+    if (!enabled) {
+      const current = transformRef.current;
+      saveCanvasViewport(canvasId, current);
+      setCanvasTransformState((prev) =>
+        prev.x === current.x && prev.y === current.y && prev.scale === current.scale
+          ? prev
+          : current,
+      );
+      return;
+    }
+    applyTransformToDom(transformRef.current);
+  }, [enabled, canvasId]);
 
   // Restore per-canvas viewport when switching canvases; flush previous on change/unmount.
   useEffect(() => {
     const loaded = loadCanvasViewport(canvasId);
     setCanvasTransform(loaded);
-    transformRef.current = loaded;
     return () => {
       saveCanvasViewport(canvasId, transformRef.current);
     };
@@ -92,6 +172,7 @@ export function useCanvasInteraction(
     return () => {
       window.removeEventListener('beforeunload', flush);
       flush();
+      clearWheelCommitTimer();
     };
   }, [canvasId]);
 
@@ -104,75 +185,200 @@ export function useCanvasInteraction(
     return () => window.removeEventListener('mousemove', handleMouseMove);
   }, []);
 
-  // Wheel zoom & scroll — re-bind whenever the canvas host is shown again.
+  // Wheel zoom & scroll — Ctrl+zoom is on window capture so it survives the
+  // canvas <main> remounting (essay fullscreen) without flipping `enabled`.
+  // Otherwise Ctrl+wheel becomes browser page zoom (toolbar, chrome, everything).
+  useEffect(() => {
+    if (!enabled) return;
+    const nestedScrollLatch = createNestedScrollChainLatch();
+
+    const applyCanvasZoom = (e: WheelEvent, host: HTMLElement) => {
+      const prev = transformRef.current;
+      const zoomBase = 1.05;
+      const factor = e.deltaY < 0 ? zoomBase : 1 / zoomBase;
+      const newScale = Math.min(Math.max(0.1, prev.scale * factor), 5);
+      const mainRect = host.getBoundingClientRect();
+      const clientX = e.clientX - mainRect.left;
+      const clientY = e.clientY - mainRect.top;
+      const mouseXInCanvas = (clientX - prev.x) / prev.scale;
+      const mouseYInCanvas = (clientY - prev.y) / prev.scale;
+      nudgeTransform({
+        x: clientX - mouseXInCanvas * newScale,
+        y: clientY - mouseYInCanvas * newScale,
+        scale: newScale,
+      });
+      scheduleWheelCommit();
+    };
+
+    const onWindowCtrlZoom = (e: WheelEvent) => {
+      if (!e.ctrlKey && !e.metaKey) return;
+      const host = mainRef.current;
+      if (!host) return;
+      const target = e.target;
+      if (target instanceof Node && !host.contains(target)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      applyCanvasZoom(e, host);
+    };
+    window.addEventListener('wheel', onWindowCtrlZoom, { passive: false, capture: true });
+
+    const main = mainRef.current;
+    if (!main) {
+      return () => window.removeEventListener('wheel', onWindowCtrlZoom, { capture: true });
+    }
+
+    const onWheel = (e: WheelEvent) => {
+      // 缩放手势由 window capture 处理；这里只做普通滚轮平移
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        applyCanvasZoom(e, main);
+        return;
+      }
+      // 编辑锁标记（data-canvas-edit-lock）：滚轮事件始终留在容器内，
+      // 不让画布在边界处接管平移——避免编辑时滚到底突然开始拖动画布。
+      let editProbe: HTMLElement | null = e.target as HTMLElement;
+      if (editProbe && editProbe.nodeType !== Node.ELEMENT_NODE) {
+        editProbe = editProbe.parentElement;
+      }
+      while (editProbe && main.contains(editProbe) && editProbe !== main) {
+        if (editProbe.hasAttribute(CANVAS_EDIT_LOCK_ATTR)) {
+          return;
+        }
+        editProbe = editProbe.parentElement;
+      }
+      let node: HTMLElement | null = e.target as HTMLElement;
+      if (node && node.nodeType !== Node.ELEMENT_NODE) {
+        node = node.parentElement;
+      }
+      let overlayProbe: HTMLElement | null = node;
+      while (overlayProbe && main.contains(overlayProbe) && overlayProbe !== main) {
+        if (overlayProbe.hasAttribute(CANVAS_OVERLAY_ATTR)) {
+          return;
+        }
+        overlayProbe = overlayProbe.parentElement;
+      }
+      while (node && main.contains(node) && node !== main) {
+        const { overflowY } = window.getComputedStyle(node);
+        const canScrollY =
+          (overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay') &&
+          node.scrollHeight > node.clientHeight;
+        if (canScrollY) {
+          const direction = wheelOverflowDirection(e.deltaY);
+          const atTop = node.scrollTop <= 0;
+          const atBottom = node.scrollTop + node.clientHeight >= node.scrollHeight - 1;
+          if (direction === 0) {
+            break;
+          }
+          const canScrollInner =
+            (direction < 0 && !atTop) || (direction > 0 && !atBottom);
+          const action = decideNestedScrollChain(nestedScrollLatch, {
+            now: performance.now(),
+            direction,
+            canScrollInner,
+          });
+          if (action === 'inner') {
+            return;
+          }
+          if (action === 'absorb') {
+            e.preventDefault();
+            return;
+          }
+          // 第二次溢出才让画布平移；避免看便签时滚到底立刻飞走。
+          break;
+        }
+        node = node.parentElement;
+      }
+
+      e.preventDefault();
+      const prev = transformRef.current;
+      nudgeTransform({
+        ...prev,
+        x: prev.x - e.deltaX,
+        y: prev.y - e.deltaY,
+      });
+      scheduleWheelCommit();
+    };
+    main.addEventListener('wheel', onWheel, { passive: false });
+    return () => {
+      window.removeEventListener('wheel', onWindowCtrlZoom, { capture: true });
+      main.removeEventListener('wheel', onWheel);
+    };
+  }, [mainRef, enabled]);
+
+  // Two-finger pinch zoom on touch devices — `wheel + ctrlKey` is the macOS
+  // trackpad path but real finger pinch fires as `touch*` events only. We use
+  // the mid-point of the two fingers as the zoom anchor so the canvas content
+  // under the gesture stays under the fingers, matching how Ctrl+wheel zoom
+  // behaves on desktop. Single-finger pan is already covered by pointerdown
+  // → handlePanStart (Pointer Events fire for touch on every modern browser).
   useEffect(() => {
     if (!enabled) return;
     const main = mainRef.current;
     if (!main) return;
-    const onWheel = (e: WheelEvent) => {
-      // 缩放手势仍始终由画布处理；普通滚轮在可滚动子区域内交给浏览器默认滚动
-      if (!e.ctrlKey && !e.metaKey) {
-        let node: HTMLElement | null = e.target as HTMLElement;
-        if (node && node.nodeType !== Node.ELEMENT_NODE) {
-          node = node.parentElement;
-        }
-        let insideScrollable = false;
-        while (node && main.contains(node) && node !== main) {
-          const { overflowY } = window.getComputedStyle(node);
-          const canScrollY =
-            (overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay') &&
-            node.scrollHeight > node.clientHeight;
-          if (canScrollY) {
-            insideScrollable = true;
-            const dy = e.deltaY;
-            const atTop = node.scrollTop <= 0;
-            const atBottom = node.scrollTop + node.clientHeight >= node.scrollHeight - 1;
-            // 内容未滚到边界时，交给浏览器默认滚动
-            if ((dy < 0 && !atTop) || (dy > 0 && !atBottom)) {
-              return;
-            }
-          }
-          node = node.parentElement;
-        }
-        // 如果目标位于任何可滚动子区域内（即使已到顶/底），也不触发画布滚动
-        if (insideScrollable) {
-          return;
-        }
+    let pinchStartDistance = 0;
+    let pinchStartScale = 1;
+    let pinchAnchor: { clientX: number; clientY: number } | null = null;
+
+    const distance = (a: Touch, b: Touch) =>
+      Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+
+    const onTouchStart = (e: TouchEvent) => {
+      if (e.touches.length !== 2) {
+        pinchStartDistance = 0;
+        pinchAnchor = null;
+        return;
       }
+      pinchStartDistance = distance(e.touches[0], e.touches[1]);
+      pinchStartScale = transformRef.current.scale;
+      pinchAnchor = {
+        clientX: (e.touches[0].clientX + e.touches[1].clientX) / 2,
+        clientY: (e.touches[0].clientY + e.touches[1].clientY) / 2,
+      };
+    };
 
-      // Must run: without this, Ctrl+wheel becomes browser page zoom.
+    const onTouchMove = (e: TouchEvent) => {
+      if (e.touches.length !== 2 || pinchStartDistance === 0 || !pinchAnchor) return;
+      // Block the browser's own page zoom while we drive canvas zoom.
       e.preventDefault();
-      if (e.ctrlKey || e.metaKey) {
-        setCanvasTransform(prev => {
-          const zoomBase = 1.05;
-          const factor = e.deltaY < 0 ? zoomBase : 1 / zoomBase;
-          const newScale = Math.min(Math.max(0.1, prev.scale * factor), 5);
+      const current = distance(e.touches[0], e.touches[1]);
+      const prev = transformRef.current;
+      const factor = current / pinchStartDistance;
+      const newScale = Math.min(Math.max(0.1, pinchStartScale * factor), 5);
 
-          const mainRect = main.getBoundingClientRect();
-          const clientX = e.clientX - mainRect.left;
-          const clientY = e.clientY - mainRect.top;
+      const mainRect = main.getBoundingClientRect();
+      const anchorX = pinchAnchor.clientX - mainRect.left;
+      const anchorY = pinchAnchor.clientY - mainRect.top;
+      const anchorCanvasX = (anchorX - prev.x) / prev.scale;
+      const anchorCanvasY = (anchorY - prev.y) / prev.scale;
+      const newX = anchorX - anchorCanvasX * newScale;
+      const newY = anchorY - anchorCanvasY * newScale;
 
-          const mouseXInCanvas = (clientX - prev.x) / prev.scale;
-          const mouseYInCanvas = (clientY - prev.y) / prev.scale;
+      nudgeTransform({ x: newX, y: newY, scale: newScale });
+      scheduleWheelCommit();
+    };
 
-          const newX = clientX - mouseXInCanvas * newScale;
-          const newY = clientY - mouseYInCanvas * newScale;
-
-          return { x: newX, y: newY, scale: newScale };
-        });
-      } else {
-        setCanvasTransform(prev => ({
-          ...prev,
-          x: prev.x - e.deltaX,
-          y: prev.y - e.deltaY,
-        }));
+    const onTouchEnd = (e: TouchEvent) => {
+      if (e.touches.length < 2) {
+        pinchStartDistance = 0;
+        pinchAnchor = null;
       }
     };
-    main.addEventListener('wheel', onWheel, { passive: false });
-    return () => main.removeEventListener('wheel', onWheel);
+
+    // touchstart/touchend are passive (we only read state). touchmove is
+    // non-passive so preventDefault can stop the browser's own page-zoom.
+    main.addEventListener('touchstart', onTouchStart, { passive: true });
+    main.addEventListener('touchmove', onTouchMove, { passive: false });
+    main.addEventListener('touchend', onTouchEnd, { passive: true });
+    main.addEventListener('touchcancel', onTouchEnd, { passive: true });
+    return () => {
+      main.removeEventListener('touchstart', onTouchStart);
+      main.removeEventListener('touchmove', onTouchMove);
+      main.removeEventListener('touchend', onTouchEnd);
+      main.removeEventListener('touchcancel', onTouchEnd);
+    };
   }, [mainRef, enabled]);
 
-  // Pan start handler
+  // Pan start handler — DOM nudge on move; React commit on pointerup.
   const handlePanStart = (e: React.PointerEvent) => {
     if (e.target === e.currentTarget || e.button === 1 || e.button === 0) {
       if (connectingFrom) setConnectingFrom(null);
@@ -182,7 +388,7 @@ export function useCanvasInteraction(
       const startTransform = transformRef.current;
 
       const onPointerMove = (moveEv: PointerEvent) => {
-        setCanvasTransform({
+        nudgeTransform({
           ...startTransform,
           x: startTransform.x + (moveEv.clientX - startX),
           y: startTransform.y + (moveEv.clientY - startY),
@@ -191,6 +397,7 @@ export function useCanvasInteraction(
       const onPointerUp = () => {
         window.removeEventListener('pointermove', onPointerMove);
         window.removeEventListener('pointerup', onPointerUp);
+        commitTransform(transformRef.current);
       };
       window.addEventListener('pointermove', onPointerMove);
       window.addEventListener('pointerup', onPointerUp);
@@ -200,6 +407,12 @@ export function useCanvasInteraction(
   // Edge line animation loop
   useEffect(() => {
     let animationFrameId: number;
+    // Skip SVG setAttribute / label style writes when geometry is unchanged.
+    // Rewriting x1/y1/x2/y2 every frame restarts the CSS dash animation on
+    // agent-to-agent edges, which is what makes the flow look stuttery.
+    const edgeLineCache = new Map<string, { x1: number; y1: number; x2: number; y2: number }>();
+    const edgeLabelCache = new Map<string, { mx: number; my: number; noteX: number; noteY: number; labelDeg: number }>();
+
     const updateLines = () => {
       const svg = svgRef.current;
       const container = contentContainerRef.current;
@@ -209,6 +422,15 @@ export function useCanvasInteraction(
       // Early-return without rAF would permanently stop edge updates until a full reload.
       if (svg && container) {
         const edgeGroups = Array.from(svg.querySelectorAll('g[data-edge-id]')) as SVGGElement[];
+        const nodeBoxCache = new Map<string, ReturnType<typeof getNodeLayoutBox>>();
+        const boxFor = (id: string, el: HTMLElement) => {
+          let box = nodeBoxCache.get(id);
+          if (!box) {
+            box = getNodeLayoutBox(el, container);
+            nodeBoxCache.set(id, box);
+          }
+          return box;
+        };
 
         edgeGroups.forEach((g: SVGGElement) => {
           const fromId = g.getAttribute('data-edge-from');
@@ -218,30 +440,79 @@ export function useCanvasInteraction(
 
           const fromNode = nodesRef.current[fromId];
           const toNode = nodesRef.current[toId];
-          if (fromNode && toNode) {
-            const fromBox = getNodeLayoutBox(fromNode, container);
-            const toBox = getNodeLayoutBox(toNode, container);
-            const x1 = fromBox.centerX;
-            const y1 = fromBox.centerY;
-            const x2 = toBox.centerX;
-            const y2 = toBox.centerY;
+          if (!fromNode || !toNode) return;
 
+          const fromBox = boxFor(fromId, fromNode);
+          const toBox = boxFor(toId, toNode);
+          const geom = {
+            x1: fromBox.centerX,
+            y1: fromBox.centerY,
+            x2: toBox.centerX,
+            y2: toBox.centerY,
+          };
+
+          if (!edgeLineGeomEqual(edgeLineCache.get(edgeId), geom)) {
             g.querySelectorAll('line').forEach((line: SVGLineElement) => {
-              line.setAttribute('x1', x1.toString());
-              line.setAttribute('y1', y1.toString());
-              line.setAttribute('x2', x2.toString());
-              line.setAttribute('y2', y2.toString());
+              writeSvgLineGeom(line, geom);
             });
-
-            if (edgeLabelsContainer) {
-              const btn = edgeLabelsContainer.querySelector(`[data-edge-btn="${edgeId}"]`) as HTMLButtonElement;
-              if (btn) {
-                btn.style.left = `${(x1 + x2) / 2}px`;
-                btn.style.top = `${(y1 + y2) / 2}px`;
-              }
-            }
+            edgeLineCache.set(edgeId, geom);
           }
+
+          if (!edgeLabelsContainer) return;
+
+          const note = edgeLabelsContainer.querySelector(`[data-edge-note="${edgeId}"]`) as HTMLElement | null;
+          const btn = edgeLabelsContainer.querySelector(`[data-edge-btn="${edgeId}"]`) as HTMLButtonElement | null;
+          const discussCluster = edgeLabelsContainer.querySelector(`[data-edge-discuss-cluster="${edgeId}"]`) as HTMLElement | null;
+          const { x: mx, y: my, angleDeg } = edgeVisibleSegmentAnchor(fromBox, toBox);
+          // Keep label readable (never upside-down).
+          const labelDeg = angleDeg > 90 || angleDeg < -90 ? angleDeg + 180 : angleDeg;
+          const rad = (angleDeg * Math.PI) / 180;
+          // Nudge the note farther from the stroke when the discuss cluster sits on the midpoint.
+          const offset = discussCluster ? 32 : 20;
+          const noteX = mx + Math.sin(rad) * offset;
+          const noteY = my - Math.cos(rad) * offset;
+          const label = { mx, my, noteX, noteY, labelDeg };
+
+          const prevLabel = edgeLabelCache.get(edgeId);
+          const labelsMatch =
+            prevLabel != null &&
+            prevLabel.mx === label.mx &&
+            prevLabel.my === label.my &&
+            prevLabel.noteX === label.noteX &&
+            prevLabel.noteY === label.noteY &&
+            prevLabel.labelDeg === label.labelDeg;
+          // Newly mounted chrome still sits at the JSX placeholder (-100,-100).
+          const chromeNeedsInit =
+            (note != null && note.style.left === '-100px') ||
+            (btn != null && btn.style.left === '-100px') ||
+            (discussCluster != null && discussCluster.style.left === '-100px');
+          if (labelsMatch && !chromeNeedsInit) return;
+
+          if (note) {
+            note.style.left = `${noteX}px`;
+            note.style.top = `${noteY}px`;
+            note.style.transform = `translate(-50%, -50%) rotate(${labelDeg}deg)`;
+          }
+          if (btn) {
+            btn.style.left = `${mx}px`;
+            btn.style.top = `${my}px`;
+          }
+          if (discussCluster) {
+            discussCluster.style.left = `${mx}px`;
+            discussCluster.style.top = `${my}px`;
+          }
+          edgeLabelCache.set(edgeId, label);
         });
+
+        if (edgeLineCache.size > edgeGroups.length) {
+          const live = new Set(edgeGroups.map((el) => el.getAttribute('data-edge-id') ?? ''));
+          for (const cachedId of edgeLineCache.keys()) {
+            if (!live.has(cachedId)) edgeLineCache.delete(cachedId);
+          }
+          for (const cachedId of edgeLabelCache.keys()) {
+            if (!live.has(cachedId)) edgeLabelCache.delete(cachedId);
+          }
+        }
 
         const tempEdge = svg.querySelector('#temp-edge') as SVGLineElement;
         const connFrom = svg.getAttribute('data-connecting-from');
@@ -262,6 +533,8 @@ export function useCanvasInteraction(
             tempEdge.setAttribute('y1', y1.toString());
             tempEdge.setAttribute('x2', x2.toString());
             tempEdge.setAttribute('y2', y2.toString());
+            const ghost = linkGhostRef?.current;
+            if (ghost) placeLinkNoteGhost(ghost, x2, y2);
           } else {
             tempEdge.style.display = 'none';
           }
@@ -272,7 +545,15 @@ export function useCanvasInteraction(
     };
     updateLines();
     return () => cancelAnimationFrame(animationFrameId);
-  }, [svgRef, contentContainerRef, edgeLabelsRef, nodesRef]);
+  }, [svgRef, contentContainerRef, edgeLabelsRef, nodesRef, linkGhostRef]);
 
-  return { canvasTransform, setCanvasTransform, transformRef, handlePanStart, mousePosRef };
+  return {
+    canvasTransform,
+    setCanvasTransform,
+    transformRef,
+    handlePanStart,
+    nudgeTransform,
+    commitTransform,
+    mousePosRef,
+  };
 }

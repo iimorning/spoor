@@ -38,18 +38,9 @@ Spoor includes multiple default AI personas that perform different cognitive job
 
 Users can also edit agent prompts, tune behavior, and test agents in the Agents Studio.
 
-## 4. Research Lab
+## 4. Canvas web search
 
-The Research Lab helps users move from a vague question to structured findings.
-
-It can:
-
-- Generate a three-step research plan.
-- Run web-assisted research through the app's search integration.
-- Produce a structured research report.
-- Convert findings into canvas notes for later synthesis.
-
-This is especially useful for essay planning, product research, market exploration, topic discovery, and long-form writing.
+When a Metaso key is configured (or hosted search is available after sign-in), agents on the canvas can request live web, image, video, and podcast results. Hits attach as linked materials next to the reply — not as a separate research workspace.
 
 ## 5. Document and Long-Form Knowledge Workflow
 

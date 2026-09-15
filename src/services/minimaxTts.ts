@@ -1,13 +1,13 @@
-import {
-  MINIMAX_DEFAULT_TTS_MODEL,
-  MINIMAX_DEFAULT_VOICE_ID,
-} from '../constants/voiceWriting';
+import { MINIMAX_DEFAULT_TTS_MODEL } from '../constants/voiceWriting';
+import { resolveMinimaxTtsProfile } from '../utils/minimaxTtsVoice';
 
 export type MinimaxTtsOptions = {
   apiKey: string;
   text: string;
   model?: string;
   voiceId?: string;
+  /** App UI language (`en` / `zh`); drives default voice and language_boost. */
+  language?: string;
   signal?: AbortSignal;
 };
 
@@ -30,6 +30,11 @@ export async function synthesizeMinimaxSpeech(opts: MinimaxTtsOptions): Promise<
   const text = opts.text.trim();
   if (!text) throw new Error('Empty TTS text');
 
+  const { voiceId, languageBoost } = resolveMinimaxTtsProfile({
+    customVoiceId: opts.voiceId,
+    language: opts.language,
+  });
+
   const res = await fetch('/api/minimax/v1/t2a_v2', {
     method: 'POST',
     headers: {
@@ -43,7 +48,7 @@ export async function synthesizeMinimaxSpeech(opts: MinimaxTtsOptions): Promise<
       stream: false,
       output_format: 'hex',
       voice_setting: {
-        voice_id: opts.voiceId?.trim() || MINIMAX_DEFAULT_VOICE_ID,
+        voice_id: voiceId,
         speed: 1,
         vol: 1,
         pitch: 0,
@@ -54,7 +59,7 @@ export async function synthesizeMinimaxSpeech(opts: MinimaxTtsOptions): Promise<
         format: 'mp3',
         channel: 1,
       },
-      language_boost: 'Chinese',
+      language_boost: languageBoost,
     }),
   });
 

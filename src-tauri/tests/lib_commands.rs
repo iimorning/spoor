@@ -7,8 +7,10 @@
 
 use serde_json::{json, Value};
 use spoor_lib::{
-  metaso_search_inner, normalize_metaso_params, open_external_url_validate,
-  openai_compatible_chat_inner, parse_sse_chunk, METASO_BASE_URL,
+  encode_base64, fetch_image_content_type_ok, fetch_image_inner, fetch_url_content_type_ok, fetch_url_inner,
+  metaso_chat_inner, metaso_search_inner, normalize_metaso_params, open_external_url_validate,
+  openai_compatible_chat_inner, parse_sse_chunk, parse_sse_delta, truncate_fetch_body, FETCH_URL_MAX_BYTES,
+  METASO_BASE_URL, METASO_CHAT_URL, SseDeltaPieces,
 };
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -315,6 +317,27 @@ fn metaso_default_base_url_is_metaso_cn() {
   // The production command should hit the real metaso endpoint. If this
   // changes, the Tauri-side clients may need to be updated too.
   assert_eq!(METASO_BASE_URL, "https://metaso.cn/api/v1/search");
+  assert_eq!(METASO_CHAT_URL, "https://metaso.cn/api/v1/chat");
+}
+
+#[tokio::test]
+async fn metaso_chat_sends_qa_body() {
+  let resp = ScriptedResponse::raw(200, r#"{"choices":[{"message":{"content":"hi"}}]}"#);
+  let (base, cap) = spawn_scripted_server(resp).await;
+  let client = reqwest::Client::new();
+  let r = metaso_chat_inner(&client, "k", "谷歌最新模型", None, &base)
+    .await
+    .unwrap();
+  assert!(r.contains("hi"));
+  let req = cap.lock().await.clone().expect("captured request");
+  let body_str = req.split("\r\n\r\n").nth(1).unwrap_or("");
+  let parsed: Value = serde_json::from_str(body_str).expect("body parses as JSON");
+  assert_eq!(parsed["q"], "谷歌最新模型");
+  assert_eq!(parsed["scope"], "webpage");
+  assert_eq!(parsed["model"], "fast");
+  assert_eq!(parsed["format"], "chat_completions");
+  assert_eq!(parsed["stream"], false);
+  assert_eq!(parsed["conciseSnippet"], true);
 }
 
 // ---------- normalize_metaso_params (pure unit tests) ----------
@@ -423,6 +446,48 @@ fn validate_rejects_ftp() {
   assert!(err.contains("Only http:// and https://"));
 }
 
+// ---------- fetch_url helpers ----------
+
+#[test]
+fn truncate_fetch_body_respects_max_bytes() {
+  let bytes = vec![b'a'; 32];
+  let out = truncate_fetch_body(&bytes, 10);
+  assert_eq!(out.len(), 10);
+  assert_eq!(out, "aaaaaaaaaa");
+}
+
+#[test]
+fn truncate_fetch_body_keeps_short_input() {
+  assert_eq!(truncate_fetch_body(b"hi", FETCH_URL_MAX_BYTES), "hi");
+}
+
+#[test]
+async fn fetch_url_inner_rejects_json_content_type() {
+
+#[tokio::test]
+async fn fetch_url_inner_returns_html_body() {
+  let html = r#"<!doctype html><html><head><title>Hi</title></head><body>ok</body></html>"#;
+  let (base, _) = spawn_scripted_server(ScriptedResponse {
+    status: 200,
+    reason: "OK",
+    content_type: "text/html; charset=utf-8",
+    body: html.into(),
+  })
+  .await;
+  let client = reqwest::Client::new();
+  let result = fetch_url_inner(&client, &base).await.expect("fetch");
+  assert!(result.body.contains("<title>Hi</title>"));
+  assert!(result.content_type.contains("text/html"));
+}
+
+#[tokio::test]
+async fn fetch_url_inner_rejects_json_content_type() {
+  let (base, _) = spawn_scripted_server(ScriptedResponse::json(200, json!({"ok": true}))).await;
+  let client = reqwest::Client::new();
+  let err = fetch_url_inner(&client, &base).await.unwrap_err();
+  assert!(err.contains("Unsupported content type"));
+}
+
 // ---------- parse_sse_chunk ----------
 
 #[test]
@@ -486,4 +551,29 @@ fn parse_sse_handles_non_string_content() {
 fn parse_sse_handles_crlf_padding() {
   let line = "data:    {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}  ";
   assert_eq!(parse_sse_chunk(line), Some("x".to_string()));
+}
+
+#[test]
+fn parse_sse_delta_reads_reasoning_content() {
+  let line = r#"data: {"choices":[{"delta":{"reasoning_content":"想","content":""}}]}"#;
+  assert_eq!(
+    parse_sse_delta(line),
+    Some(SseDeltaPieces {
+      content: String::new(),
+      reasoning: "想".to_string(),
+    })
+  );
+  assert_eq!(parse_sse_chunk(line), None);
+}
+
+#[test]
+fn parse_sse_delta_reads_mixed_reasoning_and_content() {
+  let line = r#"data: {"choices":[{"delta":{"reasoning_content":"想","content":"答"}}]}"#;
+  assert_eq!(
+    parse_sse_delta(line),
+    Some(SseDeltaPieces {
+      content: "答".to_string(),
+      reasoning: "想".to_string(),
+    })
+  );
 }

@@ -8,7 +8,11 @@
 - 网页仍走 `/api/doubao` 代理（仅解决跨域，不隐藏 Key）
 - **密钥会出现在 `dist` JS 里**，任何人可在浏览器开发者工具或下载的桌面安装包中提取 — 仅适合你愿意承担额度被盗用的场景
 
-默认推理接入点（`model` 字段）：`ep-20260218175314-xrnrn`  
+默认模型（`model` 字段）：`doubao-seed-2-0-lite-260428`  
+上一版（turbo）：`doubao-seed-2-1-turbo-260628`  
+更早（pro）：`doubao-seed-2-1-pro-260628`  
+更早（mini）：`doubao-seed-2-0-mini-260428`  
+更早推理接入点（切回时用）：`ep-20260218175314-xrnrn`  
 默认 Base URL：`https://ark.cn-beijing.volces.com/api/v3`
 
 ## 配置步骤

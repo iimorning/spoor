@@ -5,6 +5,7 @@ import {
   resolveAgentLocalizedName,
   resolveAgentLocalizedRole,
   resolveAgentSystemPrompt,
+  getLocaleDirective,
 } from '../../src/utils/aiI18n';
 
 function cfg(overrides: Partial<AgentConfig> & Pick<AgentConfig, 'id'>): AgentConfig {
@@ -78,5 +79,41 @@ describe('resolveAgentLocalizedName / Role / SystemPrompt', () => {
 
     await i18n.changeLanguage('zh');
     expect(resolveAgentSystemPrompt(agent)).toContain('便签画布');
+  });
+
+  it('官方海龟汤库存提示词随界面语言换成现行主持规则', async () => {
+    const { LEGACY_OFFICIAL_TURTLE_SOUP_PROMPTS } = await import(
+      '../../src/i18n/legacyOfficialTurtleSoupPrompts'
+    );
+    const agent = cfg({
+      id: 'uuid-remapped',
+      name: '海龟汤主持人',
+      role: 'host',
+      prompt: LEGACY_OFFICIAL_TURTLE_SOUP_PROMPTS[1],
+      communityPersonaKey: 'official:turtle_soup_host',
+    });
+    await i18n.changeLanguage('zh');
+    expect(resolveAgentSystemPrompt(agent)).toContain('隐藏汤底');
+    await i18n.changeLanguage('en');
+    expect(resolveAgentSystemPrompt(agent)).toContain('must never be modified');
+  });
+
+  it('用户改过的海龟汤提示词保持原文', () => {
+    const agent = cfg({
+      id: 'turtle_soup_host',
+      name: '海龟汤主持人',
+      role: 'host',
+      prompt: '自定义主持词',
+    });
+    expect(resolveAgentSystemPrompt(agent)).toBe('自定义主持词');
+  });
+});
+
+describe('getLocaleDirective', () => {
+  it('stamps the device calendar date so “now” is not the training cutoff', async () => {
+    await i18n.changeLanguage('en');
+    const text = getLocaleDirective(new Date(2026, 8, 3, 12, 0, 0));
+    expect(text).toContain('English');
+    expect(text).toContain('2026-09-03');
   });
 });

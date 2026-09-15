@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { stripThinking } from '../../src/utils/stripThinking';
+import { stripThinking, extractThinkingText, extractCompletedThinking } from '../../src/utils/stripThinking';
 
 // Build tags from parts so the literal sequences survive being written to disk.
 const LT = '<';
@@ -60,5 +60,33 @@ describe('stripThinking', () => {
 
   it('hides incomplete tool_call while streaming', () => {
     expect(stripThinking('前言\n[<tool_call> {"name":').trim()).toBe('前言');
+  });
+});
+
+describe('extractThinkingText', () => {
+  it('returns inner think text while the block is still open', () => {
+    expect(extractThinkingText(TO + '先看看问题')).toBe('先看看问题');
+  });
+
+  it('returns the closed think block until visible prose starts', () => {
+    expect(extractThinkingText(TO + '推理完毕' + TC)).toBe('推理完毕');
+  });
+
+  it('returns empty once visible prose has started', () => {
+    expect(extractThinkingText(TO + '推理' + TC + '答案是42')).toBe('');
+  });
+});
+
+describe('extractCompletedThinking', () => {
+  it('keeps think text after visible prose starts', () => {
+    expect(extractCompletedThinking(TO + '推理' + TC + '答案是42')).toBe('推理');
+  });
+
+  it('joins multiple think blocks', () => {
+    expect(extractCompletedThinking(TO + '一' + TC + TO + '二' + TC + '答')).toBe('一\n\n二');
+  });
+
+  it('returns empty when there is no thinking block', () => {
+    expect(extractCompletedThinking('普通回答')).toBe('');
   });
 });

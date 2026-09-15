@@ -5,10 +5,21 @@ import {
   createCanvasUndoStack,
 } from '../../src/utils/canvasUndoStack';
 
+const zone = {
+  id: 'zone-1',
+  canvasId: 'c',
+  x: 10,
+  y: 20,
+  width: 100,
+  height: 80,
+  createdAt: 1,
+};
+
 describe('canvasUndoStack', () => {
   beforeEach(async () => {
     await db.nodes.clear();
     await db.edges.clear();
+    await db.canvasWorkZones.clear();
   });
 
   it('caps stack length', () => {
@@ -54,5 +65,22 @@ describe('canvasUndoStack', () => {
     const remainingNodes = await db.nodes.toArray();
     expect(remainingNodes.map((n) => n.id)).toEqual(['keep']);
     expect(await db.edges.toArray()).toHaveLength(0);
+  });
+
+  it('undo work-zone create removes the room', async () => {
+    await db.canvasWorkZones.add(zone);
+    await applyCanvasUndo({ type: 'workZoneCreate', zoneId: zone.id });
+    expect(await db.canvasWorkZones.get(zone.id)).toBeUndefined();
+  });
+
+  it('undo work-zone move restores the previous rect', async () => {
+    await db.canvasWorkZones.add({ ...zone, x: 40, y: 60, width: 120, height: 90 });
+    await applyCanvasUndo({ type: 'workZoneUpdate', before: zone });
+    expect(await db.canvasWorkZones.get(zone.id)).toEqual(zone);
+  });
+
+  it('undo work-zone delete restores the room', async () => {
+    await applyCanvasUndo({ type: 'workZoneDelete', zone });
+    expect(await db.canvasWorkZones.get(zone.id)).toEqual(zone);
   });
 });

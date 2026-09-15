@@ -1,10 +1,65 @@
 @import url('https://fonts.googleapis.com/css2?family=Manrope:wght@200;300;400;500;600;700;800&family=Newsreader:opsz,wght@6..72,400..800&display=swap');
 @import "tailwindcss";
 
+/* Self-hosted CJK faces download only after the user picks one in settings. */
+
+:root {
+  --cjk-ui: 'Songti SC', 'Source Han Serif SC', 'Noto Serif SC', 'STSong', 'SimSun';
+  --cjk-note: 'Songti SC', 'Source Han Serif SC', 'Noto Serif SC', 'STSong', 'SimSun';
+  --note-cjk-stack: 'Newsreader', ui-serif, Georgia, Cambria, "Times New Roman", Times, var(--cjk-note), 'Songti SC', 'Source Han Serif SC', serif;
+}
+
+html[data-note-cjk='zhuque'] {
+  --cjk-ui: 'Zhuque Fangsong';
+  --cjk-note: 'Zhuque Fangsong';
+}
+
+html[data-note-cjk='system'] {
+  --cjk-ui: 'Songti SC', 'Source Han Serif SC', 'Noto Serif SC', 'STSong', 'SimSun';
+  --cjk-note: 'Songti SC', 'Source Han Serif SC', 'Noto Serif SC', 'STSong', 'SimSun';
+}
+
+html[data-note-hand='1'] {
+  --note-cjk-stack: var(--cjk-note), 'Newsreader', ui-serif, Georgia, Cambria, "Times New Roman", Times, serif;
+}
+
+html[data-note-cjk='wenkai'] {
+  --cjk-note: 'LXGW WenKai Lite';
+}
+
+html[data-note-cjk='yozai'] {
+  --cjk-note: Yozai;
+}
+
+html[data-note-cjk='xiaolai'] {
+  --cjk-note: Xiaolai;
+}
+
+html[data-note-cjk='nanifont'] {
+  --cjk-note: NaniFont;
+}
+
+html[data-note-cjk='liyu'] {
+  --cjk-note: 'Liyu Shoushu';
+}
+
+html[data-note-cjk='marker'] {
+  --cjk-note: 'LXGW Marker Gothic';
+}
+
+html[data-note-cjk='qingsong'] {
+  --cjk-note: 'Jason Handwriting 1';
+}
+
+/* Must match COMPACT_MQ / TOUCH_CHROME_MQ in useAdaptiveLayout.ts. */
+@custom-variant compact (@media (max-width: 1279px));
+@custom-variant coarse (@media (any-pointer: coarse));
+@custom-variant phone (@media (max-width: 767px) and (any-pointer: coarse));
+
 @theme {
-  --font-sans: 'Manrope', ui-sans-serif, system-ui, sans-serif;
-  --font-serif: ui-serif, Georgia, Cambria, "Times New Roman", Times, serif;
-  --font-newsreader: 'Newsreader', ui-serif, Georgia, Cambria, "Times New Roman", Times, serif;
+  --font-sans: 'Manrope', var(--cjk-ui), ui-sans-serif, system-ui, sans-serif;
+  --font-serif: 'Newsreader', ui-serif, Georgia, Cambria, "Times New Roman", Times, var(--cjk-ui), 'Songti SC', serif;
+  --font-newsreader: 'Newsreader', ui-serif, Georgia, Cambria, "Times New Roman", Times, var(--cjk-ui), serif;
 
   --color-surface: #FAF9F6;
   --color-surface-muted: #F4F1ED;
@@ -18,6 +73,7 @@
   --color-accent: #C2410C;
   --color-accent-hover: #a0350a;
   --color-accent-subtle: #FFF7ED;
+  --canvas-grid-line: rgba(0, 0, 0, 0.04);
 }
 
 [data-theme="dark"] {
@@ -33,16 +89,30 @@
   --color-accent: #F97316;
   --color-accent-hover: #ea580c;
   --color-accent-subtle: #2a1a0a;
+  /* Black hairlines vanish on the dark surface; flip them to white. */
+  --canvas-grid-line: rgba(255, 255, 255, 0.05);
+}
+
+/* Note/canvas CJK stack: applied in @layer utilities so it can beat font-serif
+   and lose only to an explicit palette --node-font. */
+
+@property --node-rotate {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
 }
 
 @layer base {
-  /* Hide scrollbars while keeping wheel / touch / keyboard scroll (WebView + desktop). */
+  /* Prefer unlayered rules below for WebView2; keep a soft base fallback. */
   * {
     scrollbar-width: none;
     -ms-overflow-style: none;
   }
   *::-webkit-scrollbar {
-    display: none;
+    width: 0 !important;
+    height: 0 !important;
+    display: none !important;
+    background: transparent !important;
   }
 }
 
@@ -51,16 +121,50 @@
     background-image: url('https://lh3.googleusercontent.com/aida-public/AB6AXuBeFUe1Z_LYXcdCYLvjT4ouawVQVL-V44Q0SMo_g3m0iP3sb14qgm5KqL8D5fd6kuWSWK_UvHWGk5y6Db6_h_CKdqaRTMt41n9H_LXcZxA7k06ELWjOfB9ywZ7TUx7IG5Avy4ZPmyo5W0WDoTluv9KFzK1vs4fW6UTiSgbk6O_WIeMi74RWOEqDLr9_P_sAIOUR-KShB8ZpGNPpv2-Y5Z_hWMxVpF5Z1QkqRGXQtM8EFeEUq3S00rn18UXLIO5dNbnrdBvvfGWP5rQ');
     background-blend-mode: soft-light;
   }
+  [data-theme="dark"] .paper-texture {
+    background-image: none;
+  }
+  /* The landing page hairline grid (landing.css), mirrored onto the canvas.
+     Fixed to the viewport — it does not pan or zoom with the content. */
   .canvas-grid {
-    background-size: 24px 24px;
-    background-image: radial-gradient(var(--color-border-muted) 1px, transparent 1px);
+    background-size: 40px 40px;
+    background-image:
+      linear-gradient(to right, var(--canvas-grid-line) 1px, transparent 1px),
+      linear-gradient(to bottom, var(--canvas-grid-line) 1px, transparent 1px);
+    background-position: center top;
+  }
+  /* Hide on "off" rather than show on "on", so the grid still renders before
+     initCanvasGrid() has written the attribute. */
+  [data-canvas-grid="off"] .canvas-grid {
+    display: none;
   }
   .node-connector {
     stroke: var(--color-border-muted);
     opacity: 1;
     stroke-width: 2;
   }
-  
+
+  /* Agent-to-agent edges: orange, dashed flow that animates toward the
+     discuss button. Distinct from regular edges so users can spot agent
+     clusters at a glance. */
+  @keyframes spoor-agent-edge-flow {
+    from { stroke-dashoffset: 0; }
+    /* Period must match dasharray (8+4) or the loop hitch is visible. */
+    to { stroke-dashoffset: -12; }
+  }
+  [data-edge-flowing="1"] .node-connector {
+    stroke: #C2410C;
+    stroke-width: 2.5;
+    stroke-dasharray: 8 4;
+    animation: spoor-agent-edge-flow 1.2s linear infinite;
+    /* Color transitions restart/fight the dash animation. */
+    transition: none;
+  }
+  [data-edge-flowing="1"]:hover .node-connector {
+    /* Pause on hover so users can steady their cursor over the midpoint button. */
+    animation-play-state: paused;
+  }
+
   /* Style the node itself if it has background or allow children to override */
   /* Opaque palette on the draggable root — except glass notes: solid bg kills backdrop-filter (blur would only see flat color). */
   [style*="--node-bg"]:not([data-glass-surface]), [style*="--node-bg"] .bg-white, [style*="--node-bg"] .bg-\[\#F4F1ED\], [style*="--node-bg"] .bg-\[\#EAE7E2\], [style*="--node-bg"] .bg-\[\#fcf8f9\] {
@@ -85,6 +189,17 @@
       0 0 34px color-mix(in srgb, var(--node-border, #c2410c) 34%, transparent),
       0 0 16px color-mix(in srgb, var(--node-bg, #c2410c) 16%, transparent),
       inset 0 0 0 1px color-mix(in srgb, var(--node-border, #c2410c) 34%, transparent);
+  }
+
+  /* Dragging: drop blur (expensive while moving) and promote the shell to its own layer. */
+  [data-dragging],
+  [data-rotating] {
+    will-change: transform;
+  }
+  [data-dragging] .note-surface-glass,
+  [data-rotating] .note-surface-glass {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
   }
 
   .note-glass-wash {
@@ -216,14 +331,58 @@
   [style*="--node-font"], [style*="--node-font"] *:not(.node-palette):not(.node-palette *) {
     font-family: var(--node-font) !important;
   }
+
+  .canvas-cjk,
+  .canvas-cjk :is(.font-serif, .font-sans, .font-newsreader, .markdown-body) {
+    font-family: var(--note-cjk-stack) !important;
+  }
+  .canvas-cjk :is(.font-mono) {
+    font-family: ui-monospace, Consolas, var(--cjk-note), monospace !important;
+  }
+  html[data-note-hand='1'] .canvas-cjk :is(.font-mono) {
+    font-family: var(--cjk-note), ui-monospace, Consolas, monospace !important;
+  }
+  .canvas-cjk [style*="--node-font"],
+  .canvas-cjk [style*="--node-font"] *:not(.node-palette):not(.node-palette *) {
+    font-family: var(--node-font) !important;
+  }
+
+  /* Pocket memo: CJK stack with looser line-height and letter-spacing for readability. */
+  .pocket-text {
+    font-family: var(--note-cjk-stack);
+    letter-spacing: 0.035em;
+    -webkit-font-smoothing: antialiased;
+  }
+  .pocket-text-editor {
+    line-height: 1.85;
+  }
+  .pocket-text-list-title {
+    line-height: 1.65;
+  }
+  .pocket-text-list-preview {
+    line-height: 1.75;
+    letter-spacing: 0.03em;
+  }
+
+  .node-ask-composer-input {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
   .scrollbar-hide::-webkit-scrollbar {
-    display: none;
+    width: 0 !important;
+    height: 0 !important;
+    display: none !important;
+    background: transparent !important;
   }
   .scrollbar-hide {
-    -ms-overflow-style: none;
-    scrollbar-width: none;
+    -ms-overflow-style: none !important;
+    scrollbar-width: none !important;
   }
   
+  .markdown-body {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
   .markdown-body h1 { @apply text-2xl font-bold mb-4 mt-6; }
   .markdown-body h2 { @apply text-xl font-bold mb-3 mt-5; }
   .markdown-body h3 { @apply text-lg font-bold mb-2 mt-4; }
@@ -231,9 +390,32 @@
   .markdown-body ul { @apply list-disc pl-5 mb-3; }
   .markdown-body ol { @apply list-decimal pl-5 mb-3; }
   .markdown-body li { @apply mb-1; }
+  .markdown-body td ul,
+  .markdown-body td ol { @apply mb-0 mt-0 pl-4; }
+  .markdown-body td li { @apply mb-0.5 last:mb-0; }
   .markdown-body code { @apply bg-black/5 rounded px-1 font-mono text-[0.9em]; }
-  .markdown-body pre { @apply bg-black/5 rounded p-3 mb-3 overflow-x-auto; }
+  .markdown-body pre {
+    @apply bg-black/5 rounded p-3 mb-3 max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words;
+  }
+  .markdown-body pre code {
+    @apply whitespace-pre-wrap break-words;
+  }
   .markdown-body blockquote { @apply border-l-4 border-black/10 pl-4 italic mb-3; }
+  .markdown-body .markdown-table-wrap { @apply my-3 max-w-full min-w-0 overflow-x-auto; }
+  .markdown-body table { @apply w-full table-fixed border-collapse text-[11px] leading-snug; }
+  .markdown-body th,
+  .markdown-body td { @apply border border-[#E6E4DF] px-2 py-1 align-top text-left break-words; }
+  .markdown-body th { @apply bg-[#EAE7E2]/80 font-semibold text-[#1a1a1a]; }
+  .markdown-body tr:nth-child(even) td { @apply bg-white/40; }
+  .markdown-body.tts-follow-along [data-tts-mark] {
+    color: #C2410C;
+    background: transparent;
+    font: inherit;
+    text-decoration: underline;
+    text-decoration-color: rgb(194 65 12 / 0.45);
+    text-decoration-thickness: 2px;
+    text-underline-offset: 3px;
+  }
 
   .note-glass-markdown .markdown-body {
     @apply font-sans text-[18px] font-normal leading-[1.6] text-[#464652];
@@ -345,7 +527,6 @@
 [data-theme="dark"] .bg-white\/15 { background-color: rgba(255,255,255,0.15) !important; }
 
 [data-theme="dark"] .border-\[\#FDBA74\] { border-color: color-mix(in srgb, var(--color-accent) 60%, transparent) !important; }
-[data-theme="dark"] .text-\[\#C2410C\]\/70 { color: color-mix(in srgb, var(--color-accent) 70%, transparent) !important; }
 [data-theme="dark"] .text-\[\#C2410C\]\/60 { color: color-mix(in srgb, var(--color-accent) 60%, transparent) !important; }
 [data-theme="dark"] .text-\[\#b0aea8\] { color: var(--color-text-muted) !important; }
 [data-theme="dark"] .text-\[\#a33508\] { color: var(--color-accent-hover) !important; }
@@ -369,7 +550,161 @@
 
 [data-theme="dark"] .bg-\[\#1a1a1a\] { background-color: var(--color-text) !important; }
 [data-theme="dark"] .bg-\[\#1a1a1a\]\/85 { background-color: rgba(0,0,0,0.85) !important; }
+[data-theme="dark"] .bg-\[\#1a1a1a\]\/88 { background-color: rgba(0,0,0,0.92) !important; }
 [data-theme="dark"] .bg-\[\#FAF9F6\]\/80 { background-color: color-mix(in srgb, var(--color-surface) 80%, transparent) !important; }
 [data-theme="dark"] .border-\[\#C2410C\]\/20 { border-color: color-mix(in srgb, var(--color-accent) 20%, transparent) !important; }
 [data-theme="dark"] .text-\[\#a09f9c\] { color: var(--color-text-muted) !important; }
 [data-theme="dark"] .hover\:bg-\[\#FEF2F2\]:hover { background-color: color-mix(in srgb, #ef4444 12%, transparent) !important; }
+
+/* ── Accent (#C2410C) transparency variants — non-node usage hits this surface
+       most often via App, AISettingsModal, AgentsStudio, sidebar / pill chrome. ── */
+[data-theme="dark"] .bg-\[\#C2410C\]\/8   { background-color: color-mix(in srgb, var(--color-accent) 8%, transparent)  !important; }
+[data-theme="dark"] .bg-\[\#C2410C\]\/10  { background-color: color-mix(in srgb, var(--color-accent) 10%, transparent) !important; }
+[data-theme="dark"] .bg-\[\#C2410C\]\/15  { background-color: color-mix(in srgb, var(--color-accent) 15%, transparent) !important; }
+[data-theme="dark"] .bg-\[\#C2410C\]\/20  { background-color: color-mix(in srgb, var(--color-accent) 20%, transparent) !important; }
+[data-theme="dark"] .bg-\[\#C2410C\]\/25  { background-color: color-mix(in srgb, var(--color-accent) 25%, transparent) !important; }
+[data-theme="dark"] .hover\:bg-\[\#C2410C\]\/8:hover  { background-color: color-mix(in srgb, var(--color-accent) 8%,  transparent) !important; }
+[data-theme="dark"] .hover\:bg-\[\#C2410C\]\/10:hover { background-color: color-mix(in srgb, var(--color-accent) 10%, transparent) !important; }
+[data-theme="dark"] .border-\[\#C2410C\]\/40 { border-color: color-mix(in srgb, var(--color-accent) 40%, transparent) !important; }
+[data-theme="dark"] .border-\[\#C2410C\]\/45 { border-color: color-mix(in srgb, var(--color-accent) 45%, transparent) !important; }
+[data-theme="dark"] .border-\[\#C2410C\]\/55 { border-color: color-mix(in srgb, var(--color-accent) 55%, transparent) !important; }
+[data-theme="dark"] .text-\[\#C2410C\]\/70  { color: color-mix(in srgb, var(--color-accent) 70%, transparent) !important; }
+[data-theme="dark"] .text-\[\#C2410C\]\/80  { color: color-mix(in srgb, var(--color-accent) 80%, transparent) !important; }
+[data-theme="dark"] .shadow-\[\#C2410C\]\/20 { --tw-shadow-color: color-mix(in srgb, var(--color-accent) 20%, transparent) !important; }
+
+/* ── Destructive (#ef4444) variants — AgentsStudio delete hover, CanvasTemplatesTab delete. ── */
+[data-theme="dark"] .text-\[\#ef4444\] { color: #f87171 !important; }
+[data-theme="dark"] .hover\:bg-\[\#ef4444\]\/10:hover { background-color: rgba(239,68,68,0.18) !important; }
+[data-theme="dark"] .hover\:bg-\[\#fee2e2\]:hover    { background-color: rgba(239,68,68,0.18) !important; }
+
+/* ── White-with-alpha surfaces used outside node shells (sidebar, modals, floating toolbars).
+       Both static and hover variants — Tailwind generates separate class names for the two. ── */
+[data-theme="dark"] .bg-white\/70 { background-color: color-mix(in srgb, var(--color-surface-elevated) 70%, transparent) !important; }
+[data-theme="dark"] .bg-white\/90 { background-color: color-mix(in srgb, var(--color-surface-elevated) 90%, transparent) !important; }
+[data-theme="dark"] .bg-white\/95 { background-color: color-mix(in srgb, var(--color-surface-elevated) 95%, transparent) !important; }
+[data-theme="dark"] .hover\:bg-white\/70:hover { background-color: color-mix(in srgb, var(--color-surface-elevated) 70%, transparent) !important; }
+[data-theme="dark"] .hover\:bg-white\/90:hover { background-color: color-mix(in srgb, var(--color-surface-elevated) 90%, transparent) !important; }
+[data-theme="dark"] .hover\:bg-white\/95:hover { background-color: color-mix(in srgb, var(--color-surface-elevated) 95%, transparent) !important; }
+
+/* ── Native form controls — AgentsStudio persona-picker range slider. ── */
+[data-theme="dark"] .accent-\[\#C2410C\] { accent-color: var(--color-accent) !important; }
+
+/* ── Border-color variants not yet covered. ── */
+[data-theme="dark"] .border-\[\#8c8a84\]  { border-color: var(--color-text-muted)    !important; }
+[data-theme="dark"] .border-\[\#ECEAE4\]  { border-color: var(--color-border)        !important; }
+[data-theme="dark"] .border-\[\#D9D6D1\]  { border-color: var(--color-border-muted)  !important; }
+
+/* ── Misc backgrounds that appear on shell-level chrome. ── */
+[data-theme="dark"] .bg-black\/35 { background-color: rgba(0,0,0,0.5) !important; }
+[data-theme="dark"] .hover\:bg-\[\#333\]:hover { background-color: rgba(255,255,255,0.18) !important; }
+/* Both spellings exist in source — lowercase (AgentsStudio, CanvasTemplatesTab)
+   and uppercase (AISettingsModal, BillingPanel, CanvasEdgeLines, OnboardingOverlay). */
+[data-theme="dark"] .hover\:bg-\[\#9a3412\]:hover { background-color: var(--color-accent-hover) !important; }
+[data-theme="dark"] .hover\:bg-\[\#9A3412\]:hover { background-color: var(--color-accent-hover) !important; }
+[data-theme="dark"] .bg-\[\#FBF5EE\]\/70 { background-color: color-mix(in srgb, var(--color-accent-subtle) 70%, transparent) !important; }
+
+/* Unlayered: beat Tailwind @layer + WebView2 quirks under canvas transforms. */
+.scrollbar-hide,
+.scrollbar-hide * {
+  scrollbar-width: none !important;
+  -ms-overflow-style: none !important;
+}
+.scrollbar-hide::-webkit-scrollbar,
+.scrollbar-hide *::-webkit-scrollbar {
+  width: 0 !important;
+  height: 0 !important;
+  display: none !important;
+  background: transparent !important;
+}
+
+.essay-body-editor .ProseMirror {
+  min-height: 8rem;
+  cursor: text;
+}
+.essay-body-editor .ai-essay-edit,
+.essay-body-editor [data-node-view-wrapper].ai-essay-edit,
+.essay-body-editor .node-aiEssayEdit {
+  overflow: visible !important;
+  height: auto !important;
+}
+.essay-body-editor .ProseMirror-focused {
+  outline: none;
+}
+.essay-body-editor .ProseMirror p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  pointer-events: none;
+  color: #8c8a84;
+  font-style: italic;
+}
+.essay-body-editor .ProseMirror a {
+  color: #C2410C;
+  text-decoration: underline;
+}
+
+.essay-collect-ghost {
+  opacity: 0.28;
+  filter: blur(1.5px) saturate(0.72);
+  pointer-events: none;
+}
+
+.essay-collect-overlay {
+  background: rgba(255, 252, 248, 0.52);
+  backdrop-filter: blur(14px) saturate(1.15);
+  -webkit-backdrop-filter: blur(14px) saturate(1.15);
+  box-shadow: inset 0 0 0 1px rgba(194, 65, 12, 0.22);
+}
+
+.essay-collect-label {
+  font-family: ui-serif, Georgia, Cambria, 'Times New Roman', Times, serif;
+  font-size: 1.625rem;
+  font-weight: 700;
+  letter-spacing: 0.28em;
+  padding-left: 0.28em;
+  color: #C2410C;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.85);
+}
+
+@keyframes essay-collect-overlay-pulse {
+  0% {
+    opacity: 0;
+    transform: scale(1.03);
+  }
+  18% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  72% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.985);
+  }
+}
+
+.essay-collect-overlay--pulse {
+  animation: essay-collect-overlay-pulse 640ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.essay-collect-overlay--pulse .essay-collect-label {
+  animation: essay-collect-label-pop 640ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@keyframes essay-collect-label-pop {
+  0% {
+    opacity: 0;
+    transform: scale(0.88);
+  }
+  22% {
+    opacity: 1;
+    transform: scale(1.04);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+

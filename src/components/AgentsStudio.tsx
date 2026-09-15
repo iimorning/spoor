@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   Plus,
@@ -9,6 +9,8 @@ import {
   MessageSquare,
   X,
   FileText,
+  FileUp,
+  Image,
   Loader2,
   Trash2,
   RotateCcw,
@@ -30,8 +32,71 @@ import {
 } from '../utils/agentMarkdownKnowledge';
 import { useAppDialog } from './AppDialogProvider';
 import { AgentIcon } from './AgentIcon';
+import { CanvasTemplatesTab } from './CanvasTemplatesTab';
+import { readFileAsDataURL } from '../utils/file';
+import {
+  extractDocumentText,
+  isPersonaPromptDocument,
+  PERSONA_PROMPT_DOC_MAX_BYTES,
+  truncateDocumentText,
+} from '../utils/extractDocumentText';
+import { syncAgentCanvasCardSize } from '../utils/agentCoverCards';
+import {
+  dedupeAgentsForList,
+} from '../utils/agentPersonaSource';
+import { useImeSafeText } from '../hooks/useImeSafeText';
+
+/** Local avatar upload — keep IndexedDB rows from ballooning. */
+const AGENT_COVER_MAX_BYTES = 4 * 1024 * 1024;
 
 type SandboxChatMessage = { role: 'user' | 'model'; text: string };
+
+function PersonaNameField({
+  placeholder,
+  'aria-label': ariaLabel,
+  value,
+  ...inputProps
+}: {
+  placeholder: string;
+  'aria-label': string;
+} & Pick<
+  React.InputHTMLAttributes<HTMLInputElement>,
+  'value' | 'onChange' | 'onCompositionStart' | 'onCompositionUpdate' | 'onCompositionEnd' | 'onBlur'
+>) {
+  const measureRef = useRef<HTMLSpanElement>(null);
+  const [inputWidth, setInputWidth] = useState(64);
+  const mirrorText = value || placeholder;
+  const isEmpty = !value;
+
+  useEffect(() => {
+    const node = measureRef.current;
+    if (!node) return;
+    setInputWidth(Math.max(48, Math.ceil(node.getBoundingClientRect().width) + 4));
+  }, [mirrorText, isEmpty]);
+
+  return (
+    <span className="relative inline-block max-w-full align-bottom">
+      <span
+        ref={measureRef}
+        className={`invisible absolute left-0 top-0 whitespace-pre pointer-events-none font-serif text-3xl ${
+          isEmpty ? 'font-normal' : 'font-bold'
+        }`}
+        aria-hidden
+      >
+        {mirrorText}
+      </span>
+      <input
+        type="text"
+        style={{ width: inputWidth }}
+        className="max-w-full font-serif text-3xl font-bold text-[#1a1a1a] bg-transparent border-0 border-b border-transparent hover:border-[#E6E4DF] focus:border-[#C2410C] focus:ring-0 outline-none py-1 px-0 transition-colors placeholder:text-[#8c8a84] placeholder:font-normal"
+        placeholder={placeholder}
+        aria-label={ariaLabel}
+        value={value}
+        {...inputProps}
+      />
+    </span>
+  );
+}
 
 async function persistSandboxThread(agentId: string, messages: SandboxChatMessage[]) {
   await db.agentSandboxThreads.put({
@@ -51,9 +116,25 @@ export interface AgentsStudioProps {
     model: string;
   };
   callAI: CallAIFn;
+  onGenerateCover?: (agentId: string) => void;
+  generatingCoverAgentId?: string | null;
+  /**
+   * Switches the app's active canvas to a freshly-spawned template canvas.
+   * Required to enable the "Canvas templates" tab — without it, the tab
+   * still renders but "Use template" is a no-op after switching.
+   */
+  onActivateCanvas?: (canvasId: string) => void;
 }
 
-export function AgentsStudio({ agentConfigs, setAgentConfigs, aiConfig, callAI }: AgentsStudioProps) {
+export function AgentsStudio({
+  agentConfigs,
+  setAgentConfigs,
+  aiConfig,
+  callAI,
+  onGenerateCover,
+  generatingCoverAgentId = null,
+  onActivateCanvas,
+}: AgentsStudioProps) {
   const { t } = useTranslation();
   const { confirm, alert: appAlert } = useAppDialog();
   const [activeAgentId, setActiveAgentId] = useState<string | null>(agentConfigs[0]?.id || null);
@@ -103,7 +184,7 @@ export function AgentsStudio({ agentConfigs, setAgentConfigs, aiConfig, callAI }
     setAgentConfigs([...agentConfigs, {
       id: newId,
       name: t('agents.new_persona'),
-      role: 'Assistant',
+      role: t('agents.persona_default_role'),
       prompt: '',
       temperature: 0.7,
       creativity: 0.4
@@ -126,6 +207,30 @@ export function AgentsStudio({ agentConfigs, setAgentConfigs, aiConfig, callAI }
   };
 
   const openKnowledgeFilePicker = () => knowledgeFileInputRef.current?.click();
+  const openCoverFilePicker = () => coverFileInputRef.current?.click();
+
+  const handleCoverFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file || !activeAgentId) return;
+    if (!file.type.startsWith('image/')) {
+      void appAlert({ message: t('agents.card_cover_not_image') });
+      return;
+    }
+    if (file.size > AGENT_COVER_MAX_BYTES) {
+      void appAlert({ message: t('agents.card_cover_too_large') });
+      return;
+    }
+    try {
+      const dataUrl = await readFileAsDataURL(file);
+      await setAgentConfigs(
+        agentConfigs.map((a) => (a.id === activeAgentId ? { ...a, coverImageUrl: dataUrl } : a)),
+      );
+      await syncAgentCanvasCardSize(activeAgentId, true);
+    } catch {
+      void appAlert({ message: t('agents.card_cover_read_failed') });
+    }
+  };
 
   const readOneFileAsText = (file: File) =>
     new Promise<string>((resolve, reject) => {
@@ -303,14 +408,472 @@ export function AgentsStudio({ agentConfigs, setAgentConfigs, aiConfig, callAI }
     }
   };
 
-  const filteredAgents = agentConfigs.filter((a) =>
+  // 'personas' = the original two-pane editor; 'templates' = canvas-template tab.
+  const [tab, setTab] = useState<'personas' | 'templates'>('personas');
+
+  return (
+    <div className="flex-1 flex flex-col min-h-0 bg-[#FAF9F6] overflow-hidden relative pl-14">
+      {/* Top tab strip — personas vs saved/community templates */}
+      <div className="flex border-b border-[#E6E4DF] bg-white">
+        <button
+          type="button"
+          onClick={() => setTab('personas')}
+          className={`px-5 py-2.5 text-sm font-sans font-bold border-b-2 -mb-px transition-colors ${
+            tab === 'personas'
+              ? 'border-[#C2410C] text-[#1a1a1a]'
+              : 'border-transparent text-[#8c8a84] hover:text-[#1a1a1a]'
+          }`}
+          data-testid="agents-studio-tab-personas"
+          title={t('canvas.tab_personas_hint')}
+        >
+          {t('canvas.tab_personas')}
+        </button>
+        <button
+          type="button"
+          onClick={() => setTab('templates')}
+          className={`px-5 py-2.5 text-sm font-sans font-bold border-b-2 -mb-px transition-colors ${
+            tab === 'templates'
+              ? 'border-[#C2410C] text-[#1a1a1a]'
+              : 'border-transparent text-[#8c8a84] hover:text-[#1a1a1a]'
+          }`}
+          data-testid="agents-studio-tab-templates"
+          title={t('canvas.tab_templates_hint')}
+        >
+          {t('canvas.tab_templates')}
+        </button>
+      </div>
+
+      {tab === 'templates' ? (
+        <CanvasTemplatesTab
+          agentConfigs={agentConfigs}
+          onActivateCanvas={(id) => {
+            onActivateCanvas?.(id);
+            setTab('personas'); // bounce back so the user sees the canvas in the right pane
+          }}
+        />
+      ) : (
+        <PersonasPane
+          agentConfigs={agentConfigs}
+          setAgentConfigs={setAgentConfigs}
+          aiConfig={aiConfig}
+          callAI={callAI}
+          onGenerateCover={onGenerateCover}
+          generatingCoverAgentId={generatingCoverAgentId}
+        />
+      )}
+    </div>
+  );
+}
+
+/** Persona editor split out so the tab strip above stays minimal. */
+function PersonasPane({
+  agentConfigs,
+  setAgentConfigs,
+  aiConfig,
+  callAI,
+  onGenerateCover,
+  generatingCoverAgentId,
+}: AgentsStudioProps) {
+  const { t } = useTranslation();
+  const { confirm, alert: appAlert } = useAppDialog();
+  const [activeAgentId, setActiveAgentId] = useState<string | null>(agentConfigs[0]?.id || null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [isEnhancing, setIsEnhancing] = useState(false);
+  const [isImportingFromDoc, setIsImportingFromDoc] = useState(false);
+  const [isSandboxOpen, setIsSandboxOpen] = useState(false);
+  const [sandboxMessages, setSandboxMessages] = useState<SandboxChatMessage[]>([]);
+  const [sandboxInput, setSandboxInput] = useState('');
+  const [isSandboxLoading, setIsSandboxLoading] = useState(false);
+  const [editingKnowledgeFile, setEditingKnowledgeFile] = useState<string | null>(null);
+  const chatEndRef = useRef<HTMLDivElement>(null);
+  const knowledgeFileInputRef = useRef<HTMLInputElement>(null);
+  const knowledgeEditorRef = useRef<HTMLDivElement | null>(null);
+  const coverFileInputRef = useRef<HTMLInputElement>(null);
+  const promptDocInputRef = useRef<HTMLInputElement>(null);
+  const sandboxUiAgentRef = useRef<string | null>(null);
+  const agentConfigsRef = useRef(agentConfigs);
+  agentConfigsRef.current = agentConfigs;
+
+  const activeAgent = agentConfigs.find((a) => a.id === activeAgentId) || agentConfigs[0];
+
+  const resolvedName = activeAgent ? resolveAgentLocalizedName(activeAgent) : '';
+  const resolvedPrompt = activeAgent ? resolveAgentSystemPrompt(activeAgent) : '';
+
+  const patchActiveAgent = useCallback(
+    (patch: Partial<AgentConfig>) => {
+      const id = activeAgentId;
+      if (!id) return;
+      const latest = agentConfigsRef.current;
+      void setAgentConfigs(latest.map((a) => (a.id === id ? { ...a, ...patch } : a)));
+    },
+    [activeAgentId, setAgentConfigs],
+  );
+
+  const nameField = useImeSafeText(activeAgent?.id ?? '', resolvedName, (value) => {
+    patchActiveAgent({ name: value });
+  });
+  const promptField = useImeSafeText(activeAgent?.id ?? '', resolvedPrompt, (value) => {
+    patchActiveAgent({ prompt: value });
+  });
+
+  const displayName = nameField.value;
+  const displayPrompt = promptField.value;
+
+  useEffect(() => {
+    sandboxUiAgentRef.current = activeAgentId;
+    setIsSandboxLoading(false);
+    setEditingKnowledgeFile(null);
+
+    let cancelled = false;
+    (async () => {
+      if (!activeAgentId) {
+        setSandboxMessages([]);
+        return;
+      }
+      const row = await db.agentSandboxThreads.get(activeAgentId);
+      if (cancelled) return;
+      setSandboxMessages(row?.messages ?? []);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeAgentId]);
+
+  useEffect(() => {
+    if (!editingKnowledgeFile) return;
+
+    const closeEditor = () => setEditingKnowledgeFile(null);
+
+    const handlePointerDown = (event: MouseEvent) => {
+      const root = knowledgeEditorRef.current;
+      if (!root || root.contains(event.target as Node)) return;
+      closeEditor();
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') closeEditor();
+    };
+
+    document.addEventListener('mousedown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [editingKnowledgeFile]);
+
+  useEffect(() => {
+    if (chatEndRef.current) {
+      chatEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [sandboxMessages, isSandboxLoading]);
+
+  const handleAddAgent = () => {
+    const newId = "agent-" + Math.random().toString(36).substr(2, 9);
+    setAgentConfigs([...agentConfigs, {
+      id: newId,
+      name: t('agents.new_persona'),
+      role: t('agents.persona_default_role'),
+      prompt: '',
+      temperature: 0.7,
+      creativity: 0.4
+    }]);
+    setActiveAgentId(newId);
+  };
+
+  const handleUpdateActiveAgent = (field: string, value: string | number) => {
+    patchActiveAgent({ [field]: value } as Partial<AgentConfig>);
+  };
+
+  const setActiveAgentKnowledgeFiles = (next: AgentMarkdownKnowledgeFile[] | undefined) => {
+    patchActiveAgent({ knowledgeMarkdownFiles: next?.length ? next : undefined });
+  };
+
+  const openKnowledgeFilePicker = () => knowledgeFileInputRef.current?.click();
+  const openCoverFilePicker = () => coverFileInputRef.current?.click();
+
+  const handleCoverFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file || !activeAgentId) return;
+    if (!file.type.startsWith('image/')) {
+      void appAlert({ message: t('agents.card_cover_not_image') });
+      return;
+    }
+    if (file.size > AGENT_COVER_MAX_BYTES) {
+      void appAlert({ message: t('agents.card_cover_too_large') });
+      return;
+    }
+    try {
+      const dataUrl = await readFileAsDataURL(file);
+      await setAgentConfigs(
+        agentConfigs.map((a) => (a.id === activeAgentId ? { ...a, coverImageUrl: dataUrl } : a)),
+      );
+      await syncAgentCanvasCardSize(activeAgentId, true);
+    } catch {
+      void appAlert({ message: t('agents.card_cover_read_failed') });
+    }
+  };
+
+  const readOneFileAsText = (file: File) =>
+    new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result ?? ''));
+      reader.onerror = () => reject(new Error('read'));
+      reader.readAsText(file, 'UTF-8');
+    });
+
+  const handleKnowledgeFilesChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const list = e.target.files;
+    e.target.value = '';
+    if (!list?.length || !activeAgentId || !activeAgent) return;
+
+    const errors: string[] = [];
+    const merged = new Map((activeAgent.knowledgeMarkdownFiles ?? []).map((f) => [f.name, f]));
+
+    for (const file of Array.from(list)) {
+      if (!isAgentMarkdownFilename(file.name)) {
+        errors.push(t('agents.knowledge_not_markdown', { name: file.name }));
+        continue;
+      }
+      if (file.size > AGENT_KNOWLEDGE_MAX_FILE_BYTES) {
+        errors.push(t('agents.knowledge_file_too_large', { name: file.name }));
+        continue;
+      }
+      try {
+        const content = await readOneFileAsText(file);
+        merged.set(file.name, { name: file.name, content });
+      } catch {
+        errors.push(t('agents.knowledge_read_failed', { name: file.name }));
+      }
+    }
+
+    if (errors.length) {
+      void appAlert({ message: errors.join('\n') });
+    }
+    if (merged.size > 0) {
+      setActiveAgentKnowledgeFiles(Array.from(merged.values()));
+    }
+  };
+
+  const removeKnowledgeFile = (fileName: string) => {
+    if (!activeAgent) return;
+    const next = (activeAgent.knowledgeMarkdownFiles ?? []).filter((f) => f.name !== fileName);
+    setActiveAgentKnowledgeFiles(next.length ? next : undefined);
+    if (editingKnowledgeFile === fileName) {
+      setEditingKnowledgeFile(null);
+    }
+  };
+
+  const updateKnowledgeFileContent = (fileName: string, content: string) => {
+    if (!activeAgent) return;
+    const next = (activeAgent.knowledgeMarkdownFiles ?? []).map((f) =>
+      f.name === fileName ? { ...f, content } : f,
+    );
+    setActiveAgentKnowledgeFiles(next);
+  };
+
+  const openPromptDocPicker = () => promptDocInputRef.current?.click();
+
+  const handlePromptFromDocument = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file || !activeAgent || !activeAgentId) return;
+    if (!isPersonaPromptDocument(file)) {
+      void appAlert({ message: t('agents.prompt_from_doc_not_supported') });
+      return;
+    }
+    if (file.size > PERSONA_PROMPT_DOC_MAX_BYTES) {
+      void appAlert({ message: t('agents.prompt_from_doc_too_large') });
+      return;
+    }
+    if (displayPrompt.trim()) {
+      const ok = await confirm({
+        message: t('agents.prompt_from_doc_overwrite'),
+        confirmLabel: t('dialog.confirm'),
+        cancelLabel: t('dialog.cancel'),
+      });
+      if (!ok) return;
+    }
+
+    setIsImportingFromDoc(true);
+    try {
+      const extracted = truncateDocumentText(await extractDocumentText(file));
+      if (!extracted) {
+        void appAlert({ message: t('agents.prompt_from_doc_empty') });
+        return;
+      }
+      const newPrompt = await callAI({
+        config: aiConfig,
+        systemInstruction: getLocaleDirective(),
+        prompt: t('agents.studio.from_document_user', {
+          name: resolveAgentLocalizedName(activeAgent),
+          role: resolveAgentLocalizedRole(activeAgent),
+          filename: file.name,
+          document: extracted,
+        }),
+        temperature: activeAgent.temperature ?? 0.7,
+        topP: activeAgent.creativity ?? 0.4,
+      });
+      const drafted = (newPrompt ?? '')
+        .trim()
+        .replace(/^(New Enhanced Prompt:|新增强提示词[:：])\s*/i, '')
+        .trim();
+      if (!drafted) {
+        void appAlert({ message: t('agents.prompt_from_doc_failed') });
+        return;
+      }
+      promptField.replace(drafted);
+    } catch (error) {
+      const msg = formatAiError(error);
+      console.error('[Scribe AI] prompt from document failed', msg);
+      void appAlert({
+        message: `${t('agents.prompt_from_doc_failed')}\n\n${msg}`,
+      });
+    } finally {
+      setIsImportingFromDoc(false);
+    }
+  };
+
+  const handleEnhancePrompt = async () => {
+    if (!activeAgent || !displayPrompt.trim()) return;
+    setIsEnhancing(true);
+    try {
+      const newPrompt = await callAI({
+        config: aiConfig,
+        systemInstruction: getLocaleDirective(),
+        prompt: t('agents.studio.enhance_user', {
+          name: resolveAgentLocalizedName(activeAgent),
+          role: resolveAgentLocalizedRole(activeAgent),
+          prompt: displayPrompt,
+        }),
+        temperature: activeAgent.temperature ?? 0.7,
+        topP: activeAgent.creativity ?? 0.4,
+      });
+
+      let enhanced = newPrompt.trim();
+      enhanced = enhanced.replace(/^(New Enhanced Prompt:|新增强提示词[:：])\s*/i, '').trim();
+      promptField.replace(enhanced);
+    } catch (error) {
+      const msg = formatAiError(error);
+      console.error('[Scribe AI] enhance prompt failed', msg);
+      void appAlert({
+        message: `增强提示词失败\n\n${msg}\n\nF12 → Console 查看 [Scribe AI] 日志。`,
+      });
+    } finally {
+      setIsEnhancing(false);
+    }
+  };
+
+  const handleSendMessage = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!sandboxInput.trim() || isSandboxLoading || !activeAgent) return;
+
+    const scopedAgentId = activeAgent.id;
+    const userMsg = sandboxInput.trim();
+
+    const afterUser: SandboxChatMessage[] = [...sandboxMessages, { role: 'user', text: userMsg }];
+    setSandboxMessages(afterUser);
+    setSandboxInput('');
+    setIsSandboxLoading(true);
+
+    try {
+      await persistSandboxThread(scopedAgentId, afterUser);
+    } catch (err) {
+      console.error('[Scribe AI] sandbox persist (user msg) failed', err);
+    }
+
+    const streamingModel: SandboxChatMessage = { role: 'model', text: '' };
+    if (sandboxUiAgentRef.current === scopedAgentId) {
+      setSandboxMessages([...afterUser, streamingModel]);
+    }
+
+    try {
+      const responseText = await callAI({
+        config: aiConfig,
+        prompt: userMsg,
+        systemInstruction: buildAgentSystemInstruction(activeAgent, {
+          fallbackPrompt: t('agents.studio.fallback_assistant'),
+        }),
+        temperature: activeAgent.temperature ?? 0.7,
+        topP: activeAgent.creativity ?? 0.4,
+        onStreamChunk: (acc) => {
+          if (sandboxUiAgentRef.current !== scopedAgentId) return;
+          setSandboxMessages((prev) => {
+            const base = prev.length > 0 && prev[prev.length - 1]?.role === 'model' ? prev.slice(0, -1) : prev;
+            return [...base, { role: 'model', text: acc }];
+          });
+        },
+      });
+      const afterModel: SandboxChatMessage[] = [...afterUser, { role: 'model', text: responseText }];
+      if (sandboxUiAgentRef.current === scopedAgentId) {
+        setSandboxMessages(afterModel);
+      }
+      try {
+        await persistSandboxThread(scopedAgentId, afterModel);
+      } catch (err) {
+        console.error('[Scribe AI] sandbox persist (assistant) failed', err);
+      }
+    } catch (error) {
+      const msg = formatAiError(error);
+      console.error('[Scribe AI] sandbox chat failed', msg);
+      const errLine: SandboxChatMessage = {
+        role: 'model',
+        text: `Error: ${msg}（详见 Console [Scribe AI]）`,
+      };
+      const afterErr: SandboxChatMessage[] = [...afterUser, errLine];
+      if (sandboxUiAgentRef.current === scopedAgentId) {
+        setSandboxMessages(afterErr);
+      }
+      try {
+        await persistSandboxThread(scopedAgentId, afterErr);
+      } catch (err) {
+        console.error('[Scribe AI] sandbox persist (error bubble) failed', err);
+      }
+    } finally {
+      if (sandboxUiAgentRef.current === scopedAgentId) {
+        setIsSandboxLoading(false);
+      }
+    }
+  };
+
+  const handleClearSandboxChat = async () => {
+    if (!activeAgentId || sandboxMessages.length === 0) return;
+    const ok = await confirm({ message: t('agents.sandbox_clear_confirm'), variant: 'danger' });
+    if (!ok) return;
+    setSandboxMessages([]);
+    try {
+      await db.agentSandboxThreads.delete(activeAgentId);
+    } catch (err) {
+      console.error('[Scribe AI] sandbox clear failed', err);
+    }
+  };
+
+  const handleDelete = async (id: string) => {
+    const ok = await confirm({ message: t('agents.delete_confirm'), variant: 'danger' });
+    if (!ok) return;
+    const newConfigs = agentConfigs.filter((a) => a.id !== id);
+    await setAgentConfigs(newConfigs);
+    try {
+      await db.agentSandboxThreads.delete(id);
+    } catch (err) {
+      console.error('[Scribe AI] sandbox thread delete failed', err);
+    }
+    if (activeAgentId === id) {
+      setActiveAgentId(newConfigs[0]?.id || null);
+    }
+  };
+
+  const listedAgents = dedupeAgentsForList(agentConfigs);
+  const filteredAgents = listedAgents.filter((a) =>
     resolveAgentLocalizedName(a).toLowerCase().includes(searchQuery.toLowerCase())
   );
 
   return (
-    <div className="flex-1 flex min-h-0 bg-[#FAF9F6] overflow-hidden relative">
+    <div className="flex-1 flex min-h-0 bg-[#FAF9F6] overflow-hidden">
       {/* Pane 1: Persona List */}
-      <section className="w-64 shrink-0 flex flex-col min-h-0 border-r border-[#E6E4DF] bg-white z-10">
+      <section className="w-56 compact:w-48 shrink-0 flex flex-col min-h-0 border-r border-[#E6E4DF] bg-white z-10">
         <div className="p-4 border-b border-[#E6E4DF] flex items-center gap-2">
           <div className="relative flex-1 min-w-0">
             <input
@@ -347,6 +910,7 @@ export function AgentsStudio({ agentConfigs, setAgentConfigs, aiConfig, callAI }
                   <div className="w-10 h-10 rounded-lg bg-[#FFF7ED] border border-[#E6E4DF] flex items-center justify-center overflow-hidden">
                     <AgentIcon
                       agentId={agent.id}
+                      coverUrl={agent.coverImageUrl}
                       className="w-full h-full"
                       imageClassName="scale-[1.32]"
                       fallbackClassName={activeAgentId === agent.id ? 'text-[#C2410C]' : 'text-[#8c8a84]'}
@@ -366,26 +930,87 @@ export function AgentsStudio({ agentConfigs, setAgentConfigs, aiConfig, callAI }
       <section className="flex-1 flex flex-col min-h-0 overflow-y-auto relative">
         {activeAgent ? (
           <>
-            <div className="sticky top-0 bg-[#FAF9F6]/80 backdrop-blur-md px-10 py-6 border-b border-[#E6E4DF] flex flex-col sm:flex-row justify-between items-start sm:items-end z-10 gap-4">
-              <div className="flex items-center gap-3 min-w-0">
-                <div className="w-12 h-12 rounded-xl bg-[#FFF7ED] border border-[#E6E4DF] flex items-center justify-center shrink-0 shadow-sm overflow-hidden">
+            <div className="sticky top-0 bg-[#FAF9F6]/80 backdrop-blur-md px-10 py-6 border-b border-[#E6E4DF] flex flex-wrap items-end justify-between gap-x-4 gap-y-3 z-10">
+              <div className="inline-flex items-center gap-2 w-fit max-w-full min-w-0">
+                <input
+                  ref={coverFileInputRef}
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  data-testid="agent-studio-cover-input"
+                  onChange={(e) => void handleCoverFileChange(e)}
+                />
+                <button
+                  type="button"
+                  data-testid="agent-studio-upload-cover"
+                  onClick={openCoverFilePicker}
+                  title={t('agents.card_cover_upload')}
+                  aria-label={t('agents.card_cover_upload')}
+                  className="group relative w-12 h-12 rounded-xl bg-[#FFF7ED] border border-[#E6E4DF] flex items-center justify-center shrink-0 shadow-sm overflow-hidden hover:border-[#C2410C]/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#C2410C]/35 transition-colors"
+                >
                   <AgentIcon
                     agentId={activeAgent.id}
+                    coverUrl={activeAgent.coverImageUrl}
                     className="w-full h-full"
                     imageClassName="scale-[1.32]"
                     fallbackClassName="text-[#C2410C]"
                   />
-                </div>
-                <input
-                  type="text"
-                  className="font-serif text-3xl font-bold text-[#1a1a1a] bg-transparent border-0 border-b border-transparent hover:border-[#E6E4DF] focus:border-[#C2410C] focus:ring-0 outline-none w-full max-w-2xl py-1 px-0 transition-colors placeholder:text-[#8c8a84] placeholder:font-normal"
-                  value={displayName}
-                  onChange={(e) => handleUpdateActiveAgent('name', e.target.value)}
+                  <span className="absolute inset-0 z-[5] flex items-center justify-center bg-black/35 opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100 transition-opacity">
+                    <Image className="w-5 h-5 text-white" aria-hidden />
+                  </span>
+                  {generatingCoverAgentId === activeAgent.id ? (
+                    <div className="absolute inset-0 z-10 flex items-center justify-center bg-[#FBF5EE]/70">
+                      <Loader2 className="w-5 h-5 text-[#C2410C] animate-spin" aria-hidden />
+                    </div>
+                  ) : null}
+                </button>
+                <PersonaNameField
                   placeholder={t('agents.new_persona')}
                   aria-label={t('agents.persona_name')}
+                  {...nameField.bind}
                 />
+                <input
+                  ref={promptDocInputRef}
+                  type="file"
+                  accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                  className="hidden"
+                  data-testid="agent-studio-prompt-doc-input"
+                  onChange={(e) => void handlePromptFromDocument(e)}
+                />
+                <button
+                  type="button"
+                  data-testid="agent-studio-prompt-from-doc"
+                  onClick={openPromptDocPicker}
+                  disabled={isImportingFromDoc || isEnhancing}
+                  title={t('agents.prompt_from_doc_hint')}
+                  aria-label={t('agents.prompt_from_doc')}
+                  className="shrink-0 flex items-center gap-1.5 px-3 py-2 rounded-lg font-sans font-bold text-sm bg-white border border-[#E6E4DF] text-[#5a5a54] hover:text-[#C2410C] hover:border-[#C2410C]/30 hover:bg-[#F4F1ED] transition-colors disabled:opacity-50"
+                >
+                  {isImportingFromDoc ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <FileUp className="w-4 h-4" />
+                  )}
+                  {isImportingFromDoc ? t('agents.prompt_from_doc_working') : t('agents.prompt_from_doc')}
+                </button>
+                <button
+                  type="button"
+                  data-testid="agent-studio-generate-cover"
+                  onClick={() => onGenerateCover?.(activeAgent.id)}
+                  disabled={!onGenerateCover || generatingCoverAgentId !== null}
+                  className="shrink-0 flex items-center gap-1.5 px-3 py-2 rounded-lg font-sans font-bold text-sm bg-white border border-[#E6E4DF] text-[#5a5a54] hover:text-[#C2410C] hover:border-[#C2410C]/30 hover:bg-[#F4F1ED] transition-colors disabled:opacity-50"
+                >
+                  {generatingCoverAgentId === activeAgent.id ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Image className="w-4 h-4" />
+                  )}
+                  {activeAgent.coverImageUrl
+                    ? t('agents.card_cover_regenerate')
+                    : t('agents.card_cover_generate')}
+                </button>
               </div>
-              <div className="flex gap-3">
+              <div className="flex gap-3 shrink-0">
                 <button 
                   onClick={() => setIsSandboxOpen(!isSandboxOpen)}
                   className={`flex items-center gap-2 px-4 py-2 rounded-lg font-sans font-bold transition-all text-sm shadow-sm ${isSandboxOpen ? 'bg-[#C2410C] text-white shadow-[#C2410C]/20' : 'bg-white border border-[#E6E4DF] text-[#5a5a54] hover:bg-[#F4F1ED]'}`}
@@ -418,7 +1043,7 @@ export function AgentsStudio({ agentConfigs, setAgentConfigs, aiConfig, callAI }
                         <span className={`${(displayPrompt.length || 0) > 2000 ? 'text-red-500' : 'text-[#5a5a54]'} text-xs font-mono`}>{displayPrompt.length} / 2000</span>
                         <button
                           onClick={handleEnhancePrompt}
-                          disabled={isEnhancing || !displayPrompt.trim()}
+                          disabled={isEnhancing || isImportingFromDoc || !displayPrompt.trim()}
                           className="flex items-center gap-1.5 text-xs font-bold text-[#C2410C] hover:text-[#9a3412] px-2 py-1 bg-[#C2410C]/5 rounded border border-[#C2410C]/20 transition-all disabled:opacity-50"
                         >
                           {isEnhancing ? <Loader2 className="w-3.5 h-3.5 animate-spin"/> : <Wand2 className="w-3.5 h-3.5" />}
@@ -427,11 +1052,11 @@ export function AgentsStudio({ agentConfigs, setAgentConfigs, aiConfig, callAI }
                       </div>
                     </div>
                     <textarea
+                      data-testid="agent-studio-system-prompt"
                       className={`w-full p-4 font-mono text-base leading-relaxed text-[#1a1a1a] bg-white border ${displayPrompt.length > 2000 ? 'border-red-300 focus:border-red-500 focus:ring-red-500' : 'border-[#E6E4DF] focus:border-[#C2410C] focus:ring-[#C2410C]'} rounded-lg outline-none transition-colors overflow-y-auto resize-y min-h-[180px]`}
                       style={{ height: Math.max(180, (displayPrompt.split('\n').length || 1) * 26 + 40) + 'px' }}
-                      value={displayPrompt}
-                      onChange={e => handleUpdateActiveAgent('prompt', e.target.value)}
-                      placeholder="You are a specialized agent. Your goal is to..."
+                      placeholder={t('agents.prompt_placeholder')}
+                      {...promptField.bind}
                     />
                   </div>
                 </div>
@@ -467,32 +1092,56 @@ export function AgentsStudio({ agentConfigs, setAgentConfigs, aiConfig, callAI }
                         {(activeAgent.knowledgeMarkdownFiles ?? []).length === 0 ? (
                           <p className="text-sm text-[#5a5a54] font-sans py-2">{t('agents.knowledge_empty')}</p>
                         ) : (
-                          (activeAgent.knowledgeMarkdownFiles ?? []).map((f) => (
-                            <div
-                              key={f.name}
-                              className="flex items-center justify-between gap-2 p-3 bg-[#F4F1ED] rounded-lg border border-[#E6E4DF]"
-                            >
-                              <div className="flex items-center gap-3 min-w-0">
-                                <FileText className="w-4 h-4 text-[#8c8a84] shrink-0" />
-                                <span className="text-sm font-sans font-medium text-[#1a1a1a] truncate" title={f.name}>
-                                  {f.name}
-                                </span>
+                          (activeAgent.knowledgeMarkdownFiles ?? []).map((f) => {
+                            const isEditing = editingKnowledgeFile === f.name;
+                            return (
+                              <div
+                                key={f.name}
+                                ref={isEditing ? knowledgeEditorRef : undefined}
+                                className={`rounded-lg border overflow-hidden transition-colors ${
+                                  isEditing
+                                    ? 'border-[#C2410C]/35 bg-white shadow-sm'
+                                    : 'border-[#E6E4DF] bg-[#F4F1ED]'
+                                }`}
+                              >
+                                <div className="flex items-center justify-between gap-2 p-3">
+                                  <button
+                                    type="button"
+                                    onClick={() => setEditingKnowledgeFile(isEditing ? null : f.name)}
+                                    className="flex items-center gap-3 min-w-0 flex-1 text-left hover:text-[#C2410C] transition-colors"
+                                    aria-expanded={isEditing}
+                                    aria-label={t('agents.knowledge_edit_file', { name: f.name })}
+                                  >
+                                    <FileText className="w-4 h-4 text-[#8c8a84] shrink-0" />
+                                    <span className="text-sm font-sans font-medium text-[#1a1a1a] truncate">
+                                      {f.name}
+                                    </span>
+                                  </button>
+                                  <div className="flex items-center gap-2 shrink-0">
+                                    <span className="text-xs text-[#5a5a54] font-mono">
+                                      {t('agents.knowledge_chars', { count: f.content.length })}
+                                    </span>
+                                    <button
+                                      type="button"
+                                      onClick={() => removeKnowledgeFile(f.name)}
+                                      className="p-1.5 rounded-md text-[#8c8a84] hover:text-[#ef4444] hover:bg-[#fee2e2] transition-colors"
+                                      aria-label={t('agents.knowledge_remove_file', { name: f.name })}
+                                    >
+                                      <Trash2 className="w-4 h-4" />
+                                    </button>
+                                  </div>
+                                </div>
+                                {isEditing ? (
+                                  <textarea
+                                    className="w-full min-h-[12rem] max-h-[28rem] p-3 font-mono text-sm leading-relaxed text-[#1a1a1a] bg-white border-0 border-t border-[#E6E4DF] focus:ring-0 focus:outline-none resize-y"
+                                    value={f.content}
+                                    onChange={(e) => updateKnowledgeFileContent(f.name, e.target.value)}
+                                    aria-label={t('agents.knowledge_edit_file', { name: f.name })}
+                                  />
+                                ) : null}
                               </div>
-                              <div className="flex items-center gap-2 shrink-0">
-                                <span className="text-xs text-[#5a5a54] font-mono">
-                                  {t('agents.knowledge_chars', { count: f.content.length })}
-                                </span>
-                                <button
-                                  type="button"
-                                  onClick={() => removeKnowledgeFile(f.name)}
-                                  className="p-1.5 rounded-md text-[#8c8a84] hover:text-[#ef4444] hover:bg-[#fee2e2] transition-colors"
-                                  aria-label={t('agents.knowledge_remove_file', { name: f.name })}
-                                >
-                                  <Trash2 className="w-4 h-4" />
-                                </button>
-                              </div>
-                            </div>
-                          ))
+                            );
+                          })
                         )}
                       </div>
                       <div className="pt-4 border-t border-[#E6E4DF] flex items-center justify-center">
@@ -548,7 +1197,7 @@ export function AgentsStudio({ agentConfigs, setAgentConfigs, aiConfig, callAI }
 
             {/* Test Sandbox Panel */}
             {isSandboxOpen && (
-              <div className="absolute inset-y-0 right-0 z-20 flex w-[min(100vw,400px)] min-h-0 flex-col border-l border-[#E6E4DF] bg-[#FAF9F6] shadow-[-12px_0_32px_rgba(0,0,0,0.06)] animate-in slide-in-from-right duration-300">
+              <div className="absolute inset-y-0 right-0 z-20 flex w-[min(100vw,400px)] compact:w-[min(100vw,320px)] min-h-0 flex-col border-l border-[#E6E4DF] bg-[#FAF9F6] shadow-[-12px_0_32px_rgba(0,0,0,0.06)] animate-in slide-in-from-right duration-300">
                 <div className="flex shrink-0 items-center justify-between gap-2 border-b border-[#E6E4DF] bg-[#F4F1ED]/50 px-4 py-3">
                   <div className="flex min-w-0 items-center gap-2">
                     <MessageSquare className="h-4 w-4 shrink-0 text-[#C2410C]" />

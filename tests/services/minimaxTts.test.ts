@@ -103,7 +103,7 @@ describe('synthesizeMinimaxSpeech — request shape', () => {
   });
 
   it('sets the documented body shape (model, text, stream:false, output_format:hex, voice_setting, audio_setting, language_boost)', async () => {
-    await synthesizeMinimaxSpeech({ apiKey: 'k', text: 'hi' });
+    await synthesizeMinimaxSpeech({ apiKey: 'k', text: 'hi', language: 'zh' });
     const body = JSON.parse(fetchMock.mock.calls[0][1].body);
     expect(body.model).toBe(MINIMAX_DEFAULT_TTS_MODEL);
     expect(body.text).toBe('hi');
@@ -143,7 +143,7 @@ describe('synthesizeMinimaxSpeech — request shape', () => {
   });
 
   it('uses the default voice when voiceId is not provided', async () => {
-    await synthesizeMinimaxSpeech({ apiKey: 'k', text: 'hi' });
+    await synthesizeMinimaxSpeech({ apiKey: 'k', text: 'hi', language: 'zh' });
     const body = JSON.parse(fetchMock.mock.calls[0][1].body);
     expect(body.voice_setting.voice_id).toBe(MINIMAX_DEFAULT_VOICE_ID);
   });
@@ -152,6 +152,13 @@ describe('synthesizeMinimaxSpeech — request shape', () => {
     await synthesizeMinimaxSpeech({ apiKey: 'k', text: 'hi', voiceId: 'my-voice' });
     const body = JSON.parse(fetchMock.mock.calls[0][1].body);
     expect(body.voice_setting.voice_id).toBe('my-voice');
+  });
+
+  it('switches to English_CalmWoman and English boost when language is en', async () => {
+    await synthesizeMinimaxSpeech({ apiKey: 'k', text: 'hello', language: 'en' });
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.voice_setting.voice_id).toBe('English_CalmWoman');
+    expect(body.language_boost).toBe('English');
   });
 
   it('forwards AbortSignal to fetch', async () => {

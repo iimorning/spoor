@@ -61,6 +61,31 @@ describe('processFileToNode', () => {
     expect(result.fileType).toBe('video/mp4');
   });
 
+  it('processes wav files as playable audio cards', async () => {
+    const file = createFile('clip.wav', 'audio/wav', 'RIFF');
+    const result = await processFileToNode(file);
+    expect(result.type).toBe('video');
+    expect(result.content).toContain('data:audio/wav');
+    expect(result.fileType).toBe('audio/wav');
+    expect(result.description).toBe('clip.wav');
+  });
+
+  it('processes wav files with an empty MIME type from the OS', async () => {
+    const file = createFile('voice.wav', '', 'RIFF');
+    const result = await processFileToNode(file);
+    expect(result.type).toBe('video');
+    expect(result.content).toContain('data:audio/wav');
+    expect(result.fileType).toBe('audio/wav');
+  });
+
+  it('processes mp3 files as playable audio cards', async () => {
+    const file = createFile('track.mp3', 'audio/mpeg', 'ID3');
+    const result = await processFileToNode(file);
+    expect(result.type).toBe('video');
+    expect(result.content).toContain('data:audio/mpeg');
+    expect(result.fileType).toBe('audio/mpeg');
+  });
+
   it('processes .docx files by name', async () => {
     const file = createFile('report.docx', 'application/octet-stream', new ArrayBuffer(100));
     const result = await processFileToNode(file);
@@ -68,6 +93,8 @@ describe('processFileToNode', () => {
     expect(result.content).toBe('<h1>Test Doc</h1><p>Hello World</p>');
     expect(result.description).toBe('report.docx');
     expect(result.fileType).toBe('docx');
+    expect(result.width).toBe(380);
+    expect(result.height).toBe(520);
   });
 
   it('processes .docx files by mime type', async () => {

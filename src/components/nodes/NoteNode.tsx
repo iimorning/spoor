@@ -10,32 +10,37 @@ export function NoteNode({
   webSearchSourceCount,
   webSearchSourcesCollapsed,
   onToggleWebSearchSources,
+  notePileCount,
+  notePileCollapsed,
+  onToggleNotePile,
 }: NoteNodeProps) {
   const layout = node.layout ?? 0;
   const stackProps = {
     webSearchSourceCount,
     webSearchSourcesCollapsed,
     onToggleWebSearchSources,
+    notePileCount,
+    notePileCollapsed,
+    onToggleNotePile,
   };
 
-  if (layout === 4) {
-    return (
+  const body =
+    layout === 4 ? (
       <NoteLayoutReceipt
         node={node}
         editingNodeId={editingNodeId}
         setEditingNodeId={setEditingNodeId}
         {...stackProps}
       />
+    ) : (
+      <NoteLayoutStandard
+        node={node}
+        editingNodeId={editingNodeId}
+        setEditingNodeId={setEditingNodeId}
+        layout={layout as NoteChromeLayout}
+        {...stackProps}
+      />
     );
-  }
 
-  return (
-    <NoteLayoutStandard
-      node={node}
-      editingNodeId={editingNodeId}
-      setEditingNodeId={setEditingNodeId}
-      layout={layout as NoteChromeLayout}
-      {...stackProps}
-    />
-  );
+  return body;
 }

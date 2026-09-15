@@ -1,0 +1,40 @@
+.ob-canvas-arrow {
+  overflow: visible;
+}
+
+.ob-canvas-arrow__path {
+  fill: none;
+  stroke: rgb(194 65 12 / 0.92);
+  stroke-width: 3.5;
+  stroke-linecap: round;
+  stroke-dasharray: 10 12;
+  animation: ob-canvas-arrow-dash 1s linear infinite;
+}
+
+.ob-canvas-arrow__head {
+  fill: rgb(194 65 12 / 0.98);
+  animation: ob-canvas-arrow-pulse 1s ease-in-out infinite;
+}
+
+@keyframes ob-canvas-arrow-dash {
+  to {
+    stroke-dashoffset: -44;
+  }
+}
+
+@keyframes ob-canvas-arrow-pulse {
+  0%,
+  100% {
+    opacity: 0.65;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ob-canvas-arrow__path,
+  .ob-canvas-arrow__head {
+    animation: none;
+  }
+}

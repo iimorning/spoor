@@ -45,3 +45,45 @@ export function formatAgentThreadDialogueHistory(chain: CanvasNode[]): string {
   }
   return parts.join('\n\n---\n\n');
 }
+
+/**
+ * Multi-agent discussion transcript.
+ * Auto turns store the speaker display name in `userTurn`; user interrupts store the user message there
+ * while `threadAgentConfigId` is the agent who replies in `content`.
+ */
+export function formatAgentDiscussionDialogueHistory(
+  chain: CanvasNode[],
+  nameByAgentConfigId: (agentConfigId: string) => string,
+): string {
+  if (chain.length === 0) return '';
+  const speakerLabelSet = new Set<string>();
+  for (const n of chain) {
+    const ids = n.threadDiscussionAgentIds;
+    if (!ids?.length) continue;
+    for (const id of ids) speakerLabelSet.add(nameByAgentConfigId(id));
+  }
+
+  const parts: string[] = [];
+  for (const n of chain) {
+    const content = (n.content ?? '').trim();
+    const ut = (n.userTurn ?? '').trim();
+    const speakerId = n.threadAgentConfigId;
+    const speakerName = speakerId ? nameByAgentConfigId(speakerId) : '';
+    const isAutoSpeakerLabel = Boolean(ut && speakerLabelSet.has(ut));
+
+    if (isAutoSpeakerLabel) {
+      if (content) parts.push(`${ut}:\n${content}`);
+      else if (ut) parts.push(`${ut}:`);
+      continue;
+    }
+
+    if (ut && content) {
+      parts.push(`User:\n${ut}\n\n${speakerName || 'Assistant'}:\n${content}`);
+    } else if (content) {
+      parts.push(`${speakerName || 'Assistant'}:\n${content}`);
+    } else if (ut) {
+      parts.push(`User:\n${ut}`);
+    }
+  }
+  return parts.join('\n\n---\n\n');
+}

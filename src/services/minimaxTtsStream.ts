@@ -1,7 +1,7 @@
-import {
-  MINIMAX_DEFAULT_TTS_MODEL,
-  MINIMAX_DEFAULT_VOICE_ID,
-} from '../constants/voiceWriting';
+import { MINIMAX_DEFAULT_TTS_MODEL } from '../constants/voiceWriting';
+import { resolveMinimaxTtsProfile } from '../utils/minimaxTtsVoice';
+import { isServerManaged, getFunctionsBase, resolveAccessToken, edgeFunctionHeaders, withEdgeFunctionWsParams } from '../lib/serverConfig';
+import { isTauriRuntime } from '../utils/isTauriRuntime';
 
 const ISSUE_PATH = '/api/minimax-tts/issue-token';
 const WS_PATH = '/api/minimax-tts';
@@ -19,6 +19,8 @@ export type MinimaxTtsStreamOptions = {
   apiKey: string;
   model?: string;
   voiceId?: string;
+  /** App UI language (`en` / `zh`); drives default voice and language_boost. */
+  language?: string;
   onSpeakingChange?: (speaking: boolean) => void;
   /** Fires when a sentence's audio actually starts playing; `null` when the queue goes idle. */
   onActiveTextChange?: (text: string | null) => void;
@@ -48,20 +50,57 @@ function pcm16leToFloat32(bytes: Uint8Array): Float32Array {
   return samples;
 }
 
-async function issueToken(apiKey: string): Promise<string> {
+async function issueToken(apiKey: string): Promise<{ token: string; wsUrl: string }> {
+  // Logged-in users with useServerKeys hit the Edge Function; everyone else uses
+  // the dev Vite plugin (which receives the user-supplied key in the body) or
+  // the in-process Tauri Rust proxy when running under Tauri's webview.
+  if (isServerManaged()) {
+    const base = getFunctionsBase();
+    const token = await resolveAccessToken();
+    if (!base || !token) {
+      throw new Error('服务器代理未配置 (VITE_SUPABASE_FUNCTIONS_URL 缺失或会话失效)。');
+    }
+    const res = await fetch(`${base}/ai-minimax-tts-token`, {
+      method: 'POST',
+      headers: edgeFunctionHeaders(token, { 'Content-Type': 'application/json' }),
+      body: JSON.stringify({}),
+    });
+    const body = (await res.json().catch(() => ({}))) as { token?: string; error?: string };
+    if (!res.ok || !body.token) throw new Error(body.error || `MiniMax TTS token HTTP ${res.status}`);
+    const wsBase = base.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:');
+    return {
+      token: body.token,
+      wsUrl: withEdgeFunctionWsParams(
+        `${wsBase}/ai-minimax-tts-ws?token=${encodeURIComponent(body.token)}`,
+      ),
+    };
+  }
+
+  if (isTauriRuntime()) {
+    const { invoke } = await import('@tauri-apps/api/core');
+    const port = await invoke<number | null>('voice_proxy_port');
+    if (port == null) {
+      throw new Error('Tauri 语音代理未启动 (Rust setup hook 还未绑定端口)。');
+    }
+    const res = await fetch(`http://127.0.0.1:${port}/minimax-tts/issue-token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ apiKey }),
+    });
+    const body = (await res.json().catch(() => ({}))) as { token?: string; error?: string };
+    if (!res.ok || !body.token) throw new Error(body.error || `MiniMax TTS token HTTP ${res.status}`);
+    return { token: body.token, wsUrl: `ws://127.0.0.1:${port}/minimax-tts/ws?token=${encodeURIComponent(body.token)}` };
+  }
+
   const res = await fetch(ISSUE_PATH, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ apiKey }),
   });
-  const body = await res.json().catch(() => ({})) as { token?: string; error?: string };
+  const body = (await res.json().catch(() => ({}))) as { token?: string; error?: string };
   if (!res.ok || !body.token) throw new Error(body.error || `MiniMax TTS token HTTP ${res.status}`);
-  return body.token;
-}
-
-function proxyUrl(token: string): string {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${protocol}//${window.location.host}${WS_PATH}?token=${encodeURIComponent(token)}`;
+  return { token: body.token, wsUrl: `${protocol}//${window.location.host}${WS_PATH}?token=${encodeURIComponent(body.token)}` };
 }
 
 /**
@@ -71,11 +110,21 @@ function proxyUrl(token: string): string {
  */
 export async function openMinimaxTtsStream(options: MinimaxTtsStreamOptions): Promise<MinimaxTtsStream> {
   const apiKey = options.apiKey.trim();
-  if (!apiKey) throw new Error('Missing MiniMax API key');
-  const token = await issueToken(apiKey);
-  const ws = new WebSocket(proxyUrl(token));
+  // Server-managed users don't need a local apiKey — the Edge Function reads
+  // it from developer_secrets. Only non-server callers fail on empty key.
+  if (!isServerManaged() && !apiKey) throw new Error('Missing MiniMax API key');
+  const { voiceId, languageBoost } = resolveMinimaxTtsProfile({
+    customVoiceId: options.voiceId,
+    language: options.language,
+  });
+  const issued = await issueToken(apiKey);
+  const ws = new WebSocket(issued.wsUrl);
 
   let closed = false;
+  /** User stop() or a real mid-stream failure. Socket teardown after a finished
+   *  task must not set this — synthesis ends before audible playback, and the
+   *  playhead still has to walk the remaining buffers. */
+  let playbackAborted = false;
   let started = false;
   let finishing = false;
   let finishSent = false;
@@ -115,13 +164,25 @@ export async function openMinimaxTtsStream(options: MinimaxTtsStreamOptions): Pr
   const armPlayheadAt = (text: string, audioTime: number, ctx: AudioContext) => {
     const delayMs = Math.max(0, (audioTime - ctx.currentTime) * 1000);
     const timer = setTimeout(() => {
-      if (!closed) setActiveText(text);
+      if (!playbackAborted) setActiveText(text);
     }, delayMs);
     playheadTimers.push(timer);
   };
 
   const fail = (message: string) => {
-    if (!closed) options.onError?.(message);
+    if (closed) return;
+    closed = true;
+    playbackAborted = true;
+    options.onError?.(message);
+    clearPlayheadTimers();
+    setSpeaking(false);
+    setActiveText(null);
+    while (idleWaiters.length) idleWaiters.shift()?.();
+    try {
+      if (ws.readyState === WebSocket.OPEN) ws.close();
+    } catch {
+      /* ignore */
+    }
   };
 
   const isIdle = () => finishSent && !taskInFlight && texts.length === 0 && activeSources === 0;
@@ -160,7 +221,7 @@ export async function openMinimaxTtsStream(options: MinimaxTtsStreamOptions): Pr
     audioChain = audioChain
       .then(async () => {
         const bytes = hexToBytes(hex);
-        if (!bytes.length || closed) {
+        if (!bytes.length || playbackAborted) {
           activeSources -= 1;
           settleIdle();
           return;
@@ -193,16 +254,35 @@ export async function openMinimaxTtsStream(options: MinimaxTtsStreamOptions): Pr
   };
 
   ws.onopen = () => {
+    if (closed) {
+      try {
+        if (ws.readyState === WebSocket.OPEN) ws.close();
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
     // Official protocol waits for connected_success before task_start.
   };
   ws.onmessage = (event) => {
+    let raw = '';
+    if (typeof event.data === 'string') {
+      raw = event.data;
+    } else if (event.data instanceof ArrayBuffer) {
+      raw = new TextDecoder().decode(event.data);
+    } else if (ArrayBuffer.isView(event.data)) {
+      raw = new TextDecoder().decode(event.data);
+    } else {
+      raw = String(event.data);
+    }
     let payload: MinimaxEvent;
     try {
-      payload = JSON.parse(String(event.data)) as MinimaxEvent;
+      payload = JSON.parse(raw) as MinimaxEvent;
     } catch {
       fail('MiniMax TTS returned invalid WebSocket JSON');
       return;
     }
+    if ((payload as { edge?: string }).edge) return;
     const code = payload.base_resp?.status_code;
     if ((typeof code === 'number' && code !== 0) || payload.event === 'error') {
       fail(payload.error || payload.base_resp?.status_msg || `MiniMax TTS error ${code ?? 'unknown'}`);
@@ -212,9 +292,9 @@ export async function openMinimaxTtsStream(options: MinimaxTtsStreamOptions): Pr
       send({
         event: 'task_start',
         model: options.model?.trim() || MINIMAX_DEFAULT_TTS_MODEL,
-        language_boost: 'Chinese',
+        language_boost: languageBoost,
         voice_setting: {
-          voice_id: options.voiceId?.trim() || MINIMAX_DEFAULT_VOICE_ID,
+          voice_id: voiceId,
           speed: 1,
           vol: 1,
           pitch: 0,
@@ -249,9 +329,16 @@ export async function openMinimaxTtsStream(options: MinimaxTtsStreamOptions): Pr
       settleIdle();
     }
   };
-  ws.onerror = () => fail('MiniMax TTS WebSocket error');
+  ws.onerror = () => {
+    // Chrome reports "Close received after close" when the server tears down a
+    // socket we already finished. That is not a playback failure.
+    if (closed || finishSent || playbackAborted) return;
+    fail('MiniMax TTS WebSocket error');
+  };
   ws.onclose = () => {
     if (!closed && !finishSent) fail('MiniMax TTS WebSocket closed unexpectedly');
+    // Leave `closed` alone after a successful finish: remaining PCM and
+    // playhead timers must keep running until audible playback ends.
     settleIdle();
   };
 
@@ -274,11 +361,14 @@ export async function openMinimaxTtsStream(options: MinimaxTtsStreamOptions): Pr
     stop() {
       if (closed) return;
       closed = true;
+      playbackAborted = true;
       texts.length = 0;
       currentTaskText = null;
       taskPlayheadArmed = false;
       clearPlayheadTimers();
-      try { ws.close(); } catch { /* ignore */ }
+      try {
+        if (ws.readyState === WebSocket.OPEN) ws.close();
+      } catch { /* ignore */ }
       try { void audioContext?.close(); } catch { /* ignore */ }
       activeSources = 0;
       setSpeaking(false);

@@ -7,6 +7,7 @@ import {
   searchCanvasNodes,
   type CanvasNodeSearchHit,
 } from '../utils/canvasNodeSearch';
+import { canvasOverlayProps, canvasOverlayScrollClassName } from '../utils/canvasOverlay';
 
 export interface CanvasNoteSearchProps {
   nodes: CanvasNode[];
@@ -62,15 +63,18 @@ export function CanvasNoteSearch({ nodes, onFocusNode }: CanvasNoteSearchProps) 
         <button
           type="button"
           onClick={() => setExpanded(true)}
-          className="bg-white text-[#1a1a1a] p-3 rounded-full shadow-md hover:bg-[#F4F1ED] transition-all flex items-center justify-center border border-[#E6E4DF] group"
+          className="bg-white text-[#1a1a1a] p-2 rounded-full shadow-md hover:bg-[#F4F1ED] hover:text-[#C2410C] focus-visible:text-[#C2410C] transition-all flex items-center justify-center border border-[#E6E4DF] group"
           title={t('canvas.search_notes')}
           aria-label={t('canvas.search_notes')}
         >
-          <Search className="w-5 h-5 transition-transform group-hover:scale-110" />
+          <Search className="w-4 h-4 transition-transform group-hover:scale-110" />
         </button>
       ) : (
-        <div className="flex items-center gap-2 h-11 pl-3 pr-3 rounded-full bg-white border border-[#E6E4DF] shadow-md focus-within:border-[#C2410C]/50 transition-all w-[200px] sm:w-[240px]">
-          <Search className="w-4 h-4 text-[#8c8a84] shrink-0" aria-hidden />
+        <div
+          {...canvasOverlayProps}
+          className="flex items-center gap-2 h-8 pl-2.5 pr-2.5 rounded-full bg-white border border-[#E6E4DF] shadow-md focus-within:border-[#C2410C]/50 transition-all w-[180px] sm:w-[220px]"
+        >
+          <Search className="w-3.5 h-3.5 text-[#8c8a84] shrink-0" aria-hidden />
           <input
             ref={inputRef}
             type="search"
@@ -111,14 +115,17 @@ export function CanvasNoteSearch({ nodes, onFocusNode }: CanvasNoteSearchProps) 
       )}
 
       {showResults && (
-        <div className="absolute top-full left-0 mt-2 w-[280px] sm:w-[320px] bg-white border border-[#E6E4DF] rounded-xl shadow-2xl p-1 z-50">
+        <div
+          {...canvasOverlayProps}
+          className="absolute top-full right-0 mt-2 w-[280px] sm:w-[320px] bg-white border border-[#E6E4DF] rounded-xl shadow-2xl p-1 z-50"
+        >
           <div className="px-3 py-2 text-[10px] font-bold text-[#8c8a84] uppercase tracking-wider font-mono border-b border-[#F4F1ED] mb-1">
             {t('canvas.search_notes')}
           </div>
           {hits.length === 0 ? (
             <div className="px-3 py-3 text-sm text-[#8c8a84]">{t('canvas.search_no_matches')}</div>
           ) : (
-            <div className="max-h-64 overflow-y-auto">
+            <div className={`max-h-64 overflow-y-auto ${canvasOverlayScrollClassName}`}>
               {hits.slice(0, 40).map((hit, index) => (
                 <button
                   key={hit.node.id}

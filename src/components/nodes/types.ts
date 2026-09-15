@@ -1,5 +1,4 @@
 import type { AgentConfig, CanvasNode } from '../../db';
-import type { AIConfig } from '../AISettingsModal';
 
 export interface NodeContentProps {
   node: CanvasNode;
@@ -12,6 +11,10 @@ export interface NoteNodeProps extends NodeContentProps {
   webSearchSourceCount?: number;
   webSearchSourcesCollapsed?: boolean;
   onToggleWebSearchSources?: () => void;
+  /** Free note pile (drag-to-stack). Shown on the top card. */
+  notePileCount?: number;
+  notePileCollapsed?: boolean;
+  onToggleNotePile?: () => void;
 }
 
 export interface ThemeNodeProps extends NodeContentProps {
@@ -24,23 +27,45 @@ export interface ThemeNodeProps extends NodeContentProps {
 export interface AgentNodeProps extends NodeContentProps {
   agentConfigs: AgentConfig[];
   isAnalyzing?: boolean;
-  onRunAnalysis?: () => void;
-  /** When true, Run analysis is disabled (e.g. another AI task is in progress). */
-  isAgentAnalysisActionDisabled?: boolean;
+  isGeneratingCover?: boolean;
 }
 
 export interface AiNodeProps extends NodeContentProps {
-  onSubmitFollowUp?: (message: string) => void;
-  isFollowUpLoading?: boolean;
-  isFollowUpDisabled?: boolean;
   /** While model output is streaming into this card, render plain text (not Markdown). */
   isContentStreaming?: boolean;
+  /** Live chain-of-thought shown before visible prose exists. */
+  streamingThought?: string;
   /** Linked web-search source cards exist beside this answer. */
   webSearchSourceCount?: number;
   webSearchSourcesCollapsed?: boolean;
   onToggleWebSearchSources?: () => void;
   /** Sentence currently being read aloud (voice mode TTS follow-along). */
   ttsHighlightSentence?: string | null;
+  /** True when voice mode is currently reading this reply aloud. */
+  isTtsSpeaking?: boolean;
+  /** Stop the in-progress TTS playback (drops the current queue). */
+  onStopTts?: () => void;
+  /** Create a plain text note from the selected reply (no AI). */
+  onExtractSelectionToCard?: (quote: string, sourceLabel?: string, sourceNodeId?: string) => void;
+  /** Quote selected reply text into the canvas Ask card. */
+  onAskAboutSelection?: (quote: string, sourceLabel?: string, sourceNodeId?: string) => void;
+  /** Continue a multi-agent discussion for another back-and-forth from this leaf. */
+  onContinueDiscussion?: () => void;
+  canContinueDiscussion?: boolean;
+  isContinueDiscussionDisabled?: boolean;
+  /** Re-run generation for a card stuck generating or in the `error` state. */
+  onRetry?: (nodeId: string) => void;
+}
+
+export interface ImageNodeProps extends NodeContentProps {
+  /** Re-run generation for a card stuck generating or in the `error` state. */
+  onRetry?: (nodeId: string) => void;
+}
+
+export interface VideoNodeProps extends NodeContentProps {
+  /** Transcribe in-card audio with Volc ASR into a linked note. */
+  onTranscribeAudio?: (nodeId: string) => void;
+  isTranscribingAudio?: boolean;
 }
 
 export interface BookNodeProps extends NodeContentProps {
@@ -51,14 +76,7 @@ export interface BookNodeProps extends NodeContentProps {
   /** Expand selected text into a theme hub + linked note cards. */
   onExpandSelection?: (quote: string, sourceLabel?: string) => void;
   isExpanding?: boolean;
-  /** AI config (provider + ASR/TTS keys) for the voice chat feature. */
-  aiConfig?: AIConfig;
-  /** Disable the voice chat button (e.g. when canvas voice mode is active). */
-  voiceChatDisabled?: boolean;
-  /** Live canvas transform — used to seed open-space placement for voice cards. */
-  canvasTransform?: { x: number; y: number; scale: number };
-  /** Other nodes on the canvas (obstacles for voice-card placement). */
-  canvasNodes?: CanvasNode[];
-  /** Pan the viewport to a newly spawned voice card. */
-  onFocusCanvasRect?: (rect: { x: number; y: number; width: number; height: number }) => void;
+  /** Open an immersive reader. Card chrome only. */
+  onOpenFullscreen?: (nodeId: string) => void;
+  layout?: 'card' | 'immersive';
 }

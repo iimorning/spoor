@@ -4,8 +4,29 @@
  */
 export const DOUBAO_ARK_BASE_URL = 'https://ark.cn-beijing.volces.com/api/v3';
 
-/** Ark inference endpoint ID (控制台「推理接入点」). Used as the `model` field in chat/completions. */
-export const DOUBAO_DEFAULT_MODEL = 'ep-20260218175314-xrnrn';
+/** Previous chat id — restore `DOUBAO_DEFAULT_MODEL` to this to switch back. */
+export const DOUBAO_PREVIOUS_MODEL = 'doubao-seed-2-1-turbo-260628';
+
+/**
+ * Ark `model` field for chat/completions. Seed-2.0-lite is the default so
+ * Ask / Agent turns start tokens quickly. Turbo / pro / mini / old `ep-`
+ * ids still stored in settings remap here.
+ */
+export const DOUBAO_DEFAULT_MODEL = 'doubao-seed-2-0-lite-260428';
+
+const DOUBAO_LEGACY_MODELS = new Set<string>([
+  DOUBAO_PREVIOUS_MODEL,
+  'ep-20260218175314-xrnrn',
+  'doubao-seed-2-0-mini-260428',
+  'doubao-seed-2-1-pro-260628',
+]);
+
+/** Map retired Doubao ids (turbo / mini / pro / previous `ep-`) onto lite. */
+export function resolveDoubaoChatModel(model?: string): string {
+  const raw = (model ?? '').trim();
+  if (!raw || DOUBAO_LEGACY_MODELS.has(raw)) return DOUBAO_DEFAULT_MODEL;
+  return raw;
+}
 
 /**
  * Optional hosted Doubao key baked in at build time (Vite: VITE_BUILTIN_DOUBAO_API_KEY).

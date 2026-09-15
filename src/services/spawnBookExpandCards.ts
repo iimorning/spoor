@@ -1,5 +1,10 @@
 import { db, type CanvasNode, type Edge } from '../db';
+import { isCanvasV2Enabled } from '../utils/canvasV2';
+import { stampNewCard } from '../utils/stampNewCard';
 import { parseLenientLlmJson } from '../utils/llmJson';
+import { normalizeDrawToolImages, type DrawToolSpec } from '../utils/drawTool';
+import { findPersonaForNodeInZones } from '../utils/workZoneGeometry';
+import { THEME_NODE_SIZE } from '../utils/canvas';
 
 export interface BookExpandBranch {
   title: string;
@@ -9,13 +14,14 @@ export interface BookExpandBranch {
 export interface BookExpandPlan {
   hub: string;
   branches: BookExpandBranch[];
+  images: DrawToolSpec[];
 }
 
 export const BOOK_EXPAND_HUB_OFFSET_X = 420;
 export const BOOK_EXPAND_CHILD_OFFSET_X = 340;
 export const BOOK_EXPAND_CHILD_GAP_Y = 200;
-export const BOOK_EXPAND_HUB_WIDTH = 280;
-export const BOOK_EXPAND_HUB_HEIGHT = 160;
+export const BOOK_EXPAND_HUB_WIDTH = THEME_NODE_SIZE.width;
+export const BOOK_EXPAND_HUB_HEIGHT = THEME_NODE_SIZE.height;
 export const BOOK_EXPAND_CHILD_WIDTH = 280;
 export const BOOK_EXPAND_CHILD_HEIGHT = 180;
 export const BOOK_EXPAND_STACK_STEP = 5;
@@ -64,7 +70,7 @@ export function normalizeBookExpandPlan(raw: unknown): BookExpandPlan | null {
     if (branches.length >= 6) break;
   }
   if (branches.length < 2) return null;
-  return { hub, branches };
+  return { hub, branches, images: normalizeDrawToolImages(obj) };
 }
 
 export function parseBookExpandPlan(text: string): BookExpandPlan | null {
@@ -75,12 +81,7 @@ export function parseBookExpandPlan(text: string): BookExpandPlan | null {
   }
 }
 
-export type BookVoiceImageSpec = {
-  /** Short label for the image card. */
-  title: string;
-  /** Text-to-image prompt (prefer concrete visual English/Chinese). */
-  prompt: string;
-};
+export type BookVoiceImageSpec = DrawToolSpec;
 
 export type BookVoiceReply = {
   /** Spoken reply for TTS (not the card JSON). */
@@ -91,33 +92,7 @@ export type BookVoiceReply = {
 };
 
 function normalizeBookVoiceImages(raw: unknown): BookVoiceImageSpec[] {
-  if (!raw || typeof raw !== 'object') return [];
-  const obj = raw as Record<string, unknown>;
-  const list = Array.isArray(obj.images)
-    ? obj.images
-    : Array.isArray(obj.illustrations)
-      ? obj.illustrations
-      : null;
-  if (!list) return [];
-  const out: BookVoiceImageSpec[] = [];
-  for (const item of list) {
-    if (!item || typeof item !== 'object') continue;
-    const row = item as Record<string, unknown>;
-    const prompt =
-      asNonEmptyString(row.prompt, 500) ||
-      asNonEmptyString(row.imagePrompt, 500) ||
-      asNonEmptyString(row.image_prompt, 500);
-    if (!prompt) continue;
-    const title =
-      asNonEmptyString(row.title, 60) ||
-      asNonEmptyString(row.name, 60) ||
-      asNonEmptyString(row.label, 60) ||
-      prompt.slice(0, 40);
-    if (!title) continue;
-    out.push({ title, prompt });
-    if (out.length >= 2) break;
-  }
-  return out;
+  return normalizeDrawToolImages(raw);
 }
 
 /**
@@ -142,21 +117,62 @@ export function bookExpandBranchIndex(node: CanvasNode): number {
   return 0;
 }
 
-/** Prefer tagged branches; if none tagged yet, use edged text/note children (legacy expand). */
+function isThemeStackableNote(node: Pick<CanvasNode, 'type'>): boolean {
+  return node.type === 'text' || node.type === 'note';
+}
+
+/**
+ * Notes belonging to a theme hub for stack/expand:
+ * - tagged with `bookExpandParentId`, and/or
+ * - reachable from the hub by walking only through note/text cards
+ *   (so Theme→Note→Note chains count; Ask/AI bridges do not pull side notes in).
+ */
 export function resolveBookExpandBranches(
   hubId: string,
   nodes: CanvasNode[],
   edges: Pick<Edge, 'from' | 'to'>[],
 ): CanvasNode[] {
-  const childIds = new Set(edges.filter((e) => e.from === hubId).map((e) => e.to));
-  const tagged = nodes
-    .filter((n) => n.bookExpandParentId === hubId && (n.type === 'text' || n.type === 'note'))
-    .sort((a, b) => bookExpandBranchIndex(a) - bookExpandBranchIndex(b));
-  if (tagged.length > 0) return tagged;
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const found = new Map<string, CanvasNode>();
 
-  return nodes
-    .filter((n) => childIds.has(n.id) && (n.type === 'text' || n.type === 'note'))
-    .sort((a, b) => a.y - b.y || a.x - b.x);
+  for (const n of nodes) {
+    if (n.bookExpandParentId === hubId && isThemeStackableNote(n)) {
+      found.set(n.id, n);
+    }
+  }
+
+  const adj = new Map<string, string[]>();
+  for (const e of edges) {
+    if (!adj.has(e.from)) adj.set(e.from, []);
+    if (!adj.has(e.to)) adj.set(e.to, []);
+    adj.get(e.from)!.push(e.to);
+    adj.get(e.to)!.push(e.from);
+  }
+
+  const visited = new Set<string>([hubId]);
+  const queue = [hubId];
+  while (queue.length > 0) {
+    const cur = queue.shift()!;
+    for (const other of adj.get(cur) ?? []) {
+      if (visited.has(other)) continue;
+      const n = byId.get(other);
+      if (!n || !isThemeStackableNote(n)) continue;
+      visited.add(other);
+      found.set(other, n);
+      queue.push(other);
+    }
+  }
+
+  return [...found.values()].sort((a, b) => {
+    const hasIndex =
+      typeof a.bookExpandIndex === 'number' || typeof b.bookExpandIndex === 'number';
+    if (hasIndex) {
+      const ia = bookExpandBranchIndex(a);
+      const ib = bookExpandBranchIndex(b);
+      if (ia !== ib) return ia - ib;
+    }
+    return a.y - b.y || a.x - b.x || a.id.localeCompare(b.id);
+  });
 }
 
 export function bookExpandBranchLaneY(
@@ -171,25 +187,104 @@ export function bookExpandBranchLaneY(
   return firstY + index * BOOK_EXPAND_CHILD_GAP_Y;
 }
 
-export function bookExpandBranchStackPos(
+/** Layout position used for distance / expand restore (not the stacked spot). */
+export function themeNoteLayoutPos(
+  note: CanvasNode,
   hub: { x: number; y: number },
-  index: number,
-  hubHeight = BOOK_EXPAND_HUB_HEIGHT,
 ): { x: number; y: number } {
-  const centerY = hub.y + Math.max(hubHeight, 1) / 2;
+  const ox = note.bookExpandExpandedOffsetX;
+  const oy = note.bookExpandExpandedOffsetY;
+  if (typeof ox === 'number' && typeof oy === 'number' && Number.isFinite(ox) && Number.isFinite(oy)) {
+    return { x: hub.x + ox, y: hub.y + oy };
+  }
+  return { x: note.x, y: note.y };
+}
+
+function dist2(a: { x: number; y: number }, b: { x: number; y: number }): number {
+  const dx = a.x - b.x;
+  const dy = a.y - b.y;
+  return dx * dx + dy * dy;
+}
+
+/**
+ * Pick the note closest to the theme hub.
+ * When re-stacking while collapsed, prefer saved expanded offsets.
+ */
+export function pickThemeStackAnchor(
+  hub: { x: number; y: number },
+  notes: CanvasNode[],
+  options?: { preferExpandedOffsets?: boolean },
+): { x: number; y: number; id: string } {
+  const preferExpanded = !!options?.preferExpandedOffsets;
+  let best = notes[0]!;
+  let bestPos = preferExpanded ? themeNoteLayoutPos(best, hub) : { x: best.x, y: best.y };
+  let bestDist = Number.POSITIVE_INFINITY;
+  for (const note of notes) {
+    const pos = preferExpanded ? themeNoteLayoutPos(note, hub) : { x: note.x, y: note.y };
+    const d = dist2(hub, pos);
+    if (d < bestDist) {
+      bestDist = d;
+      best = note;
+      bestPos = pos;
+    }
+  }
+  return { ...bestPos, id: best.id };
+}
+
+/** Farthest → nearest so index 0 (top of pile) is the farthest note. */
+export function sortThemeNotesFarthestFirst(
+  hub: { x: number; y: number },
+  notes: CanvasNode[],
+  options?: { preferExpandedOffsets?: boolean },
+): CanvasNode[] {
+  const preferExpanded = !!options?.preferExpandedOffsets;
+  return notes.slice().sort((a, b) => {
+    const pa = preferExpanded ? themeNoteLayoutPos(a, hub) : { x: a.x, y: a.y };
+    const pb = preferExpanded ? themeNoteLayoutPos(b, hub) : { x: b.x, y: b.y };
+    const d = dist2(hub, pb) - dist2(hub, pa);
+    if (d !== 0) return d;
+    return a.id.localeCompare(b.id);
+  });
+}
+
+/** Stack in place around the nearest note; index 0 is the front (farthest) card. */
+export function bookExpandBranchStackPos(
+  base: { x: number; y: number },
+  index: number,
+  _hubHeight?: number,
+): { x: number; y: number } {
   return {
-    x: hub.x + BOOK_EXPAND_CHILD_OFFSET_X + index * BOOK_EXPAND_STACK_STEP,
-    y: centerY - BOOK_EXPAND_CHILD_HEIGHT / 2 + index * BOOK_EXPAND_STACK_STEP,
+    x: base.x + index * BOOK_EXPAND_STACK_STEP,
+    y: base.y + index * BOOK_EXPAND_STACK_STEP,
   };
 }
 
-/** Higher z for earlier branches so #1 sits on top of the neat deck. */
+/** Higher z for lower index so farthest (index 0) sits on top of the deck. */
 export function bookExpandStackZIndex(index: number): number {
   return 420 - index;
 }
 
+function resolveBookExpandExpandedPos(
+  branch: CanvasNode,
+  hub: { x: number; y: number },
+  index: number,
+  count: number,
+  hubHeight: number,
+): { x: number; y: number } {
+  const ox = branch.bookExpandExpandedOffsetX;
+  const oy = branch.bookExpandExpandedOffsetY;
+  if (typeof ox === 'number' && typeof oy === 'number' && Number.isFinite(ox) && Number.isFinite(oy)) {
+    return { x: hub.x + ox, y: hub.y + oy };
+  }
+  return {
+    x: hub.x + BOOK_EXPAND_CHILD_OFFSET_X,
+    y: bookExpandBranchLaneY(hub.y, index, count, hubHeight),
+  };
+}
+
 /**
- * Collapse book-expand branches into a photo stack beside the hub, or expand back to the lane.
+ * Collapse theme-linked notes into a photo stack at the nearest note
+ * (farthest note on top), or expand back to saved positions.
  */
 export async function setBookExpandBranchesCollapsed(
   hubId: string,
@@ -211,19 +306,54 @@ export async function setBookExpandBranchesCollapsed(
   const hubHeight = options?.hubHeight ?? hub.height ?? BOOK_EXPAND_HUB_HEIGHT;
 
   await db.transaction('rw', db.nodes, async () => {
+    const freshHub = (await db.nodes.get(hubId)) ?? hub;
+    const hubPos = { x: freshHub.x, y: freshHub.y };
+    const wasCollapsed = !!freshHub.bookExpandBranchesCollapsed;
     await db.nodes.update(hubId, { bookExpandBranchesCollapsed: collapsed });
-    for (let i = 0; i < branches.length; i++) {
-      const pos = collapsed
-        ? bookExpandBranchStackPos({ x: hub.x, y: hub.y }, i, hubHeight)
-        : {
-            x: hub.x + BOOK_EXPAND_CHILD_OFFSET_X,
-            y: bookExpandBranchLaneY(hub.y, i, branches.length, hubHeight),
-          };
-      await db.nodes.update(branches[i]!.id, {
-        ...pos,
-        bookExpandParentId: hubId,
-        bookExpandIndex: i,
+
+    if (collapsed) {
+      const live: CanvasNode[] = [];
+      for (const listed of branches) {
+        live.push((await db.nodes.get(listed.id)) ?? listed);
+      }
+      const preferExpanded = wasCollapsed;
+      const anchor = pickThemeStackAnchor(hubPos, live, { preferExpandedOffsets: preferExpanded });
+      const stackBase = { x: anchor.x, y: anchor.y };
+      // Farthest first → front of pile (index 0, highest z).
+      const stackOrder = sortThemeNotesFarthestFirst(hubPos, live, {
+        preferExpandedOffsets: preferExpanded,
       });
+
+      for (let i = 0; i < stackOrder.length; i++) {
+        const branch = stackOrder[i]!;
+        const stackPos = bookExpandBranchStackPos(stackBase, i);
+        const keepOffsets =
+          wasCollapsed &&
+          typeof branch.bookExpandExpandedOffsetX === 'number' &&
+          typeof branch.bookExpandExpandedOffsetY === 'number';
+        await db.nodes.update(branch.id, {
+          ...stackPos,
+          bookExpandParentId: hubId,
+          bookExpandIndex: i,
+          ...(keepOffsets
+            ? {}
+            : {
+                bookExpandExpandedOffsetX: branch.x - hubPos.x,
+                bookExpandExpandedOffsetY: branch.y - hubPos.y,
+              }),
+        });
+      }
+    } else {
+      for (let i = 0; i < branches.length; i++) {
+        const listed = branches[i]!;
+        const branch = (await db.nodes.get(listed.id)) ?? listed;
+        const pos = resolveBookExpandExpandedPos(branch, hubPos, i, branches.length, hubHeight);
+        await db.nodes.update(branch.id, {
+          ...pos,
+          bookExpandParentId: hubId,
+          bookExpandIndex: i,
+        });
+      }
     }
   });
   return branches.length;
@@ -253,6 +383,30 @@ export function spokenBookVoiceBranchLine(branch: BookExpandBranch): string {
   return `${title}。${body}`;
 }
 
+/** Scope follows the book’s room, even when the pile sits just outside the rectangle. */
+export async function resolveBookExpandWorkZoneScope(
+  bookNodeId: string,
+  canvasId: string,
+  bookPos: { x: number; y: number; width?: number; height?: number },
+): Promise<string | undefined> {
+  if (!isCanvasV2Enabled()) return undefined;
+  const [zones, stored] = await Promise.all([
+    db.canvasWorkZones.where('canvasId').equals(canvasId).toArray(),
+    db.nodes.get(bookNodeId),
+  ]);
+  const book: CanvasNode = stored ?? {
+    id: bookNodeId,
+    canvasId,
+    type: 'book',
+    content: '',
+    x: bookPos.x,
+    y: bookPos.y,
+    width: bookPos.width,
+    height: bookPos.height,
+  };
+  return findPersonaForNodeInZones(book, zones);
+}
+
 export async function spawnBookExpandHubCard(options: {
   bookNodeId: string;
   canvasId: string;
@@ -260,6 +414,9 @@ export async function spawnBookExpandHubCard(options: {
   hub: string;
   /** Absolute hub top-left; when omitted, place to the right of the book. */
   hubPos?: { x: number; y: number };
+  collapsed?: boolean;
+  wireEdge?: boolean;
+  contextScopeAgentId?: string;
 }): Promise<{ hubId: string; hubX: number; hubY: number }> {
   const { bookNodeId, canvasId, bookPos, hub } = options;
   const bookW = bookPos.width ?? 380;
@@ -269,7 +426,7 @@ export async function spawnBookExpandHubCard(options: {
   const hubY =
     options.hubPos?.y ?? bookPos.y + Math.max(0, bookH / 2 - BOOK_EXPAND_HUB_HEIGHT / 2);
 
-  await db.nodes.add({
+  await db.nodes.add(stampNewCard({
     id: hubId,
     canvasId,
     type: 'theme',
@@ -278,14 +435,19 @@ export async function spawnBookExpandHubCard(options: {
     y: hubY,
     width: BOOK_EXPAND_HUB_WIDTH,
     height: BOOK_EXPAND_HUB_HEIGHT,
-    bookExpandBranchesCollapsed: false,
-  });
-  await db.edges.add({
-    id: crypto.randomUUID(),
-    canvasId,
-    from: bookNodeId,
-    to: hubId,
-  });
+    bookExpandBranchesCollapsed: !!options.collapsed,
+    ...(options.contextScopeAgentId
+      ? { contextScopeAgentId: options.contextScopeAgentId }
+      : {}),
+  }));
+  if (options.wireEdge !== false) {
+    await db.edges.add({
+      id: crypto.randomUUID(),
+      canvasId,
+      from: bookNodeId,
+      to: hubId,
+    });
+  }
   return { hubId, hubX, hubY };
 }
 
@@ -297,34 +459,56 @@ export async function spawnBookExpandBranchCard(options: {
   branch: BookExpandBranch;
   index: number;
   branchCount: number;
+  collapsed?: boolean;
+  wireEdge?: boolean;
+  contextScopeAgentId?: string;
 }): Promise<string> {
   const { canvasId, hubId, hubX, hubY, branch, index, branchCount } = options;
   const id = crypto.randomUUID();
   const markdown = `**${branch.title}**\n\n${branch.content}`;
-  await db.nodes.add({
+  const expandedX = hubX + BOOK_EXPAND_CHILD_OFFSET_X;
+  const expandedY = bookExpandBranchLaneY(hubY, index, branchCount, BOOK_EXPAND_HUB_HEIGHT);
+  const pos = options.collapsed
+    ? bookExpandBranchStackPos(
+        { x: hubX + BOOK_EXPAND_HUB_WIDTH + 16, y: hubY },
+        index,
+      )
+    : { x: expandedX, y: expandedY };
+  await db.nodes.add(stampNewCard({
     id,
     canvasId,
     type: 'text',
     content: markdown,
-    x: hubX + BOOK_EXPAND_CHILD_OFFSET_X,
-    y: bookExpandBranchLaneY(hubY, index, branchCount, BOOK_EXPAND_HUB_HEIGHT),
+    ...pos,
     width: BOOK_EXPAND_CHILD_WIDTH,
     height: BOOK_EXPAND_CHILD_HEIGHT,
     bookExpandParentId: hubId,
     bookExpandIndex: index,
-  });
-  await db.edges.add({
-    id: crypto.randomUUID(),
-    canvasId,
-    from: hubId,
-    to: id,
-  });
+    ...(options.collapsed
+      ? {
+          bookExpandExpandedOffsetX: expandedX - hubX,
+          bookExpandExpandedOffsetY: expandedY - hubY,
+        }
+      : {}),
+    ...(options.contextScopeAgentId
+      ? { contextScopeAgentId: options.contextScopeAgentId }
+      : {}),
+  }));
+  if (options.wireEdge !== false) {
+    await db.edges.add({
+      id: crypto.randomUUID(),
+      canvasId,
+      from: hubId,
+      to: id,
+    });
+  }
   return id;
 }
 
 /**
- * Spawn a theme hub + linked note cards to the right of a book node.
- * Edges: book → hub → each branch.
+ * Spawn a theme hub + branch notes to the right of a book.
+ * V2: collapsed pile, no auto edges, scope from the book’s work zone.
+ * V1: expanded lane with book → hub → branch edges.
  */
 export async function spawnBookExpandCards(options: {
   bookNodeId: string;
@@ -335,12 +519,19 @@ export async function spawnBookExpandCards(options: {
 }): Promise<{ hubId: string; branchIds: string[] }> {
   const { bookNodeId, canvasId, bookPos, plan } = options;
   const staggerMs = options.staggerMs ?? DEFAULT_STAGGER_MS;
+  const v2 = isCanvasV2Enabled();
+  const contextScopeAgentId = v2
+    ? await resolveBookExpandWorkZoneScope(bookNodeId, canvasId, bookPos)
+    : undefined;
 
   const { hubId, hubX, hubY } = await spawnBookExpandHubCard({
     bookNodeId,
     canvasId,
     bookPos,
     hub: plan.hub,
+    collapsed: v2,
+    wireEdge: !v2,
+    contextScopeAgentId,
   });
 
   const branchIds: string[] = [];
@@ -356,6 +547,9 @@ export async function spawnBookExpandCards(options: {
       branch: plan.branches[i]!,
       index: i,
       branchCount: plan.branches.length,
+      collapsed: v2,
+      wireEdge: !v2,
+      contextScopeAgentId,
     });
     branchIds.push(id);
   }
