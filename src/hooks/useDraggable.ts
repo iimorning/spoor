@@ -163,7 +163,9 @@ export function useDraggable(
         const origin = initialPos;
         setTimeout(() => {
           void Promise.resolve(onDragEndRef.current?.(finalPos, delta)).then((result) => {
-            if (!result?.revert) return;
+            // onDragEnd 可以什么都不返回（DragEndResult 里有一支是 void），
+            // 所以先按 typeof 把那一支摘掉，再读 revert。
+            if (typeof result !== 'object' || result === null || !result.revert) return;
             clearNodeDragOffset(el, origin);
             posRef.current = origin;
             setPos(origin);

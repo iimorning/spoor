@@ -1,9 +1,15 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, within, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import React from 'react';
 import { AgentsStudio } from '../../src/components/AgentsStudio';
 import { db } from '../../src/db';
+import {
+  clearVoicePreviewMemoryCache,
+  voicePreviewCacheKey,
+  writeVoicePreviewClip,
+} from '../../src/utils/voicePreviewCache';
+import { voicePreviewLine } from '../../src/components/AgentsStudio';
 import type { AgentConfig } from '../../src/db';
 
 const { extractDocumentText } = vi.hoisted(() => ({
@@ -39,6 +45,17 @@ vi.mock('react-i18next', async (importOriginal) => {
   };
 });
 
+const openTtsStreamMock = vi.fn(async (_options?: unknown) => ({
+  enqueueText: vi.fn(),
+  finish: vi.fn(),
+  waitUntilIdle: vi.fn(async () => undefined),
+  stop: vi.fn(),
+}));
+
+vi.mock('../../src/services/minimaxTtsStream', () => ({
+  openMinimaxTtsStream: (options?: unknown) => openTtsStreamMock(options),
+}));
+
 vi.mock('../../src/utils/aiI18n', () => ({
   buildAgentSystemInstruction: () => 'system',
   getLocaleDirective: () => 'locale',
@@ -47,20 +64,9 @@ vi.mock('../../src/utils/aiI18n', () => ({
   resolveAgentSystemPrompt: (a: AgentConfig) => a.prompt,
 }));
 
-vi.mock('lucide-react', () => {
-  const names = [
-    'Plus', 'Search', 'Bot', 'Wand2', 'Send', 'MessageSquare', 'X', 'FileText',
-    'FileUp', 'Loader2', 'Trash2', 'RotateCcw', 'Image', 'Share2', 'Sparkles', 'Layers',
-  ];
-  const icons: Record<string, React.FC> = {};
-  for (const name of names) {
-    icons[name] = () => {
-      const { createElement } = require('react');
-      return createElement('svg', { 'data-testid': `icon-${name}` });
-    };
-  }
-  return icons;
-});
+vi.mock('lucide-react', async (importOriginal) =>
+  (await import('../mocks/lucideReactMock')).lucideReactMock(importOriginal),
+);
 
 const agentA: AgentConfig = {
   id: 'agent-a',
@@ -80,7 +86,13 @@ const agentB: AgentConfig = {
   creativity: 0.3,
 };
 
-const aiConfig = { provider: 'gemini', apiKey: 'k', baseUrl: '', model: 'gemini-2.0-flash' };
+const aiConfig = {
+  provider: 'gemini',
+  apiKey: 'k',
+  baseUrl: '',
+  model: 'gemini-2.0-flash',
+  minimaxApiKey: 'mm',
+};
 
 function renderStudio(
   agents: AgentConfig[] = [agentA, agentB],
@@ -235,7 +247,10 @@ describe('AgentsStudio 生成卡片', () => {
     renderStudio();
     const name = screen.getByLabelText('agents.persona_name');
     const generate = screen.getByTestId('agent-studio-generate-cover');
-    expect(generate).toHaveTextContent('agents.card_cover_generate');
+    // 图标按钮：文字挪到可访问名上，界面里只留图标
+    expect(generate).toHaveTextContent('');
+    expect(generate).toHaveAccessibleName('agents.card_cover_generate');
+    expect(generate.querySelector('svg')).toBeTruthy();
     expect(name.compareDocumentPosition(generate) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(screen.queryByTestId('agent-studio-cover-empty')).not.toBeInTheDocument();
     expect(screen.queryByTestId('agent-studio-cover')).not.toBeInTheDocument();
@@ -252,7 +267,9 @@ describe('AgentsStudio 生成卡片', () => {
 
   it('已有封面时名称旁显示封面缩略图，按钮改为重新生成', () => {
     renderStudio([{ ...agentA, coverImageUrl: 'https://img.example/fox.jpg' }]);
-    expect(screen.getByTestId('agent-studio-generate-cover')).toHaveTextContent('agents.card_cover_regenerate');
+    expect(screen.getByTestId('agent-studio-generate-cover')).toHaveAccessibleName(
+      'agents.card_cover_regenerate',
+    );
     expect(screen.queryByTestId('agent-studio-clear-cover')).not.toBeInTheDocument();
     const thumbs = screen.getAllByTestId('agent-cover-thumb');
     expect(thumbs.length).toBeGreaterThanOrEqual(1);
@@ -290,12 +307,16 @@ describe('AgentsStudio 从文档生成提示词', () => {
     Element.prototype.scrollIntoView = vi.fn();
   });
 
-  it('名称旁有从文档生成按钮', () => {
+  it('从文档生成按钮在「身份与基调」标题旁，而且只有图标', () => {
     renderStudio();
-    const fromDoc = screen.getByTestId('agent-studio-prompt-from-doc');
-    const generate = screen.getByTestId('agent-studio-generate-cover');
-    expect(fromDoc).toHaveTextContent('agents.prompt_from_doc');
-    expect(fromDoc.compareDocumentPosition(generate) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const heading = screen.getByRole('heading', { name: 'agents.identity_tone' });
+    const fromDoc = within(heading.parentElement as HTMLElement).getByTestId(
+      'agent-studio-prompt-from-doc',
+    );
+    // 不再显示「从文档生成」那几个字，但可访问名还在（title / aria-label）
+    expect(fromDoc).toHaveTextContent('');
+    expect(fromDoc).toHaveAccessibleName('agents.prompt_from_doc');
+    expect(fromDoc.querySelector('svg')).toBeTruthy();
   });
 
   it('上传 Word 后把 AI 起草的系统提示词写入角色', async () => {
@@ -341,5 +362,180 @@ describe('AgentsStudio 系统提示词输入法', () => {
     expect(setAgentConfigs).toHaveBeenCalled();
     const next = setAgentConfigs.mock.calls.at(-1)?.[0] as AgentConfig[];
     expect(next[0].prompt).toBe('You are alpha如果');
+  });
+});
+
+describe('AgentsStudio 朗读音色', () => {
+  it('打开菜单才列音色，中英文两组都在，界面语言那一组在前', async () => {
+    renderStudio([agentA]);
+    // 菜单没打开时，音色一个都不该出现在页面上
+    expect(screen.queryByTestId('agent-studio-voice-menu')).toBeNull();
+
+    fireEvent.click(await screen.findByTestId('agent-studio-voice'));
+    const menu = await screen.findByTestId('agent-studio-voice-menu');
+
+    const groupLabels = Array.from(menu.querySelectorAll('p')).map((p) => p.textContent);
+    // 测试里的界面语言是 en，所以英文组在前、中文组在后
+    expect(groupLabels).toEqual(['agents.voice_group_en', 'agents.voice_group_zh']);
+    expect(screen.getByTestId('agent-studio-voice-option-female-yujie').textContent).toContain(
+      '御姐',
+    );
+    expect(
+      screen.getByTestId('agent-studio-voice-option-English_Trustworthy_Man').textContent,
+    ).toContain('Trustworthy Man');
+  });
+
+  it('搜索框按名字和 id 过滤', async () => {
+    renderStudio([agentA]);
+    fireEvent.click(await screen.findByTestId('agent-studio-voice'));
+    fireEvent.change(screen.getByTestId('agent-studio-voice-search'), {
+      target: { value: '御姐' },
+    });
+
+    expect(screen.getByTestId('agent-studio-voice-option-female-yujie')).toBeInTheDocument();
+    expect(
+      screen.queryByTestId('agent-studio-voice-option-English_Trustworthy_Man'),
+    ).toBeNull();
+
+    // 按 id 也能搜到
+    fireEvent.change(screen.getByTestId('agent-studio-voice-search'), {
+      target: { value: 'whispering' },
+    });
+    expect(
+      screen.getByTestId('agent-studio-voice-option-English_Whispering_girl'),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId('agent-studio-voice-option-female-yujie')).toBeNull();
+  });
+
+  it('音色菜单里可以试听：第一次按这个音色现合成一句', async () => {
+    openTtsStreamMock.mockClear();
+    await db.voicePreviewClips.clear();
+    clearVoicePreviewMemoryCache();
+    renderStudio([{ ...agentA, voiceId: 'female-yujie' }]);
+    fireEvent.click(await screen.findByTestId('agent-studio-voice'));
+    const preview = await screen.findByTestId('agent-studio-voice-option-female-yujie-preview');
+    expect(preview).toHaveAccessibleName('agents.voice_preview');
+    fireEvent.click(preview);
+    // 试听走我们自己的合成链路，所以用的是这个音色，而且开了录音（留给缓存）
+    await waitFor(() => {
+      expect(openTtsStreamMock).toHaveBeenCalledWith(
+        expect.objectContaining({ voiceId: 'female-yujie', recordAudio: true }),
+      );
+    });
+  });
+
+  it('缓存里已有这个音色：直接本地播放，不再合成', async () => {
+    openTtsStreamMock.mockClear();
+    await db.voicePreviewClips.clear();
+    clearVoicePreviewMemoryCache();
+    await writeVoicePreviewClip(
+      voicePreviewCacheKey({
+        model: 'speech-2.6-turbo',
+        voiceId: 'female-yujie',
+        line: voicePreviewLine('female-yujie', 'zh'),
+      }),
+      new Uint8Array([1, 2, 3]),
+    );
+
+    renderStudio([{ ...agentA, voiceId: 'female-yujie' }]);
+    fireEvent.click(await screen.findByTestId('agent-studio-voice'));
+    fireEvent.click(await screen.findByTestId('agent-studio-voice-option-female-yujie-preview'));
+
+    // 合成链路一次都没走 —— 这就是缓存的意义（第一次之后都是瞬间出声）
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(openTtsStreamMock).not.toHaveBeenCalled();
+  });
+
+  it('缓存命中时真的走本地播放：拿 blob URL 建 audio 并 play', async () => {
+    await db.voicePreviewClips.clear();
+    clearVoicePreviewMemoryCache();
+    await writeVoicePreviewClip(
+      voicePreviewCacheKey({
+        model: 'speech-2.6-turbo',
+        voiceId: 'female-yujie',
+        line: voicePreviewLine('female-yujie', 'zh'),
+      }),
+      new Uint8Array([1, 2, 3]),
+    );
+
+    const created: Array<{ src: string; play: ReturnType<typeof vi.fn> }> = [];
+    class FakeAudio {
+      src: string;
+      onended: (() => void) | null = null;
+      play: ReturnType<typeof vi.fn>;
+      pause = vi.fn();
+      constructor(src: string) {
+        this.src = src;
+        this.play = vi.fn(async () => {
+          this.onended?.();
+        });
+        created.push({ src, play: this.play });
+      }
+    }
+    vi.stubGlobal('Audio', FakeAudio as unknown as typeof Audio);
+    try {
+      renderStudio([{ ...agentA, voiceId: 'female-yujie' }]);
+      fireEvent.click(await screen.findByTestId('agent-studio-voice'));
+      fireEvent.click(await screen.findByTestId('agent-studio-voice-option-female-yujie-preview'));
+
+      await waitFor(() => expect(created.length).toBe(1));
+      expect(created[0]!.src.startsWith('blob:')).toBe(true);
+      expect(created[0]!.play).toHaveBeenCalled();
+      // 播完把状态收回来（按钮回到"试听"）
+      await waitFor(() =>
+        expect(screen.getByTestId('agent-studio-voice-option-female-yujie-preview')).toHaveAccessibleName(
+          'agents.voice_preview',
+        ),
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('默认项（跟随全局设置）不给试听键：没有确定的音色可听', async () => {
+    renderStudio();
+    fireEvent.click(await screen.findByTestId('agent-studio-voice'));
+    expect(
+      screen.queryByTestId('agent-studio-voice-option-default-preview'),
+    ).not.toBeInTheDocument();
+  });
+
+  it('选中音色后收起菜单，并把音色写进这个角色的配置', async () => {
+    const setAgentConfigs = vi.fn().mockResolvedValue(undefined);
+    renderStudio([agentA, agentB], setAgentConfigs);
+
+    fireEvent.click(await screen.findByTestId('agent-studio-voice'));
+    fireEvent.click(screen.getByTestId('agent-studio-voice-option-female-yujie'));
+
+    expect(screen.queryByTestId('agent-studio-voice-menu')).toBeNull();
+    await waitFor(() => expect(setAgentConfigs).toHaveBeenCalled());
+    const next = setAgentConfigs.mock.calls.at(-1)?.[0] as AgentConfig[];
+    expect(next.find((a) => a.id === 'agent-a')?.voiceId).toBe('female-yujie');
+    // 只动当前这个角色
+    expect(next.find((a) => a.id === 'agent-b')?.voiceId).toBeUndefined();
+  });
+
+  it('触发按钮显示已选音色的名字，选回默认就清掉而不是存空字符串', async () => {
+    const setAgentConfigs = vi.fn().mockResolvedValue(undefined);
+    renderStudio([{ ...agentA, voiceId: 'female-yujie' }], setAgentConfigs);
+    expect((await screen.findByTestId('agent-studio-voice')).textContent).toContain('御姐');
+
+    fireEvent.click(screen.getByTestId('agent-studio-voice'));
+    fireEvent.click(screen.getByTestId('agent-studio-voice-option-default'));
+
+    await waitFor(() => expect(setAgentConfigs).toHaveBeenCalled());
+    const next = setAgentConfigs.mock.calls.at(-1)?.[0] as AgentConfig[];
+    expect(next[0].voiceId).toBeUndefined();
+  });
+
+  it('表里没有的 id 也照实显示，不会看起来像没设置', async () => {
+    renderStudio([{ ...agentA, voiceId: 'my-cloned-voice' }]);
+    expect((await screen.findByTestId('agent-studio-voice')).textContent).toContain(
+      'my-cloned-voice',
+    );
   });
 });

@@ -2,6 +2,7 @@ import Dexie, { type Table } from 'dexie';
 import type { AskSearchHit } from './utils/askSearchHits';
 import type { ComposerSegment } from './utils/chatComposer';
 import type { TurtleSoupRound } from './utils/turtleSoupRound';
+import type { PocketBlock } from './utils/pocketBlocks';
 
 export interface CanvasNode {
   id: string;
@@ -82,6 +83,28 @@ export interface CanvasNode {
   webSearchExpandedOffsetY?: number;
   /** 图片卡：联网搜图来源页 URL（可跳转） */
   sourceUrl?: string;
+  /**
+   * 备忘标题：口袋编辑器顶上那个单独的输入框。
+   * 画布上的便签没有标题概念，所以摆放时会把它并进正文第一段，不会丢。
+   */
+  title?: string;
+  /**
+   * 备忘卡：一串按顺序排的文字段 / 图片段。
+   * 只有图文混排的备忘才有；纯文字备忘仍旧是 `content` 一段文本，
+   * 所以老数据一行都不用迁。两者互斥，见 utils/pocketBlocks。
+   */
+  blocks?: PocketBlock[];
+  /**
+   * 图片卡：它属于哪条备忘。属于某条备忘的图片是那条备忘里的一段，
+   * 口袋列表里必须跟着备忘一起显示，不能自己冒成独立一条。
+   */
+  ownerMemoId?: string;
+  /**
+   * 图片卡：端侧 OCR 识别出的文字（口袋拍照时写入）。
+   * 单独一个字段而不是塞 description：description 在 ImageNode 里是单行标题，会被截断。
+   * 摆放到画布时用它长出一张关联便签。
+   */
+  ocrText?: string;
   /** 联网网页来源卡：维基 pageimage / og:image 预览 */
   previewImageUrl?: string;
   /** 图片卡：由 302 GPT-Image-2 等模型生成（非联网搜图） */
@@ -157,10 +180,45 @@ export interface CanvasNode {
   /** 书籍卡：当前页正文滚动位置（px），与 bookPageIndex 一并恢复 */
   bookScrollTop?: number;
   /**
+   * 书籍卡：这本书自己的摘抄列表。只留在这本书上，不生成画布卡片。
+   * 书籍卡不参与同步（沿用 `thinkingTrace` 的整卡无白名单约定）。
+   */
+  bookExcerpts?: BookExcerpt[];
+  /**
+   * 书籍卡：AI 伴读在正文里标出来的重点段落。
+   *
+   * 存的是从原文逐字复制的引文，不是偏移量：正文按 blocks 渲染、PDF 干脆是一整块
+   * 纯文本，偏移量对不上任何一边，引文却能一字不差地找回来（见 bookPassage.ts）。
+   */
+  bookFocusMarks?: BookFocusMark[];
+  /**
+   * 书籍卡：用户手动删过标注的章节。
+   *
+   * 没有这道闸的话，最后一条被删掉的那一章会立刻被当成"还没标过"，
+   * 1.5 秒后自动重标——用户明明说了不要，它又自己长回来了。
+   */
+  bookFocusDismissedUnits?: number[];
+  /** 书籍卡：右侧栏 AI 对话线程（未索引嵌套数组）。 */
+  bookChatMessages?: BookChatMessage[];
+  /** 书籍卡：归档的侧栏对话（最新在前）。 */
+  bookChatSessionArchive?: BookChatSession[];
+  /** 书籍卡：侧栏房间里的角色（`AgentConfig.id`，首位是主持人）。空 = 沿用内置助手。 */
+  bookChatPersonaIds?: string[];
+  /** 书籍卡：侧栏房间里被禁言的角色 id。 */
+  bookChatMutedPersonaIds?: string[];
+  /**
    * V2：归属哪个角色卡的工作区（默认上下文范围）。
    * 仅用户明确拖入工作区时写入；拖出可清空。非永久记忆。
    */
   contextScopeAgentId?: string;
+  /**
+   * 角色卡：上一次主动发言时，这个房间的内容指纹（见 `utils/roomProactive.ts`）。
+   *
+   * 指纹一样就不再动手。**模型选择沉默时也要照样写这里**——不然同一份内容会
+   * 一次又一次送去问模型，白花钱，而且模型多半每次都回同样的沉默。
+   * 只有"这一趟作废了"（用户期间说了话、或者中途被关掉）才不写。
+   */
+  proactiveLastSignature?: string;
   /** V2 摘录卡：来源侧栏对话 thread id */
   sourceThreadId?: string;
   /** V2 摘录卡：来源消息 id */
@@ -168,6 +226,23 @@ export interface CanvasNode {
 }
 
 /** V2：用户在画布上绘制的工作区矩形，绑定到角色卡（agent / Ask）。 */
+/**
+ * 音色试听的音频缓存：一条 = 一句样句的 WAV。
+ * 合成一次要一两秒，缓存下来后重复试听是本地播放，瞬间出声。
+ */
+export interface VoicePreviewClip {
+  /** `${model}::${voiceId}::${样句}`，见 utils/voicePreviewCache.ts */
+  id: string;
+  /**
+   * WAV 字节。存 TypedArray 而不是 Blob：Blob 能不能原样过一遍 IndexedDB 取决于运行环境
+   * （jsdom/fake-indexeddb 里读回来是个空对象），字节到处都是稳的，播放时再拼回 Blob。
+   */
+  data: Uint8Array;
+  /** MIME（`audio/wav`），拼回 Blob 时用。 */
+  type: string;
+  updatedAt: number;
+}
+
 export interface CanvasWorkZone {
   id: string;
   canvasId: string;
@@ -270,6 +345,14 @@ export interface Article {
   chatMessages?: EssayChatMessage[];
   /** Archived sidebar chat sessions for this article (newest first). */
   chatSessionArchive?: EssayChatSession[];
+  /** 侧栏房间里的角色（`AgentConfig.id`，首位是主持人）。空 = 沿用内置助手。 */
+  chatPersonaIds?: string[];
+  /** 侧栏房间里被禁言的角色 id。 */
+  chatMutedPersonaIds?: string[];
+  /** AI 标出来的行。空 = 还没标过。全局关掉时这些也还在，只是不往外端。 */
+  essayFocusMarks?: EssayFocusMark[];
+  /** 上一次读到第几个字，用来判断该不该再跑一趟。 */
+  essayFocusLastScanChars?: number;
 }
 
 /** One archived AI editor chat for an article. */
@@ -302,6 +385,115 @@ export interface EssayChatMessage {
   images?: CanvasChatGeneratedImage[];
   /** Live web-search hits for this turn (excerpt inserts into the editor). */
   searchHits?: AskSearchHit[];
+  /** Clickable related questions shown under this assistant reply. */
+  suggestedFollowUps?: string[];
+  /** 侧栏房间：这一条是谁说的（`AgentConfig.id`）。单角色时为空。 */
+  speakerAgentId?: string;
+  /** 侧栏房间：显示用的名字。留空时气泡不显示说话人前缀。 */
+  speakerName?: string;
+}
+
+/**
+ * 书籍卡的一条摘抄。只存在这本书上，不生成画布卡片。
+ * `unitIndex` / `unitLabel` 供「跳回原文」使用；`bookTitle` 是快照，
+ * 书被改名或重新导入后，这条摘抄仍能说清自己来自哪本书哪一章。
+ */
+export interface BookExcerpt {
+  id: string;
+  /** 选中的原文。 */
+  text: string;
+  /**
+   * 摘抄来源。`book` = 正文里选中的原文，可以跳回；`chat` = 右栏对话里的内容
+   * （AI 回复、检索结果），没有对应的原文位置。
+   * 缺省按 `book` 处理——加这个字段之前的摘抄都来自正文。
+   */
+  source?: 'book' | 'chat';
+  /** 摘抄发生时所在章节索引（0-based，对应 BookPayload.units）；`chat` 来源写 -1。 */
+  unitIndex: number;
+  /** 章节标题，或 `5 / 21` 这样的位置快照；`chat` 来源留空。 */
+  unitLabel: string;
+  /** 书名快照。 */
+  bookTitle: string;
+  /**
+   * 用户自己写在摘抄下面的想法；没有想法时不写这个键。
+   * 放上画布时和摘抄正文合成同一张卡，伴读对话里也一并送给模型。
+   */
+  note?: string;
+  createdAt: number;
+}
+
+/** One archived sidebar AI chat for a book card. */
+export interface BookChatSession {
+  id: string;
+  createdAt: number;
+  endedAt: number;
+  /** Short label from the first user turn. */
+  preview: string;
+  messages: BookChatMessage[];
+}
+
+/**
+ * AI 在长文正文里标出来的一行。
+ *
+ * 和 `BookFocusMark` 同一套纪律：`quote` 必须是正文里**逐字**出现过的一段，且只出现
+ * 一次；定位靠它，不靠偏移量。用户后来把这句话改了，标注就定位不到、直接不显示——
+ * 和书籍那边一样，不迁移也不报错。
+ *
+ * 差别是它不挂在 offset 上也不落在文档里：渲染走 ProseMirror 的 Decoration（视图
+ * 状态），所以用户保存下来的 markdown 干干净净，不会混进标注标记。
+ */
+export interface EssayFocusMark {
+  id: string;
+  quote: string;
+  /** AI 为什么觉得这一行值得再看一遍。挂在句子上，不是挂在整篇上。 */
+  note: string;
+  createdAt: number;
+}
+
+/**
+ * AI 伴读在正文里标出来的一段重点。
+ *
+ * `quote` 必须是正文里**逐字**出现过的一段，且只出现一次；定位靠它，不靠偏移量。
+ */
+export interface BookFocusMark {
+  id: string;
+  unitIndex: number;
+  quote: string;
+  /** 这一条为什么值得停下来看。挂在句子上，不是挂在章节上。 */
+  note: string;
+  createdAt: number;
+  /**
+   * 这条高亮是谁留下的。
+   *
+   * `ai`（缺省）是伴读自己标的，带一段说明、点开有脚注、进清单和待读角标。
+   * `translate` 是读者自己划词翻译留下的。译文存在 `note` 里，再点高亮时
+   * 打开初次那张浮层，不走伴读脚注。
+   *
+   * 必须分开：伴读靠"这一章有没有 AI 标注"决定还读不读，翻译高亮要是被算
+   * 进去，翻过一次翻译的章节就再也不会被伴读标了。
+   */
+  origin?: 'ai' | 'translate';
+}
+
+/**
+ * 书籍卡侧栏 AI 对话的一条消息。
+ * 对齐 `EssayChatMessage`，去掉书籍没有的 `editCount`：书籍正文只读，不写占位符。
+ */
+export interface BookChatMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  text: string;
+  createdAt: number;
+  /** Inline illustrations from the draw tool. */
+  images?: CanvasChatGeneratedImage[];
+  /** Live web-search hits for this turn (shown in the panel, not as canvas cards). */
+  searchHits?: AskSearchHit[];
+  /** Clickable related questions shown under this assistant reply. */
+  suggestedFollowUps?: string[];
+  /** 侧栏房间：这一条是谁说的（`AgentConfig.id`）。单角色时为空。 */
+  speakerAgentId?: string;
+  /** 侧栏房间：显示用的名字。留空时气泡不显示说话人前缀。 */
+  speakerName?: string;
 }
 
 /** Markdown 知识：文件内容持久化在 IndexedDB，调用模型时整段注入 system（非 RAG）。 */
@@ -321,6 +513,11 @@ export interface AgentConfig {
   knowledgeMarkdownFiles?: AgentMarkdownKnowledgeFile[];
   /** GPT-Image-2 literary illustration used as the canvas agent card background. */
   coverImageUrl?: string;
+  /**
+   * 这个角色朗读用的 MiniMax 音色。空 = 跟随全局设置与界面语言默认。
+   * 可选值见 `src/constants/minimaxVoices.ts`（只收国内版的中英文音色）。
+   */
+  voiceId?: string;
   /** Stable key for deduping personas imported from community / official templates. */
   communityPersonaKey?: string;
 }
@@ -353,8 +550,17 @@ export interface CanvasChatMessage {
   images?: CanvasChatGeneratedImage[];
   /** Live web-search hits for this turn (shown in the side panel, not as canvas cards). */
   searchHits?: AskSearchHit[];
+  /** Clickable related questions shown under this assistant reply. */
+  suggestedFollowUps?: string[];
   /** 海龟汤隐藏裁判包。只存在会话里，侧栏和摘录都不展示。 */
   turtleSoupRound?: TurtleSoupRound;
+  /**
+   * 多角色房间：这条回复由哪张角色卡说出，以及发言时的名字快照
+   * （角色卡被删或改名后，历史仍能显示是谁说的）。
+   * 房间里只有主 Agent 时不写。
+   */
+  speakerNodeId?: string;
+  speakerName?: string;
 }
 
 export type CanvasChatGeneratedImage = {
@@ -387,6 +593,15 @@ export interface CanvasPersonaThread {
   composerDraft?: string;
   /** Mixed card/text composer segments for the side panel. */
   composerSegments?: ComposerSegment[];
+  /**
+   * 多角色房间：被拉进这个对话框一起讨论的其他角色卡节点 id
+   * （有序，不含主 Agent）。空/缺省 = 单人对话，行为与旧版一致。
+   */
+  participantNodeIds?: string[];
+  /** 多角色房间：本轮不发言（禁言）的参与者节点 id。 */
+  mutedNodeIds?: string[];
+  /** 多角色房间：一次"开始讨论"跑几轮（一轮 = 每个未禁言的声音各说一次）。 */
+  roomDiscussionRounds?: number;
   updatedAt: number;
 }
 
@@ -494,6 +709,7 @@ export class MyDatabase extends Dexie {
   canvasTemplates!: Table<CanvasTemplateDoc, string>;
   workspacePartitions!: Table<WorkspacePartitionRecord, string>;
   workspaceState!: Table<WorkspaceStateRecord, string>;
+  voicePreviewClips!: Table<VoicePreviewClip, string>;
 
   constructor() {
     super('CortexLocalDB');
@@ -558,6 +774,16 @@ export class MyDatabase extends Dexie {
     this.version(13).stores({
       canvasWorkZones: 'id, canvasId, personaNodeId',
     });
+
+    // 音色试听的小音频缓存（几十 KB 一条，最多留 60 条，见 voicePreviewCache）。
+    this.version(14).stores({
+      voicePreviewClips: 'id, updatedAt',
+    });
+
+    // v15 在带云同步的构建里是 articleSyncBase（"上次和云端谈拢的那一版"）。
+    // 开源版没有云端，留一个空版本占号：Dexie 只要求版本号递增，
+    // 跳号会让已经升到 v14 的旧库对不上这里的 schema 版本。
+    this.version(15).stores({});
   }
 }
 

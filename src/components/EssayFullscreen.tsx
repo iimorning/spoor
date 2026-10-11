@@ -1,14 +1,12 @@
-import React, { useState, useRef, useMemo, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useMemo, useEffect, useLayoutEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { useLiveQuery } from 'dexie-react-hooks';
 import {
   GripVertical,
-  Link2,
   Loader2,
+  Highlighter,
   MessageSquare,
-  PanelLeftClose,
-  PanelLeftOpen,
   Pencil,
   SidebarClose,
   SidebarOpen,
@@ -18,7 +16,7 @@ import {
 import { useAdaptiveLayout } from '../hooks/useAdaptiveLayout';
 import { useOverlayDismiss } from '../hooks/useOverlayDismiss';
 import { db } from '../db';
-import type { SourceCardSegment } from '../db';
+import type { ArticleMedia, SourceCardSegment } from '../db';
 import { isContentBlurPersistenceDisabled } from '../config/persistence';
 import { tryParseEssayContent } from '../utils/essayPayload';
 import {
@@ -29,31 +27,55 @@ import {
 } from '../utils/essayWordCount';
 import { ESSAY_SOURCE_DRAG_MIME, repairEssayCollectedMedia, sourceCardPreviewImageSrc } from '../services/essayCollect';
 import { articleHasLegacyMedia, extractEmbeddedArticleMedia } from '../utils/articleMedia';
+import { dataTransferHasFiles } from '../utils/dnd';
+import { isAutoAnnotationEnabled } from '../utils/autoAnnotation';
+import { useAutoAnnotation } from '../hooks/useAutoAnnotation';
+import {
+  appendEssayFocusMarks,
+  clearEssayFocusMarks,
+  readEssayFocusMarks,
+  removeEssayFocusMarks,
+  shouldRunEssayFocusPass,
+} from '../utils/essayFocusMarks';
+import { runEssayFocusPass } from '../services/essayFocusPass';
+import { surfaceAnswerer } from '../utils/surfacePersonaRoom';
+import { spoorLlmSessionId } from '../utils/openRouterPromptCache';
+import { formatAiError } from '../services/ai';
 import { persistEssayEditorBody } from '../utils/persistEssayEditorBody';
 import { useAppDialog } from './AppDialogProvider';
 import { EssayBodyEditor, type EssayBodyEditorHandle } from './essay/EssayBodyEditor';
-import { EssayChatPanel } from './essay/EssayChatPanel';
-import { EssayCopyButton } from './essay/EssayCopyButton';
+import { ChatPanel } from './canvas/ChatPanel';
+import { SurfacePersonaStrip } from './SurfacePersonaStrip';
+import {
+  EMPTY_SURFACE_ROOM,
+  readSurfaceRoom,
+  type SurfaceRoomState,
+} from '../utils/surfacePersonaRoom';
 import { EssayExportMenu } from './essay/EssayExportMenu';
 import { formatSearchHitEssayMarkdown } from '../utils/askSearchHits';
 import { useEssayChat } from '../hooks/useEssayChat';
-import { useEssayChatVoice } from '../hooks/useEssayChatVoice';
+import { useChatVoice } from '../hooks/useChatVoice';
 import { hasMinimaxTtsAccess } from '../lib/serverConfig';
+import { resolveVoiceInputMode } from '../constants/voiceWriting';
 import { hasVolcAsrCredentials } from '../services/volcAsr';
 import type { AIConfig } from './AISettingsModal';
 
 export interface EssayFullscreenProps {
   articleId: string;
   onClose: () => void;
-  /** Jump to a linked source canvas (closes fullscreen). */
   onOpenCanvas?: (canvasId: string) => void;
   aiConfig?: AIConfig | null;
 }
 
+/**
+ * 停笔多久之后才让 AI 去读。抄书籍那边的 1500ms，理由一样：连续打字会把定时器
+ * 一直重置，只在真的停下来之后才跑。
+ */
+const ESSAY_FOCUS_TRIGGER_DELAY_MS = 1500;
+
 export function EssayFullscreen({ articleId, onClose, onOpenCanvas, aiConfig = null }: EssayFullscreenProps) {
   const { t } = useTranslation();
   const { confirm } = useAppDialog();
-  const canvases = useLiveQuery(() => db.canvases.toArray(), []) ?? [];
   // `undefined` = still loading; `null` = looked up and missing. Dexie's get()
   // returns undefined for both, which used to flash "deleted" then freeze on parse.
   const article = useLiveQuery(async () => {
@@ -86,6 +108,87 @@ export function EssayFullscreen({ articleId, onClose, onOpenCanvas, aiConfig = n
   const sidebarEditDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const bodyEditorRef = useRef<EssayBodyEditorHandle>(null);
 
+  /** 侧栏房间：谁在说话。空 = 沿用内置助手。 */
+  const agentConfigs = useLiveQuery(() => db.agents.toArray(), []) ?? [];
+  const [essayRoom, setEssayRoom] = useState<SurfaceRoomState>(EMPTY_SURFACE_ROOM);
+  const roomSeededForRef = useRef('');
+  useEffect(() => {
+    if (!article || roomSeededForRef.current === articleId) return;
+    roomSeededForRef.current = articleId;
+    setEssayRoom(readSurfaceRoom(article.chatPersonaIds, article.chatMutedPersonaIds));
+  }, [article, articleId]);
+
+  /**
+   * 房间名单跟着这篇文章走，不跟着面板走：换一篇就该换一个说话的人。
+   */
+  const persistEssayRoom = useCallback(
+    (room: SurfaceRoomState) => {
+      setEssayRoom(room);
+      void db.articles.update(articleId, {
+        chatPersonaIds: room.personaIds,
+        chatMutedPersonaIds: room.mutedIds,
+      });
+    },
+    [articleId],
+  );
+
+  /* ── AI 标注 ── */
+  const [focusBusy, setFocusBusy] = useState(false);
+  const [focusListOpen, setFocusListOpen] = useState(false);
+  // 开关状态要先定下来：下面 holdFocusList 要拿它决定弹不弹。
+  // 全局的，不是这一篇的——在任何一篇上关掉，所有长文都停。
+  const [focusEnabled, setFocusEnabled] = useAutoAnnotation('essay');
+  const focusListCloseRef = useRef<number | null>(null);
+  const focusListWrapRef = useRef<HTMLDivElement | null>(null);
+  const holdFocusList = useCallback(() => {
+    // 关掉之后不弹清单：里面只剩一句"还没有标注"，对着一个关着的功能弹这个很莫名其妙。
+    if (!focusEnabled) return;
+    if (focusListCloseRef.current !== null) {
+      window.clearTimeout(focusListCloseRef.current);
+      focusListCloseRef.current = null;
+    }
+    setFocusListOpen(true);
+  }, [focusEnabled]);
+  // 键盘用户打开之后就关不掉了：清单只认悬停，Tab 进去之后指针根本没在按钮上。
+  // Escape 和点外面这两条是照对话那颗按钮的弹层补的。
+  useEffect(() => {
+    if (!focusListOpen) return;
+    const onPointerDown = (e: PointerEvent) => {
+      if (!(e.target instanceof Node)) return;
+      if (focusListWrapRef.current?.contains(e.target)) return;
+      setFocusListOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      e.stopPropagation();
+      setFocusListOpen(false);
+    };
+    document.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('keydown', onKey, true);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('keydown', onKey, true);
+    };
+  }, [focusListOpen]);
+
+  const releaseFocusList = useCallback(() => {
+    if (focusListCloseRef.current !== null) {
+      window.clearTimeout(focusListCloseRef.current);
+    }
+    // 延一下再关：指针从按钮挪到弹层中间那段空隙会让 hover 直接断掉。
+    focusListCloseRef.current = window.setTimeout(() => {
+      focusListCloseRef.current = null;
+      setFocusListOpen(false);
+    }, 180);
+  }, []);
+  // `focusEnabled` 必须进依赖：标注是按全局开关过滤的，article 这边不变，
+// 只盯着 article 的话，在 A 篇关掉标注、切到 B 篇，那一屏黄底还挂着上一轮的。
+const focusMarks = useMemo(() => readEssayFocusMarks(article), [article, focusEnabled]);
+  const bodyChars = useMemo(
+    () => (article ? countEssayChars(essayBodyMarkdown(article)) : 0),
+    [article],
+  );
+
   const needsMediaMigration = article ? articleHasLegacyMedia(article) : false;
   const sourceCards = article && !needsMediaMigration ? article.sourceCards ?? [] : [];
   const hasSourceCards = sourceCards.length > 0;
@@ -114,6 +217,100 @@ export function EssayFullscreen({ articleId, onClose, onOpenCanvas, aiConfig = n
       console.error('[Spoor] essay collected media repair failed', error),
     );
   }, [article?.id, needsMediaMigration, article?.generating]);
+
+  const focusRunRef = useRef(0);
+  const runFocusPass = useCallback(async () => {
+    if (!article || !aiConfig) return;
+    if (!essayBodyMarkdown(article).trim()) return;
+    const token = ++focusRunRef.current;
+    setFocusBusy(true);
+    try {
+      // 用户在模型返回之前说过话就不插这条了：往对话栏里塞一句 AI 的自言自语，
+      // 会盖掉他刚问的那句，看起来像是回答了他，其实不是。
+      const messagesAtStart = (await db.articles.get(article.id))?.chatMessages?.length ?? 0;
+      const result = await runEssayFocusPass({
+        config: aiConfig,
+        title: article.title ?? '',
+        body: essayBodyMarkdown(article),
+        lastScanChars: article.essayFocusLastScanChars,
+        agent: surfaceAnswerer(essayRoom, agentConfigs),
+        t,
+        sessionId: spoorLlmSessionId('essay-focus', article.id),
+      });
+      // 期间用户可能已经把文章删了，或者在别的长文上把标注关了（全局开关）。
+      if (token !== focusRunRef.current) return;
+      const row = await db.articles.get(article.id);
+      if (!row || !isAutoAnnotationEnabled('essay')) return;
+
+      await appendEssayFocusMarks(article.id, result.marks);
+      await db.articles.update(article.id, {
+        essayFocusLastScanChars: Math.max(
+          row.essayFocusLastScanChars ?? 0,
+          countEssayChars(essayBodyMarkdown(row)),
+        ),
+      });
+      if (result.message) {
+        const after = await db.articles.get(article.id);
+        if (after && (after.chatMessages?.length ?? 0) === messagesAtStart) {
+          await db.articles.update(article.id, {
+            chatMessages: [
+              ...(after.chatMessages ?? []),
+              {
+                id: `ec-focus-${Date.now().toString(36)}`,
+                role: 'assistant' as const,
+                text: result.message,
+                createdAt: Date.now(),
+              },
+            ],
+          });
+        }
+      }
+    } catch (e) {
+      // 失败要有个能说话的地方。挂到对话栏的错误位上——那是这块界面本来就有、
+      // 用户认得的出口，另造一个提示等于多一个他找不到的地方。
+      setChatError(t('reference.essay_focus_failed', { reason: formatAiError(e) }));
+    } finally {
+      if (token === focusRunRef.current) setFocusBusy(false);
+    }
+  }, [aiConfig, agentConfigs, article, essayRoom, t]);
+
+  /**
+   * 写到一定字数就让 AI 读一遍。防抖抄书籍那边：连续打字会把定时器一直重置，
+   * 只在停笔之后才跑，跑的时候是最新那一份。
+   */
+  useEffect(() => {
+    if (!article || !focusEnabled || focusBusy || needsMediaMigration || article.generating) {
+      return;
+    }
+    if (!shouldRunEssayFocusPass(bodyChars, article.essayFocusLastScanChars)) return;
+    const timer = window.setTimeout(() => {
+      void runFocusPass();
+    }, ESSAY_FOCUS_TRIGGER_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [article, bodyChars, focusBusy, focusEnabled, needsMediaMigration, runFocusPass]);
+
+  /** 清单里点一条：把那个想法在正文里打开。定位不到就当这条已经过期了。 */
+  const onOpenFocusMark = useCallback((id: string) => {
+    bodyEditorRef.current?.openFocusMark(id);
+  }, []);
+
+  const onDeleteFocusMark = useCallback((id: string) => {
+    void removeEssayFocusMarks(articleId, [id]);
+  }, [articleId]);
+
+  const onClearFocus = useCallback(() => {
+    setFocusListOpen(false);
+    void clearEssayFocusMarks(articleId);
+  }, [articleId]);
+
+  /**
+   * 全局开关的来回。关掉**不删**已经标上的东西——标了就是标了，全局一关就
+   * 把每一篇都清干净是毁数据，不是关开关。已经标上的那些改由 `readEssayFocusMarks`
+   * 藏起来，开回来原样还在。要真的删，清单底部那颗单独删。
+   */
+  const onToggleFocus = useCallback(() => {
+    setFocusEnabled(!focusEnabled);
+  }, [focusEnabled, setFocusEnabled]);
 
   useEffect(() => {
     const create = URL.createObjectURL?.bind(URL);
@@ -191,30 +388,30 @@ export function EssayFullscreen({ articleId, onClose, onOpenCanvas, aiConfig = n
   const { compact } = useAdaptiveLayout();
   // Below xl the side rails eat too much of the viewport, so they
   // collapse into slide-in drawers the user toggles from the top bar.
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [chatOpen, setChatOpen] = useState(true);
-  const [railsCollapsed, setRailsCollapsed] = useState(false);
+  // 左右两栏各管各的（和书籍全屏一个模型）：折叠按钮只收左侧「关联便签」，
+  // 对话按钮只收右侧对话栏。原来是一颗按钮同时收两栏，加了独立的对话按钮
+  // 之后那种耦合就多余了——收对话不该顺手动到便签。
+  const [leftCollapsed, setLeftCollapsed] = useState(compact);
+  const [chatCollapsed, setChatCollapsed] = useState(compact);
   const [chatSelection, setChatSelection] = useState('');
 
-  const toggleRailsCollapsed = useCallback(() => {
-    setRailsCollapsed((prev) => {
-      const next = !prev;
-      if (next) {
-        setDrawerOpen(false);
-        setChatOpen(false);
-      } else if (compact) {
-        setChatOpen(true);
-      }
-      return next;
-    });
-  }, [compact]);
+  const toggleLeftCollapsed = useCallback(() => setLeftCollapsed((v) => !v), []);
+  const toggleChatCollapsed = useCallback(() => setChatCollapsed((v) => !v), []);
 
   useEffect(() => {
-    if (!compact) setDrawerOpen(true);
+    setLeftCollapsed(compact);
+    setChatCollapsed(compact);
   }, [compact]);
-  useEffect(() => {
-    if (!compact && !railsCollapsed) setChatOpen(true);
-  }, [compact, railsCollapsed]);
+
+  /**
+   * 「历史 / 新建」的空位。按钮由 ChatPanel 自己拥有（翻哪段历史、新建前的确认
+   * 都在它那儿），这里只给一个容器让它 portal 过来——状态不搬家。空位在角色条
+   * 那一行的右边，和房间里的人并排。
+   */
+  const [chatControlsHost, setChatControlsHost] = useState<HTMLElement | null>(null);
+  const captureChatControlsHost = useCallback((node: HTMLElement | null) => {
+    setChatControlsHost(node);
+  }, []);
 
   const persistSourceCards = useCallback(
     async (next: SourceCardSegment[]) => {
@@ -326,6 +523,23 @@ export function EssayFullscreen({ articleId, onClose, onOpenCanvas, aiConfig = n
     [article],
   );
 
+  /**
+   * 编辑器粘贴进来的图片在这里落地成 media 行。
+   *
+   * 重新 `get` 一遍而不是直接用闭包里的 `article`：粘贴到落盘之间文章可能又被写过
+   * 好几轮（正文持久化、来源卡编辑），拿旧快照覆盖回去会把那些改动连带 media 一起
+   * 抹掉。
+   */
+  const storeEditorMedia = useCallback(
+    async (media: ArticleMedia[]) => {
+      if (media.length === 0) return;
+      const row = await db.articles.get(articleId);
+      if (!row) return;
+      await db.articles.update(articleId, { media: [...(row.media ?? []), ...media] });
+    },
+    [articleId],
+  );
+
   const applyChatEdits = useCallback(
     (edits: { find: string; replace: string }[], options?: { replaceDocument?: boolean }) => {
       return (
@@ -356,7 +570,7 @@ export function EssayFullscreen({ articleId, onClose, onOpenCanvas, aiConfig = n
   const dropChatOntoEditor = useCallback(
     (clientX: number, clientY: number, markdown: string) => {
       const hit = document.elementFromPoint(clientX, clientY);
-      if (hit?.closest('[data-testid="essay-chat-panel"]')) {
+      if (hit?.closest('[data-testid="chat-panel"]')) {
         clearDropPreview();
         return;
       }
@@ -372,8 +586,11 @@ export function EssayFullscreen({ articleId, onClose, onOpenCanvas, aiConfig = n
 
   const {
     sending: chatSending,
+    discussing: chatDiscussing,
     error: chatError,
+    setError: setChatError,
     send: sendEssayChat,
+    discuss: discussEssayRoom,
     retryChatImage,
     startNewChat,
     restoreChatSession,
@@ -382,6 +599,8 @@ export function EssayFullscreen({ articleId, onClose, onOpenCanvas, aiConfig = n
     articleTitle: article?.title ?? '',
     messages: article?.chatMessages ?? [],
     aiConfig,
+    room: essayRoom,
+    agents: agentConfigs,
     t,
     getBodyMarkdown: () =>
       bodyEditorRef.current?.getMarkdown() ??
@@ -411,13 +630,13 @@ export function EssayFullscreen({ articleId, onClose, onOpenCanvas, aiConfig = n
     partialTranscript: essayVoiceTranscript,
     toggle: toggleEssayVoice,
     stop: stopEssayVoice,
-  } = useEssayChatVoice({
+    commitComposer: commitEssayVoice,
+  } = useChatVoice({
     aiConfig,
     disabled:
       !article ||
       needsMediaMigration ||
       Boolean(article?.generating) ||
-      chatSending ||
       !essayVoiceEnabled,
     sendMessage: sendEssayChat,
   });
@@ -469,20 +688,44 @@ export function EssayFullscreen({ articleId, onClose, onOpenCanvas, aiConfig = n
     [draggingSourceId],
   );
 
+  /**
+   * 正文区要不要接下这次拖放。
+   *
+   * 文件拖放也算：`dragover` 阶段受保护模式限制，`dataTransfer.files` 是空的，只看得到
+   * `types` 里有 `Files`，没法提前分辨里面是不是图片。所以只能先把这类拖放都当落图接下，
+   * 真的落下非图片时 `insertDroppedFiles` 会一个字节都不写——但这一步必须接：浏览器在
+   * 没被 preventDefault 时会拿这个文件把整个页面顶掉（直接下载，或导航到它）。
+   */
+  const bodyAcceptsDrop = useCallback(
+    (e: React.DragEvent) => isEssaySourceDrag(e) || dataTransferHasFiles(e.dataTransfer),
+    [isEssaySourceDrag],
+  );
+
   const handleBodyDragOver = useCallback(
     (e: React.DragEvent) => {
-      if (!isEssaySourceDrag(e)) return;
+      if (!bodyAcceptsDrop(e)) return;
       e.preventDefault();
       e.stopPropagation();
       e.dataTransfer.dropEffect = 'copy';
       setBodyDropActive(previewDropAt(e.clientX, e.clientY));
     },
-    [isEssaySourceDrag, previewDropAt],
+    [bodyAcceptsDrop, previewDropAt],
   );
 
   const handleBodyDrop = useCallback(
     (e: React.DragEvent) => {
-      if (!isEssaySourceDrag(e)) return;
+      const fileDrop = dataTransferHasFiles(e.dataTransfer);
+      if (!fileDrop && !isEssaySourceDrag(e)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (fileDrop) {
+        bodyEditorRef.current?.insertDroppedFiles(e.dataTransfer, {
+          clientX: e.clientX,
+          clientY: e.clientY,
+        });
+        clearDropPreview();
+        return;
+      }
       const nodeId =
         draggingSourceId || e.dataTransfer.getData(ESSAY_SOURCE_DRAG_MIME).trim();
       setDraggingSourceId(null);
@@ -490,8 +733,6 @@ export function EssayFullscreen({ articleId, onClose, onOpenCanvas, aiConfig = n
         clearDropPreview();
         return;
       }
-      e.preventDefault();
-      e.stopPropagation();
       associateSourceCard(nodeId, { clientX: e.clientX, clientY: e.clientY });
       clearDropPreview();
     },
@@ -575,27 +816,34 @@ export function EssayFullscreen({ articleId, onClose, onOpenCanvas, aiConfig = n
       aria-modal="true"
       aria-label={article?.title || t('nodes.essay')}
     >
-      <div className="h-11 shrink-0 bg-[#FAF9F6] paper-texture border-b border-black/10 flex items-center justify-between px-4 z-10">
+      {/* z-30 不是随手写的：z-index 作用在 flex item 上会**建立层叠上下文**，
+          里面那颗对话按钮的弹层 z-30 只在这个上下文内有效。顶栏压着 z-10 时，
+          窄屏抽屉（根层级 z-20、top-11 起）会盖住探出栏外的弹层——读者看见对话栏
+          滑上来、菜单不见了。抬到 30 才高得过它们。 */}
+      <div className="h-11 shrink-0 bg-[#FAF9F6] paper-texture border-b border-black/10 flex items-center justify-between px-4 z-30">
         <span className="text-xs font-sans font-bold uppercase tracking-wider text-[#8c8a84] flex items-center gap-2">
-          {t('nodes.essay')}
+          {/* 「长文」这个标题去掉了：全屏里读者要的是正文，抬眼就看见"长文"没有信息量。
+              左栏的名字顶上来，既占了原本的标题位，又省掉左栏自己那行 56px 的标题
+              ——那行原本只是把同一个词又说了一遍，便签区却因此少了一屏。 */}
+          {t('reference.linked_drafts')}
           <button
             type="button"
             data-testid="essay-fullscreen-toggle-rails"
-            onClick={toggleRailsCollapsed}
-            aria-pressed={railsCollapsed}
+            onClick={toggleLeftCollapsed}
+            aria-expanded={!leftCollapsed}
             title={
-              railsCollapsed
+              leftCollapsed
                 ? t('reference.essay_show_rails', { defaultValue: '展开侧栏' })
                 : t('reference.essay_hide_rails', { defaultValue: '收起侧栏' })
             }
             aria-label={
-              railsCollapsed
+              leftCollapsed
                 ? t('reference.essay_show_rails', { defaultValue: '展开侧栏' })
                 : t('reference.essay_hide_rails', { defaultValue: '收起侧栏' })
             }
             className="inline-flex h-7 w-7 items-center justify-center rounded-md text-[#8c8a84] transition-colors hover:bg-[#EAE7E2] hover:text-[#C2410C]"
           >
-            {railsCollapsed ? (
+            {leftCollapsed ? (
               <SidebarOpen className="h-4 w-4" aria-hidden />
             ) : (
               <SidebarClose className="h-4 w-4" aria-hidden />
@@ -612,50 +860,113 @@ export function EssayFullscreen({ articleId, onClose, onOpenCanvas, aiConfig = n
           ) : null}
         </span>
         <div className="flex items-center gap-2">
-          {compact ? (
+          {/* 「历史 / 新建」现在和房间里的人并排放在对话栏顶部那一行的右边
+              （见 SurfacePersonaStrip）。顶栏这颗按钮回归成纯粹的开关：开合右栏。
+              按钮本身仍然由 ChatPanel 拥有，这里和角色条之间只传一个空位。 */}
+          <button
+            type="button"
+            data-testid="essay-fullscreen-toggle-chat"
+            onClick={toggleChatCollapsed}
+            className="inline-flex h-7 w-7 items-center justify-center rounded-md text-[#8c8a84] transition-colors hover:bg-[#EAE7E2] hover:text-[#C2410C]"
+            title={t('reference.essay_chat_title')}
+            aria-label={t('reference.essay_chat_title')}
+            aria-expanded={!chatCollapsed}
+          >
+            <MessageSquare className="h-4 w-4" aria-hidden />
+          </button>
+          {/* 标注开关 + 清单。悬停/聚焦都能开，键盘用户才够得到——和对话那颗
+              按钮同一个做法，不因为它不常驻就省掉焦点通路。 */}
+          <div
+            ref={focusListWrapRef}
+            className="relative shrink-0"
+            onPointerEnter={holdFocusList}
+            onPointerLeave={releaseFocusList}
+            onFocus={holdFocusList}
+            onBlur={(e) => {
+              if (!e.currentTarget.contains(e.relatedTarget as Node | null)) releaseFocusList();
+            }}
+          >
             <button
               type="button"
-              data-testid="essay-fullscreen-toggle-drawer"
-              onClick={() => {
-                setDrawerOpen((v) => {
-                  const next = !v;
-                  if (next) setRailsCollapsed(false);
-                  return next;
-                });
-              }}
-              className="inline-flex h-7 w-7 items-center justify-center rounded-md text-[#8c8a84] transition-colors hover:bg-[#EAE7E2] hover:text-[#C2410C]"
-              title={drawerOpen ? t('nodes.essay_close') : t('reference.linked_drafts')}
-              aria-label={drawerOpen ? t('nodes.essay_close') : t('reference.linked_drafts')}
-              aria-expanded={drawerOpen}
-            >
-              {drawerOpen ? <PanelLeftClose className="h-4 w-4" /> : <PanelLeftOpen className="h-4 w-4" />}
-            </button>
-          ) : null}
-          {compact ? (
-            <button
-              type="button"
-              data-testid="essay-fullscreen-toggle-chat"
-              onClick={() => {
-                setChatOpen((v) => {
-                  const next = !v;
-                  if (next) setRailsCollapsed(false);
-                  return next;
-                });
-              }}
-              className={`inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-[#EAE7E2] hover:text-[#C2410C] ${
-                chatOpen ? 'bg-[#FFF7ED] text-[#C2410C]' : 'text-[#8c8a84]'
+              data-testid="essay-fullscreen-toggle-focus"
+              onClick={onToggleFocus}
+              aria-pressed={focusEnabled}
+              aria-busy={focusBusy}
+              title={
+                focusBusy
+                  ? t('reference.essay_focus_reading')
+                  : focusEnabled
+                    ? t('reference.essay_focus_toggle_on')
+                    : t('reference.essay_focus_toggle')
+              }
+              aria-label={t('reference.essay_focus_toggle')}
+              className={`inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors ${
+                // 已开要和书卡那颗一样亮起来。启用态原来也是灰的（#8c8a84），
+                // 跟禁用态几乎分不出来——所以看不出标注已经开了。
+                focusEnabled
+                  ? 'bg-[#C2410C]/10 text-[#C2410C] hover:bg-[#C2410C]/15'
+                  : 'text-[#b5b1a9] hover:bg-[#EAE7E2] hover:text-[#C2410C]'
               }`}
-              title={t('reference.essay_chat_title')}
-              aria-label={t('reference.essay_chat_title')}
-              aria-expanded={chatOpen}
             >
-              <MessageSquare className="h-4 w-4" />
+              {focusBusy ? (
+                <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+              ) : (
+                <Highlighter className="h-4 w-4" aria-hidden />
+              )}
             </button>
-          ) : null}
-          <EssayCopyButton
-            disabled={!article || needsMediaMigration}
-            getDoc={getExportDoc}
-          />
+            {focusEnabled && focusMarks.length > 0 ? (
+              <span
+                data-testid="essay-fullscreen-focus-badge"
+                className="absolute -right-1 -top-1 min-w-[14px] rounded-full bg-[#C2410C] px-1 text-center text-[9px] leading-[14px] text-white"
+              >
+                {focusMarks.length > 99 ? '99+' : focusMarks.length}
+              </span>
+            ) : null}
+            {/* 容器常驻、只切 hidden：条件渲染会让弹层一关，焦点就丢了。 */}
+            <div
+              data-testid="essay-fullscreen-focus-list"
+              hidden={!focusListOpen}
+              onPointerEnter={holdFocusList}
+              onPointerLeave={releaseFocusList}
+              className="absolute right-0 top-full z-30 mt-1 max-h-72 w-72 overflow-y-auto overscroll-contain rounded-xl border border-[#E6E4DF] bg-white p-1 shadow-lg"
+            >
+              {focusMarks.length === 0 ? (
+                <p className="px-2 py-1.5 text-[11px] leading-relaxed text-[#8a8a82]">
+                  {t('reference.essay_focus_list_empty')}
+                </p>
+              ) : (
+                focusMarks.map((mark) => (
+                  <button
+                    key={mark.id}
+                    type="button"
+                    data-testid={`essay-fullscreen-focus-item-${mark.id}`}
+                    onClick={() => {
+                      onOpenFocusMark(mark.id);
+                      releaseFocusList();
+                    }}
+                    className="block w-full rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-[#FFF7ED]"
+                  >
+                    <span className="block truncate text-[11px] font-semibold text-[#2c2c28]">
+                      {mark.quote}
+                    </span>
+                    <span className="mt-0.5 block line-clamp-2 text-[11px] leading-relaxed text-[#8a8a82]">
+                      {mark.note}
+                    </span>
+                  </button>
+                ))
+              )}
+              {focusMarks.length > 0 ? (
+                <button
+                  type="button"
+                  data-testid="essay-fullscreen-focus-clear"
+                  onClick={onClearFocus}
+                  className="mt-1 w-full rounded-lg border-t border-[#E6E4DF] px-2 py-1.5 text-left text-[11px] text-[#8a8a82] transition-colors hover:bg-[#FFF7ED] hover:text-[#C2410C]"
+                >
+                  {t('reference.essay_focus_off')}
+                </button>
+              ) : null}
+            </div>
+          </div>
           <EssayExportMenu
             disabled={!article || needsMediaMigration}
             getDoc={getExportDoc}
@@ -678,38 +989,21 @@ export function EssayFullscreen({ articleId, onClose, onOpenCanvas, aiConfig = n
           className={`bg-white flex flex-col overflow-hidden font-sans text-sm transition-all duration-200 ${
             compact
               ? `fixed inset-y-11 left-0 z-20 w-[min(280px,90vw)] border-r border-[#E6E4DF] shadow-[12px_0_32px_rgba(0,0,0,0.08)] ${
-                  drawerOpen && !railsCollapsed ? 'translate-x-0' : '-translate-x-full'
+                  leftCollapsed ? '-translate-x-full' : 'translate-x-0'
                 }`
-              : railsCollapsed
+              : leftCollapsed
                 ? 'w-0 min-w-0 shrink overflow-hidden border-0 opacity-0 pointer-events-none'
                 : 'w-72 shrink-0 rounded-xl border border-[#E6E4DF] shadow-sm'
           }`}
-          aria-hidden={railsCollapsed || (compact && !drawerOpen) ? true : undefined}
+          aria-hidden={leftCollapsed ? true : undefined}
+          // `pointer-events-none` + `w-0`/`translate-x-full` 只挡得住鼠标，Tab 照样能
+          // 走进一条看不见的栏（来源卡的编辑/删除按钮、正文 textarea 都在里面）。
+          // `inert` 才是连键盘一起挡掉的那个；单给 aria-hidden 而里面有可聚焦元素，
+          // 本身就是硬性无障碍违规。
+          inert={leftCollapsed || undefined}
         >
-          <div className="px-3.5 py-4 font-bold text-[#1a1a1a] text-base h-14 flex items-center">
-            {hasSourceCards ? (
-              t('reference.linked_drafts')
-            ) : (
-              <div className="flex items-center gap-2 w-full min-w-0">
-                <span className="shrink-0">{t('reference.linked_drafts')}</span>
-                {linkedIds.map((cid) => {
-                  const c = canvases.find((x) => x.id === cid);
-                  return (
-                    <button
-                      key={cid}
-                      type="button"
-                      onClick={() => openCanvasAndClose(cid)}
-                      disabled={!onOpenCanvas}
-                      className="flex items-center gap-1.5 min-w-0 font-semibold text-[#1a1a1a] text-sm hover:text-[#C2410C] hover:underline disabled:opacity-40"
-                    >
-                      <Link2 className="w-4 h-4 text-[#C2410C] shrink-0" />
-                      <span className="truncate font-normal">{c?.name ?? cid}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-          </div>
+          {/* 左栏不再有自己的标题行：名字已经顶到顶栏去了。这里原来那行 56px
+              只是把同一个词又说了一遍，却把便签区压掉一小屏。 */}
           <div className="p-3 space-y-2.5 overflow-y-auto flex-1 min-h-0">
             {article === undefined || needsMediaMigration ? (
               <p className="text-sm text-[#8c8a84]">{t('nodes.essay_loading')}</p>
@@ -1008,6 +1302,9 @@ export function EssayFullscreen({ articleId, onClose, onOpenCanvas, aiConfig = n
                     disablePersist={Boolean(article.generating)}
                     mediaObjectUrls={mediaObjectUrls}
                     onPersist={persistBodyFromEditor}
+                    focusMarks={focusMarks}
+                    onFocusMarkDelete={onDeleteFocusMark}
+                    onStoreMedia={storeEditorMedia}
                     onTransitionAdopted={handleTransitionAdopted}
                     onTransitionRemoved={handleTransitionRemoved}
                     onDeletionAdopted={(text) => {
@@ -1030,60 +1327,89 @@ export function EssayFullscreen({ articleId, onClose, onOpenCanvas, aiConfig = n
           className={`bg-white flex flex-col overflow-hidden font-sans text-sm transition-all duration-200 ${
             compact
               ? `fixed inset-y-11 right-0 z-20 w-[min(320px,90vw)] border-l border-[#E6E4DF] shadow-[-12px_0_32px_rgba(0,0,0,0.08)] ${
-                  chatOpen && !railsCollapsed ? 'translate-x-0' : 'translate-x-full'
+                  chatCollapsed ? 'translate-x-full' : 'translate-x-0'
                 }`
-              : railsCollapsed
+              : chatCollapsed
                 ? 'w-0 min-w-0 shrink overflow-hidden border-0 opacity-0 pointer-events-none'
                 : 'w-[20rem] shrink-0 rounded-xl border border-[#E6E4DF] shadow-sm'
           }`}
-          aria-hidden={railsCollapsed || (compact && !chatOpen) ? true : undefined}
+          aria-hidden={chatCollapsed ? true : undefined}
+          inert={chatCollapsed || undefined}
         >
-          <EssayChatPanel
-            messages={article?.chatMessages ?? []}
-            archivedSessions={article?.chatSessionArchive ?? []}
-            onNewChat={() => startNewChat()}
-            onRestoreSession={(sessionId) => restoreChatSession(sessionId)}
-            sending={chatSending}
-            error={chatError}
+          <SurfacePersonaStrip
+            room={essayRoom}
+            onRoomChange={persistEssayRoom}
+            controlsHostRef={captureChatControlsHost}
             disabled={!article || needsMediaMigration || Boolean(article?.generating)}
-            selectedText={chatSelection}
-            onClearSelection={() => setChatSelection('')}
-            onSend={(text, files) => {
-              void sendEssayChat(text, files);
-            }}
-            onToggleVoice={essayVoiceEnabled ? toggleEssayVoice : undefined}
-            voiceModeActive={essayVoiceActive}
-            voicePhase={essayVoicePhase}
-            liveTranscript={essayVoiceTranscript}
-            voiceEnabled={essayVoiceEnabled}
-            onExcerpt={insertChatExcerpt}
-            onRetryImage={(messageId, imageId) => {
-              void retryChatImage(messageId, imageId);
-            }}
-            onDropReplyAt={(messageId, clientX, clientY) => {
-              const msg = article?.chatMessages?.find((m) => m.id === messageId);
-              if (!msg?.text.trim()) return;
-              dropChatOntoEditor(clientX, clientY, msg.text);
-            }}
-            onDropSelectionAt={(_messageId, text, clientX, clientY) => {
-              dropChatOntoEditor(clientX, clientY, text);
-            }}
-            onDropChatImage={(img, clientX, clientY) => {
-              if (!img.url) return;
-              const title = (img.title || '').replace(/\n/g, ' ').trim() || 'image';
-              dropChatOntoEditor(clientX, clientY, `![${title}](${img.url})`);
-            }}
-            onDropSearchHitAt={(_messageId, hit, clientX, clientY) => {
-              dropChatOntoEditor(clientX, clientY, formatSearchHitEssayMarkdown(hit));
-            }}
-            onIngestFiles={
-              !article || needsMediaMigration || Boolean(article?.generating)
-                ? undefined
-                : (files) => files
-            }
-            onDropPreviewAt={previewDropAt}
-            onDropPreviewEnd={clearDropPreview}
+            onDiscuss={() => void discussEssayRoom()}
+            discussing={chatDiscussing}
           />
+          {/* ChatPanel 的根是 h-full——它按父容器满高算。直接和角色条并排的话，
+              满高 + 顶框那一行就溢出了，外层 overflow-hidden 会把底部的输入框裁掉。
+              给它一个占剩余高度的壳，h-full 就落在这个壳上。 */}
+          <div className="flex min-h-0 flex-1 flex-col">
+            <ChatPanel
+              hideTitle
+              headerControlsHost={chatControlsHost}
+              showSpeakerNames={essayRoom.personaIds.length > 1}
+              messages={article?.chatMessages ?? []}
+              archivedSessions={article?.chatSessionArchive ?? []}
+              onNewChat={() => startNewChat()}
+              onRestoreSession={(sessionId) => restoreChatSession(sessionId)}
+              sending={chatSending}
+              error={chatError}
+              disabled={!article || needsMediaMigration || Boolean(article?.generating)}
+              selectedText={chatSelection}
+              onClearSelection={() => setChatSelection('')}
+              // 历史 / 新建现在挂在顶栏的悬停弹层里，对话栏收着的时候点它们等于点在
+              // 一条看不见的栏上——先把它拉开。
+              onInteract={() => setChatCollapsed(false)}
+              onSend={(text, files) => {
+                if (
+                  !files?.length &&
+                  essayVoiceActive &&
+                  resolveVoiceInputMode(aiConfig?.voiceInputMode) === 'dictation'
+                ) {
+                  void commitEssayVoice(text);
+                  return;
+                }
+                void sendEssayChat(text, files);
+              }}
+              onToggleVoice={essayVoiceEnabled ? toggleEssayVoice : undefined}
+              voiceModeActive={essayVoiceActive}
+              voicePhase={essayVoicePhase}
+              liveTranscript={essayVoiceTranscript}
+              voiceInputMode={resolveVoiceInputMode(aiConfig?.voiceInputMode)}
+              voiceEnabled={essayVoiceEnabled}
+              onExcerpt={insertChatExcerpt}
+              onRetryImage={(messageId, imageId) => {
+                void retryChatImage(messageId, imageId);
+              }}
+              onDropReplyAt={(messageId, clientX, clientY) => {
+                const msg = article?.chatMessages?.find((m) => m.id === messageId);
+                if (!msg?.text.trim()) return;
+                dropChatOntoEditor(clientX, clientY, msg.text);
+              }}
+              onDropSelectionAt={(_messageId, text, clientX, clientY) => {
+                dropChatOntoEditor(clientX, clientY, text);
+              }}
+              onDropChatImage={(img, clientX, clientY) => {
+                if (!img.url) return;
+                const title = (img.title || '').replace(/\n/g, ' ').trim() || 'image';
+                dropChatOntoEditor(clientX, clientY, `![${title}](${img.url})`);
+              }}
+              onDropSearchHitAt={(_messageId, hit, clientX, clientY) => {
+                dropChatOntoEditor(clientX, clientY, formatSearchHitEssayMarkdown(hit));
+              }}
+              onIngestFiles={
+                !article || needsMediaMigration || Boolean(article?.generating)
+                  ? undefined
+                  : (files) => files
+              }
+              onDropPreviewAt={previewDropAt}
+              onDropPreviewEnd={clearDropPreview}
+            />
+          </div>
         </div>
       </div>
 

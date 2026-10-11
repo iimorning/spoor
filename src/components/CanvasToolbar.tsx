@@ -17,10 +17,9 @@ import {
   BookOpen,
 } from 'lucide-react';
 import type { AgentConfig } from '../db';
-import { db } from '../db';
-import { AGENT_NODE_SIZE, getCanvasCenterPosition, PUBLISH_MIN_SELECTION } from '../utils/canvas';
+import { getCanvasCenterPosition, PUBLISH_MIN_SELECTION } from '../utils/canvas';
 import { CANVAS_FILE_UPLOAD_ACCEPT } from '../utils/chatPanelFileUpload';
-import { stampNewCard } from '../utils/stampNewCard';
+import { spawnAgentCardOnCanvas } from '../utils/spawnAgentCard';
 import { resolveAgentLocalizedName } from '../utils/aiI18n';
 import type { CanvasVoicePersona } from '../utils/canvasAskContext';
 import { AgentIcon } from './AgentIcon';
@@ -52,7 +51,7 @@ export interface CanvasToolbarProps {
   /** True while voice mode is active — drives the toolbar mic's active styling. */
   voiceModeActive?: boolean;
   /** Current voice loop phase; used to show live ASR above the mic. */
-  voicePhase?: 'idle' | 'listening' | 'thinking' | 'speaking';
+  voicePhase?: 'idle' | 'listening' | 'draft' | 'thinking' | 'speaking';
   /** Latest Volc ASR transcript while listening (updates as you speak). */
   liveTranscript?: string;
   agentConfigs: AgentConfig[];
@@ -142,6 +141,7 @@ export function CanvasToolbar({
     : t('voice.toolbar_mic');
   const showVoicePicker = canvasVoicePersonas.length > 0;
   const showWaitForChime = voiceModeActive && voicePhase === 'idle';
+  const showDraftHint = voiceModeActive && voicePhase === 'draft';
   const showReadyNudge = readyNudge && voicePhase === 'listening' && !voicePickerOpen;
   const showLiveCaption =
     voiceModeActive && voicePhase === 'listening' && !voicePickerOpen && !showReadyNudge;
@@ -270,19 +270,11 @@ export function CanvasToolbar({
                           key={agent.id}
                           type="button"
                           onClick={async () => {
-                            const { x, y } = getCanvasCenterPosition(transformRef.current);
-                            const hasCover = Boolean((agent.coverImageUrl ?? '').trim());
-                            await db.nodes.add(stampNewCard({
-                              id: crypto.randomUUID(),
+                            await spawnAgentCardOnCanvas({
                               canvasId: activeCanvasId,
-                              type: 'agent',
-                              agentConfigId: agent.id,
-                              x,
-                              y,
-                              ...(hasCover
-                                ? { width: AGENT_NODE_SIZE.width, height: AGENT_NODE_SIZE.height }
-                                : {}),
-                            }));
+                              agentConfig: agent,
+                              position: getCanvasCenterPosition(transformRef.current),
+                            });
                           }}
                           className="text-left px-3 py-2 text-sm text-[#1a1a1a] hover:bg-[#F4F1ED] rounded-lg mb-1 last:mb-0 flex items-center gap-2 min-w-0"
                         >
@@ -375,7 +367,7 @@ export function CanvasToolbar({
             >
               <Mic className={touchChrome ? 'w-5 h-5' : 'w-4 h-4'} aria-hidden />
             </button>
-            {showWaitForChime || showLiveCaption || showReadyNudge || showPersonaChip ? (
+            {showWaitForChime || showDraftHint || showLiveCaption || showReadyNudge || showPersonaChip ? (
               <div className="pointer-events-none absolute bottom-full left-1/2 z-50 flex w-max max-w-[min(18rem,70vw)] -translate-x-1/2 flex-col items-stretch gap-1.5 pb-4">
                 {showWaitForChime ? (
                   <div
@@ -387,6 +379,19 @@ export function CanvasToolbar({
                   >
                     <div className="whitespace-normal text-sm font-serif leading-snug text-[#1a1a1a]">
                       {t('voice.wait_for_chime')}
+                    </div>
+                  </div>
+                ) : null}
+                {showDraftHint ? (
+                  <div
+                    {...canvasOverlayProps}
+                    role="status"
+                    aria-live="polite"
+                    data-testid="toolbar-voice-draft-hint"
+                    className="w-max max-w-[min(18rem,70vw)] shrink-0 rounded-xl border border-[#E6E4DF] bg-white px-3 py-2 shadow-lg"
+                  >
+                    <div className="whitespace-normal text-sm font-serif leading-snug text-[#1a1a1a]">
+                      {t('voice.phase_draft')}
                     </div>
                   </div>
                 ) : null}

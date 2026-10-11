@@ -1,16 +1,12 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
+import type { TFunction } from 'i18next';
 import type { AIConfig } from '../components/AISettingsModal';
 import {
   liveSearchMissingKeyI18nKey,
   liveSearchToolsPromptKey,
   liveSearchUsesImmediateUserQuestion,
 } from '../constants/webSearchBackend';
-import {
-  db,
-  type CanvasChatGeneratedImage,
-  type EssayChatMessage,
-  type EssayChatSession,
-} from '../db';
+import { type AgentConfig, type CanvasChatGeneratedImage, type EssayChatMessage } from '../db';
 import {
   buildEssayChatSession,
   prependEssayChatArchive,
@@ -23,10 +19,22 @@ import { hasFlux302Credentials, imageKeysFromAiConfig } from '../services/flux30
 import { synthesizeAskFromSearch } from '../services/synthesizeAskFromSearch';
 import { hasLiveWebSearchAccess } from '../lib/serverConfig';
 import { prepareEssayChatAttachments } from '../utils/essayChatAttachments';
-import { combineSystemParts } from '../utils/aiI18n';
-import { flushArticleChatWrites, runEssayStreamingCall } from '../utils/essayStreamingAi';
+import { buildAgentSystemInstruction, combineSystemParts, resolveAgentLocalizedName } from '../utils/aiI18n';
+import { runChatStreamingCall } from '../utils/chatStreamingAi';
+import { articleChatThreadStore } from '../utils/chatThreadStore';
 import { spoorLlmSessionId } from '../utils/openRouterPromptCache';
+import { buildAskPersona } from '../utils/askPersona';
 import { userTurnRequestsLiveSearch } from '../utils/webSearchCommand';
+import { generateSuggestedFollowUps } from '../utils/suggestedFollowUps';
+import {
+  buildSurfaceTurnCue,
+  EMPTY_SURFACE_ROOM,
+  formatSurfaceHistoryForSpeaker,
+  resolveSurfaceSpeakers,
+  surfaceAnswerer,
+  surfaceGuests,
+  type SurfaceRoomState,
+} from '../utils/surfacePersonaRoom';
 
 function newId(): string {
   return `ec-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -37,6 +45,8 @@ export function useEssayChat({
   articleTitle,
   messages,
   aiConfig,
+  room,
+  agents,
   t,
   getBodyMarkdown,
   getSelectedText,
@@ -46,7 +56,12 @@ export function useEssayChat({
   articleTitle: string;
   messages: EssayChatMessage[];
   aiConfig: AIConfig | null;
-  t: (key: string, opts?: Record<string, unknown>) => string;
+  /** 侧栏房间里的人。缺省 = 沿用内置助手，行为与加这个功能之前逐字节一致。 */
+  room?: SurfaceRoomState;
+  agents?: AgentConfig[];
+  // 下面要把 t 传给按 TFunction 收参数的服务（filterWebpages / synthesizeAskFromSearch），
+  // 自己写窄签名会让它们报 "缺少 $TFunctionBrand"。
+  t: TFunction<'translation', undefined>;
   getBodyMarkdown: () => string;
   getSelectedText: () => string;
   applyChatEdits: (
@@ -56,23 +71,33 @@ export function useEssayChat({
 }) {
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // 讨论进行中。它不能拿 `sending` 顶替：用户在提问时 sending 也是 true，
+  // 那样讨论按钮会显示成"正在轮流发言"，还顺手把角色条整个禁用了。
+  const [discussing, setDiscussing] = useState(false);
+  // 真正拦重入的东西。`sending` 来自渲染闭包，连点两下会读到同一个 false，
+  // 于是两轮讨论并发写同一段对话。
+  const discussingRef = useRef(false);
+  // 缺省成"空房间"而不是让调用方都必须传：不传就是没有角色，行为与从前一致。
+  const activeRoom = useMemo(() => room ?? EMPTY_SURFACE_ROOM, [room]);
+  const activeAgents = useMemo(() => agents ?? [], [agents]);
+  // 阿狸恒在：空房间不代表"没有角色"，而是"只有阿狸"。这是和画布上的一致性——
+  // 同一个伴读对象，书房和长文里也是他。
+  const askPersona = useMemo(() => buildAskPersona(t), [t]);
+
+  const store = useMemo(() => articleChatThreadStore(articleId), [articleId]);
 
   const persistMessages = useCallback(
     async (next: EssayChatMessage[]) => {
-      await db.articles.update(articleId, { chatMessages: next });
+      await store.saveMessages(next);
     },
-    [articleId],
+    [store],
   );
 
   const patchAssistant = useCallback(
     async (assistantId: string, fallback: EssayChatMessage[], partial: Partial<EssayChatMessage>) => {
-      const row = await db.articles.get(articleId);
-      const current =
-        row?.chatMessages && row.chatMessages.length > 0 ? row.chatMessages : fallback;
-      const next = current.map((m) => (m.id === assistantId ? { ...m, ...partial } : m));
-      await persistMessages(next);
+      await store.updateMessage(assistantId, fallback, (m) => ({ ...m, ...partial }));
     },
-    [articleId, persistMessages],
+    [store],
   );
 
   const send = useCallback(
@@ -124,11 +149,17 @@ export function useEssayChat({
       const pending = [...messages, userMsg];
       await persistMessages(pending);
 
+      // 这一轮由谁答话：房间里第一个没被禁言的人。没人 = 内置助手。
+      const answerer = surfaceAnswerer(activeRoom, activeAgents, askPersona);
       const assistantMsg: EssayChatMessage = {
         id: newId(),
         role: 'assistant',
         text: '',
         createdAt: Date.now(),
+        // 房间里有人时给这一条署上名：气泡要分得出这是谁说的话。
+        ...(answerer
+          ? { speakerAgentId: answerer.id, speakerName: resolveAgentLocalizedName(answerer) }
+          : {}),
       };
       const withAssistant = [...pending, assistantMsg];
       await persistMessages(withAssistant);
@@ -156,16 +187,28 @@ export function useEssayChat({
           canSearch &&
           !liveSearchUsesImmediateUserQuestion() &&
           userTurnRequestsLiveSearch(requestText);
-        const systemInstruction = combineSystemParts(
+        const featurePrompt = combineSystemParts(
           t('ai.prompts.essayChatSystem'),
           canDraw ? t('ai.prompts.drawToolAvailable') : '',
           canSearch ? t(liveSearchToolsPromptKey()) : '',
           userWantsLiveSearch ? t('ai.prompts.askWebSearchRequired') : '',
           canDraw || canSearch ? t('ai.prompts.essayChatToolsAfterJson') : '',
         );
+        // 房间里没人时这段提示词一个字都不动；有人选时，角色的提示词拼在功能契约前面。
+        // 功能契约管的是 JSON 信封和占位符这类硬格式，模型对靠后的指令依从得更好，
+        // 所以它留在最后。
+        const systemInstruction = answerer
+          ? buildAgentSystemInstruction(answerer, { extraParts: [featurePrompt] })
+          : featurePrompt;
+        const sampling = answerer
+          ? {
+              temperature: answerer.temperature ?? 0.7,
+              topP: answerer.creativity ?? 0.4,
+            }
+          : {};
 
-        const { parsed, extracted, reply: modelReply } = await runEssayStreamingCall({
-          articleId,
+        const { parsed, extracted, reply: modelReply } = await runChatStreamingCall({
+          store,
           messageId: assistantMsg.id,
           ...(canSearch && liveSearchUsesImmediateUserQuestion() && requestText.trim()
             ? { immediateSearchQuery: requestText.trim() }
@@ -174,6 +217,7 @@ export function useEssayChat({
             callUniversalAI({
               config: aiConfig,
               systemInstruction,
+              ...sampling,
               messages: [
                 {
                   role: 'user',
@@ -255,16 +299,29 @@ export function useEssayChat({
           reply = `${reply}\n\n${t('reference.essay_chat_missed')}`;
         }
 
-        await flushArticleChatWrites(articleId);
-        const row = await db.articles.get(articleId);
-        const latestAssistant = row?.chatMessages?.find((m) => m.id === assistantMsg.id);
+        await store.flush();
+        const latestMessages = await store.loadMessages([]);
+        const latestAssistant = latestMessages.find((m) => m.id === assistantMsg.id);
 
-        await patchAssistant(assistantMsg.id, row?.chatMessages ?? withAssistant, {
+        await patchAssistant(assistantMsg.id, latestMessages.length > 0 ? latestMessages : withAssistant, {
           text: reply,
           editCount: applied || undefined,
           ...(latestAssistant?.searchHits?.length
             ? { searchHits: latestAssistant.searchHits }
             : {}),
+        });
+
+        void generateSuggestedFollowUps({
+          config: aiConfig,
+          userQuestion: requestText,
+          assistantReply: reply,
+          t,
+          sessionId: spoorLlmSessionId('essay-followups', articleId),
+        }).then(async (followUps) => {
+          if (followUps.length === 0) return;
+          const messagesNow = await store.loadMessages([]);
+          if (messagesNow[messagesNow.length - 1]?.id !== assistantMsg.id) return;
+          await patchAssistant(assistantMsg.id, messagesNow, { suggestedFollowUps: followUps });
         });
 
         if (extracted.images.length > 0 && canDraw) {
@@ -318,8 +375,7 @@ export function useEssayChat({
         setError(t('reference.essay_chat_no_ai'));
         return;
       }
-      const row = await db.articles.get(articleId);
-      const current = row?.chatMessages ?? messages;
+      const current = await store.loadMessages(messages);
       const message = current.find((m) => m.id === messageId);
       const image = message?.images?.find((img) => img.id === imageId);
       if (!image) return;
@@ -336,8 +392,7 @@ export function useEssayChat({
         onUpdate: async (images) => {
           const nextSlot = images[0];
           if (!nextSlot) return;
-          const latest = await db.articles.get(articleId);
-          const thread = latest?.chatMessages ?? current;
+          const thread = await store.loadMessages(current);
           await persistMessages(
             thread.map((m) =>
               m.id === messageId
@@ -353,41 +408,120 @@ export function useEssayChat({
         },
       });
     },
-    [aiConfig, articleId, messages, persistMessages, t],
+    [aiConfig, messages, persistMessages, store, t],
   );
+
+  /**
+   * 让房间里除答话者以外的人，挨个接一句。
+   *
+   * 嘉宾不做流式：这一栏是逐字进气泡的，两个声音同时往里写会互相打断，而打断之后
+   * 留下的半句话没法收场。嘉宾也不带 edits——正文归主答话的人改，别人插进来改会
+   * 和用户的编辑意图打架。
+   *
+   * 顺序在开场定一次，免得房间中途微调导致有人被跳过或重复。
+   */
+  const discuss = useCallback(async (): Promise<void> => {
+    if (discussingRef.current || !aiConfig) return;
+    const answerer = surfaceAnswerer(activeRoom, activeAgents, askPersona);
+    // 没人选角色就没有别人可接。
+    if (!answerer) return;
+    const featurePrompt = t('ai.prompts.essayChatSystem');
+    const answererName = resolveAgentLocalizedName(answerer);
+    const ordered = surfaceGuests(activeRoom, activeAgents).filter((g) => g.id !== answerer.id);
+    if (ordered.length === 0) return;
+
+    setError(null);
+    discussingRef.current = true;
+    setDiscussing(true);
+    setSending(true);
+    try {
+      for (const guest of ordered) {
+        // 发言之前再确认这个人还在、没被禁言：讨论跑到一半有人被撤了，
+        // 就不该再轮到他。
+        if (!resolveSurfaceSpeakers(activeRoom, activeAgents).some((a) => a.id === guest.id)) {
+          continue;
+        }
+
+        const history = await store.loadMessages([]);
+        const cue = buildSurfaceTurnCue({ messages: history, hostNameFallback: answererName, t });
+        const system = buildAgentSystemInstruction(guest, {
+          extraParts: [
+            featurePrompt,
+            t('ai.prompts.personaGroupPresent', { others: answererName }),
+          ],
+        });
+        const result = await callUniversalAI({
+          config: aiConfig,
+          systemInstruction: system,
+          temperature: guest.temperature ?? 0.7,
+          topP: guest.creativity ?? 0.4,
+          messages: [
+            ...formatSurfaceHistoryForSpeaker(history, guest.id, (name) => `${name}: `, 12),
+            { role: 'user', content: cue },
+          ],
+          sessionId: spoorLlmSessionId('essay-chat', articleId),
+        });
+        const text = result.trim();
+        if (!text) continue;
+        await store.replaceThread(
+          [
+            ...history,
+            {
+              id: newId(),
+              role: 'assistant' as const,
+              text,
+              createdAt: Date.now(),
+              speakerAgentId: guest.id,
+              speakerName: resolveAgentLocalizedName(guest),
+            },
+          ],
+          await store.loadArchive(),
+        );
+      }
+    } catch (e) {
+      setError(formatAiError(e));
+    } finally {
+      discussingRef.current = false;
+      setDiscussing(false);
+      setSending(false);
+    }
+  }, [activeAgents, activeRoom, aiConfig, articleId, store, t]);
 
   const startNewChat = useCallback(async () => {
     if (sending) return;
     setError(null);
-    const row = await db.articles.get(articleId);
-    const current = row?.chatMessages ?? [];
+    const current = await store.loadMessages([]);
     if (current.length === 0) return;
     const session = buildEssayChatSession(current);
-    await db.articles.update(articleId, {
-      chatMessages: [],
-      chatSessionArchive: prependEssayChatArchive(row?.chatSessionArchive, session),
-    });
-  }, [articleId, sending]);
+    const archive = await store.loadArchive();
+    await store.replaceThread([], prependEssayChatArchive(archive, session));
+  }, [sending, store]);
 
   const restoreChatSession = useCallback(
     async (sessionId: string) => {
       if (sending) return false;
       setError(null);
-      const row = await db.articles.get(articleId);
-      const plan = restoreEssayChatSessionPlan(
-        row?.chatMessages ?? [],
-        row?.chatSessionArchive,
-        sessionId,
-      );
+      const current = await store.loadMessages([]);
+      const archive = await store.loadArchive();
+      const plan = restoreEssayChatSessionPlan(current, archive, sessionId);
       if (!plan) return false;
-      await db.articles.update(articleId, {
-        chatMessages: plan.nextMessages,
-        chatSessionArchive: plan.nextArchive,
-      });
+      await store.replaceThread(plan.nextMessages, plan.nextArchive);
       return true;
     },
-    [articleId, sending],
+    [sending, store],
   );
 
-  return { sending, error, send, retryChatImage, startNewChat, restoreChatSession };
+  // `setError` 一并交出去：标注那一趟失败时要有个能说话的地方（和 useBookChat 一样，
+  // 它那边的伴读标注就是借用读错误位报出来的）。这里只借这一格，不给别的。
+  return {
+    sending,
+    discussing,
+    error,
+    setError,
+    send,
+    discuss,
+    retryChatImage,
+    startNewChat,
+    restoreChatSession,
+  };
 }

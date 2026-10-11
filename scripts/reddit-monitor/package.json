@@ -1,0 +1,20 @@
+{
+  "name": "spoor-reddit-monitor",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Standalone Reddit monitoring workflow for Spoor — fetches posts from target subreddits, deduplicates, and computes sentiment + pain tags. Zero runtime dependencies (Node built-ins only).",
+  "main": "fetch.mjs",
+  "scripts": {
+    "fetch": "node fetch.mjs",
+    "fetch:dry": "node fetch.mjs --dry-run",
+    "stats": "node fetch.mjs --stats",
+    "serve": "node serve.mjs",
+    "start:all": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./start-monitor.ps1",
+    "setup:ai": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./setup-monitor-ai.ps1",
+    "test": "node --test test/forum-ai.test.mjs test/forum-batch.test.mjs test/forum-raw.test.mjs test/forum-state.test.mjs test/sentiment.test.mjs test/serve.test.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

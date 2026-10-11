@@ -13,10 +13,12 @@ import {
   hasBuiltinDoubaoApiKey,
 } from '../constants/doubao';
 import { DEEPSEEK_BASE_URL, DEEPSEEK_DEFAULT_MODEL } from '../constants/deepseek';
+import { type ReasoningMode } from '../constants/openrouter';
 import { MINIMAX_BASE_URL, MINIMAX_DEFAULT_MODEL } from '../constants/minimax';
 import {
   MINIMAX_DEFAULT_VOICE_ID,
   MINIMAX_ENGLISH_VOICE_ID,
+  type VoiceInputMode,
 } from '../constants/voiceWriting';
 import { downloadDesktopInstaller } from '../utils/downloadDesktopInstaller';
 import { isTauriRuntime } from '../utils/isTauriRuntime';
@@ -61,6 +63,16 @@ export interface AIConfig {
    * Pro 用户登录后 App.tsx 自动置为 true；免费用户走自带 Key。
    */
   useServerKeys?: boolean;
+  /**
+   * Canvas voice input: auto-send after a pause, or keep text in the composer
+   * until the user clicks send. AI reply + TTS stay the same either way.
+   */
+  voiceInputMode?: VoiceInputMode;
+  /**
+   * 深度思考（OpenRouter 的统一 reasoning 参数）：'default' 不传、跟随模型；
+   * 'off' 关掉；'low'/'medium'/'high' 调档。见 constants/openrouter.ts。
+   */
+  reasoningMode?: ReasoningMode;
 }
 
 export interface AISettingsModalProps {

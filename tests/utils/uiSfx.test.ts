@@ -74,17 +74,19 @@ describe('playUiSfx', () => {
   it('preload decodes the clip; play starts a BufferSource without fetching again', async () => {
     preloadUiSfx();
     await vi.waitFor(() => {
-      expect(FakeAudioContext.instances[0]?.decodeAudioData).toHaveBeenCalledTimes(1);
+      expect(FakeAudioContext.instances[0]?.decodeAudioData).toHaveBeenCalledTimes(2);
     });
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledWith('/sfx/bubble-pop.mp3');
+    expect(fetchMock).toHaveBeenCalledWith('/sfx/paper-swish.mp3?v=2');
 
     playUiSfx('bubblePop');
-    playUiSfx('bubblePop');
+    playUiSfx('paperSwish');
 
     const ctx = FakeAudioContext.instances[0];
     expect(ctx.createBufferSource).toHaveBeenCalledTimes(2);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(ctx.decodeAudioData).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(ctx.decodeAudioData).toHaveBeenCalledTimes(2);
     const source = ctx.createBufferSource.mock.results[0].value as FakeBufferSourceNode;
     expect(source.started).toBe(true);
   });
@@ -98,6 +100,15 @@ describe('playUiSfx', () => {
       expect(ctx.createBufferSource).toHaveBeenCalledTimes(1);
     });
     expect(fetchMock).toHaveBeenCalledWith('/sfx/bubble-pop.mp3');
+  });
+
+  it('play paperSwish fetches the delete-card clip', async () => {
+    playUiSfx('paperSwish');
+    const ctx = FakeAudioContext.instances[0];
+    await vi.waitFor(() => {
+      expect(ctx.createBufferSource).toHaveBeenCalledTimes(1);
+    });
+    expect(fetchMock).toHaveBeenCalledWith('/sfx/paper-swish.mp3?v=2');
   });
 
   it('swallows fetch failures', async () => {

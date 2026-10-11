@@ -329,12 +329,19 @@ export function pickPersonaToClaimUnboundZone(
   return occupants[0];
 }
 
+/**
+ * 允许停在别人房间里的例外：这个人是否在那间房的讨论名单里。
+ * 房间归属不变 —— 名单里的人只是客人，房间仍然属于主角色。
+ */
+export type RoomGuestCheck = (zoneHostNodeId: string, personaNodeId: string) => boolean;
+
 /** True when this persona would land in a room already bound to someone else. */
 export function personaBlockedByForeignWorkZone(
   node: CanvasNode,
   pos: { x: number; y: number },
   zones: CanvasWorkZone[],
   liveNodes?: CanvasNode[],
+  isRoomGuest?: RoomGuestCheck,
 ): boolean {
   if (!isPersonaAnchorNode(node)) return false;
   const zone = findInnermostWorkZone({ ...node, ...pos }, zones);
@@ -342,6 +349,9 @@ export function personaBlockedByForeignWorkZone(
   if (liveNodes && !liveNodes.some((n) => n.id === zone.personaNodeId && isPersonaAnchorNode(n))) {
     return false;
   }
+  // 已经在里面的不再拦：名单被移出之后，卡在里面也要能动。
+  if (isNodeInWorkZone(node, zone)) return false;
+  if (isRoomGuest?.(zone.personaNodeId, node.id)) return false;
   return true;
 }
 
@@ -398,6 +408,7 @@ export async function applyWorkZoneOnDragEnd(
   finalPos: { x: number; y: number },
   nodes: CanvasNode[],
   zones: CanvasWorkZone[],
+  isRoomGuest?: RoomGuestCheck,
 ): Promise<WorkZoneDragEndResult> {
   const dragged = nodes.find((n) => n.id === draggedNodeId);
   if (!dragged) return {};
@@ -411,7 +422,12 @@ export async function applyWorkZoneOnDragEnd(
       await db.canvasWorkZones.update(zone.id, { personaNodeId: dragged.id });
       return { boundZoneId: zone.id, assigned: dragged.id };
     }
-    if (zone.personaNodeId !== dragged.id) return { blocked: true };
+    if (zone.personaNodeId !== dragged.id) {
+      // 名单里的人可以停进主角色的房间；已经在里面的也不再赶。
+      if (isRoomGuest?.(zone.personaNodeId, dragged.id)) return {};
+      if (isNodeInWorkZone(dragged, zone)) return {};
+      return { blocked: true };
+    }
     return {};
   }
 

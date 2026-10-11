@@ -1,6 +1,14 @@
 @import url('https://fonts.googleapis.com/css2?family=Manrope:wght@200;300;400;500;600;700;800&family=Newsreader:opsz,wght@6..72,400..800&display=swap');
 @import "tailwindcss";
 
+/* The sibling apps under the repo root are their own Tailwind projects. Without
+   this, their sources are scanned into the canvas stylesheet as well, and the
+   canvas ships utilities only those pages use. Keep class syntax out of this
+   comment: Tailwind scans the CSS file too, and would generate what it reads. */
+@source not "../collage-poetry";
+@source not "../whose-words";
+@source not "../dice-collage-poetry";
+
 /* Self-hosted CJK faces download only after the user picks one in settings. */
 
 :root {
@@ -200,6 +208,18 @@ html[data-note-cjk='qingsong'] {
   [data-rotating] .note-surface-glass {
     -webkit-backdrop-filter: none;
     backdrop-filter: none;
+  }
+
+  /* Pin the canvas layer. The whole canvas is one fractionally scaled transform
+     layer, so any compositing change inside it (hover chrome fading in, the
+     link's × button appearing) can make Chromium re-decide that layer's
+     rasterization and re-render the glyphs of every card in the affected
+     tiles — seen as card text flickering while hovering a link. With the layer
+     promoted from the start, its rasterization is settled once instead of
+     mid-interaction. Trade-off: the canvas is always a composited layer, so
+     re-check how text looks at extreme zoom-out (10%) before relying on it. */
+  .canvas-cjk {
+    will-change: transform;
   }
 
   .note-glass-wash {
@@ -499,6 +519,21 @@ html[data-note-cjk='qingsong'] {
 [data-theme="dark"] .text-\[\#a0350a\] { color: var(--color-accent-hover) !important; }
 [data-theme="dark"] .text-\[\#9a3412\] { color: #fdba74 !important; }
 
+/* 正文色：聊天气泡、「AI 会读这一段」里的摘抄、输入框、以及全屏阅读的摘抄本/页脚
+   都用它。之前漏在这里，于是暗色下是近黑的字压在暗色气泡上——两处都看不见。
+   它和 text-[#1a1a1a] 是同一档正文色，映射到同一个 token。 */
+[data-theme="dark"] .text-\[\#2c2c28\] { color: var(--color-text) !important; }
+[data-theme="dark"] .hover\:text-\[\#2c2c28\]:hover { color: var(--color-text) !important; }
+
+/* 悬停态同理：这些色在亮色主题里够深（6~7:1），搬到暗底上只剩 2:2 出头，
+   指针压上去的一瞬间文字就消失了。跟着各自的亮色版映射到同一个 token。 */
+[data-theme="dark"] .hover\:text-\[\#5a5a54\]:hover { color: var(--color-text-secondary) !important; }
+[data-theme="dark"] .hover\:text-\[\#9a3412\]:hover { color: var(--color-accent-hover) !important; }
+[data-theme="dark"] .hover\:text-\[\#a0350a\]:hover { color: var(--color-accent-hover) !important; }
+
+/* 设置文档里的链接蓝 #1d4ed8 在暗底上只有 2.4:1，换成亮一档的蓝。 */
+[data-theme="dark"] .text-\[\#1d4ed8\] { color: #93c5fd !important; }
+
 [data-theme="dark"] .border-\[\#E6E4DF\] { border-color: var(--color-border) !important; }
 [data-theme="dark"] .border-\[\#d1cfca\] { border-color: var(--color-border-muted) !important; }
 [data-theme="dark"] .border-\[\#C2410C\] { border-color: var(--color-accent) !important; }
@@ -548,10 +583,24 @@ html[data-note-cjk='qingsong'] {
 [data-theme="dark"] .border-\[\#1a1a1a\] { border-color: var(--color-text) !important; }
 [data-theme="dark"] .decoration-\[\#C2410C\]\/45 { text-decoration-color: color-mix(in srgb, var(--color-accent) 45%, transparent) !important; }
 
-[data-theme="dark"] .bg-\[\#1a1a1a\] { background-color: var(--color-text) !important; }
+/* 节点内部不参与：ThemeNode 的深色卡也是 bg-[#1a1a1a]，它要的就是深底白字，
+   被翻成浅底就成了「深色卡长这样」。见 DraggableNode 上的 data-canvas-node。 */
+[data-theme="dark"] .bg-\[\#1a1a1a\]:not([data-canvas-node] *) { background-color: var(--color-text) !important; }
 [data-theme="dark"] .bg-\[\#1a1a1a\]\/85 { background-color: rgba(0,0,0,0.85) !important; }
 [data-theme="dark"] .bg-\[\#1a1a1a\]\/88 { background-color: rgba(0,0,0,0.92) !important; }
 [data-theme="dark"] .bg-\[\#FAF9F6\]\/80 { background-color: color-mix(in srgb, var(--color-surface) 80%, transparent) !important; }
+
+/* ── 阅读器（书籍卡 + 全屏 + 摘抄栏）漏掉的几档 ──
+   bg-white/98 是翻译浮层、聊天菜单和页码条共用的底色，上面那张表补过 /90 /95 /70 /50，
+   唯独漏了 /98 —— 于是暗色下浮层还是一张白卡片压在暗底上，字被翻成了浅色，整片读不出来。
+   其余三条是翻的时候才看得见的：#6f6b64 是菜单项的常态字色，暗底上只剩 2.6:1；
+   #a0350a 是橙色按钮的悬停档，暗底上指针一压就看不见了；#EFEDE8 是浮层里的细分隔线，
+   亮色下几乎看不见，搬到暗底上就成了一道刺眼的白边。 */
+[data-theme="dark"] .bg-white\/98 { background-color: color-mix(in srgb, var(--color-surface-elevated) 98%, transparent) !important; }
+[data-theme="dark"] .text-\[\#6f6b64\] { color: var(--color-text-secondary) !important; }
+[data-theme="dark"] .hover\:bg-\[\#a0350a\]:hover { background-color: var(--color-accent-hover) !important; }
+[data-theme="dark"] .border-\[\#EFEDE8\] { border-color: var(--color-border-muted) !important; }
+[data-theme="dark"] .hover\:text-\[\#8c8a84\]:hover { color: var(--color-text-muted) !important; }
 [data-theme="dark"] .border-\[\#C2410C\]\/20 { border-color: color-mix(in srgb, var(--color-accent) 20%, transparent) !important; }
 [data-theme="dark"] .text-\[\#a09f9c\] { color: var(--color-text-muted) !important; }
 [data-theme="dark"] .hover\:bg-\[\#FEF2F2\]:hover { background-color: color-mix(in srgb, #ef4444 12%, transparent) !important; }
@@ -602,6 +651,86 @@ html[data-note-cjk='qingsong'] {
 [data-theme="dark"] .hover\:bg-\[\#9a3412\]:hover { background-color: var(--color-accent-hover) !important; }
 [data-theme="dark"] .hover\:bg-\[\#9A3412\]:hover { background-color: var(--color-accent-hover) !important; }
 [data-theme="dark"] .bg-\[\#FBF5EE\]\/70 { background-color: color-mix(in srgb, var(--color-accent-subtle) 70%, transparent) !important; }
+
+/* ── 「近黑底 + 白字」的按钮：对话框的确认 / 知道了、发布大纲的发布按钮。
+       bg-[#1a1a1a] 在暗色下按惯例翻成近白的 --color-text，而 text-white 表里本来
+       没有对应条目，于是就成了白底白字——全应用每个默认确认按钮都这样。
+       这里不翻底（深色界面里再放一块近白底反而刺眼），把字翻成深色即可。
+       悬停态的 hover:bg-[#333] 已经映射成一层 18% 白，压在深色字上仍然读得出。 ── */
+[data-theme="dark"] .bg-\[\#1a1a1a\].text-white:not([data-canvas-node] *) { color: #1a1a1a !important; }
+
+/* ── 分隔线：#F4F1ED 是亮色主题里最淡的一档（白底上几乎看不见），暗色下原样留着
+       就是一道刺眼的白线。对话框标题、历史记录弹层、设置、发布、模板页等 14 处。 ── */
+[data-theme="dark"] .border-\[\#F4F1ED\] { border-color: var(--color-border) !important; }
+
+/* 悬停时才出现的边：亮色版比常态深一档，暗色下要反过来比底色亮一档。 */
+[data-theme="dark"] .hover\:border-\[\#E6E4DF\]:hover { border-color: color-mix(in srgb, var(--color-text-secondary) 45%, transparent) !important; }
+[data-theme="dark"] .hover\:border-\[\#d8d4cc\]:hover { border-color: color-mix(in srgb, var(--color-text-secondary) 45%, transparent) !important; }
+
+/* ── 暗色里剩下的亮色底。其中 bg-[#E6E4DF] 在设置面板里是拿 bg 画的竖分隔线，
+       所以归到 border 档而不是 surface。 ── */
+[data-theme="dark"] .bg-\[\#E6E4DF\]        { background-color: var(--color-border)        !important; }
+[data-theme="dark"] .bg-\[\#EFEDE8\]        { background-color: var(--color-surface-hover) !important; }
+[data-theme="dark"] .bg-\[\#f5f4f0\]        { background-color: var(--color-surface-muted) !important; }
+[data-theme="dark"] .bg-\[\#F3F2EE\]        { background-color: var(--color-surface-muted) !important; }
+[data-theme="dark"] .bg-\[\#d1cfca\]        { background-color: var(--color-border-muted)  !important; }
+[data-theme="dark"] .bg-\[\#E8E6E1\]        { background-color: var(--color-surface-muted) !important; }
+[data-theme="dark"] .hover\:bg-\[\#E6E4DF\]:hover { background-color: var(--color-surface-hover) !important; }
+[data-theme="dark"] .hover\:bg-\[\#E8E6E1\]:hover { background-color: var(--color-surface-hover) !important; }
+[data-theme="dark"] .focus\:bg-\[\#EAE7E2\]:focus { background-color: var(--color-surface-hover) !important; }
+[data-theme="dark"] .focus-visible\:bg-\[\#F4F1ED\]:focus-visible { background-color: var(--color-surface-hover) !important; }
+
+/* 带透明度的同类：表里有 /70 /80 的档，唯独漏了这几个（表里已有的一律照抄它的目标）。
+   变体后面那两个 :not() 不是多余的——`.bg-white` 的重映射带 !important 且权重更高，
+   不补同样的 :not()，悬停/聚焦时等于什么都没写。 */
+[data-theme="dark"] .hover\:bg-\[\#F4F1ED\]\/50:hover:not([style*="--node-bg"]):not([data-glass-surface]) { background-color: color-mix(in srgb, var(--color-surface-hover) 50%, transparent) !important; }
+[data-theme="dark"] .hover\:bg-\[\#E6E4DF\]\/60:hover:not([style*="--node-bg"]):not([data-glass-surface]) { background-color: color-mix(in srgb, var(--color-surface-hover) 60%, transparent) !important; }
+[data-theme="dark"] .focus\:bg-\[\#EAE7E2\]\/50:focus:not([style*="--node-bg"]):not([data-glass-surface]) { background-color: color-mix(in srgb, var(--color-surface-hover) 50%, transparent) !important; }
+[data-theme="dark"] .focus-visible\:bg-\[\#F4F1ED\]\/80:focus-visible:not([style*="--node-bg"]):not([data-glass-surface]) { background-color: color-mix(in srgb, var(--color-surface-hover) 80%, transparent) !important; }
+[data-theme="dark"] .bg-\[\#FFF7ED\]\/50 { background-color: color-mix(in srgb, var(--color-accent-subtle) 50%, transparent) !important; }
+[data-theme="dark"] .border-\[\#E6E4DF\]\/80 { border-color: color-mix(in srgb, var(--color-border) 80%, transparent) !important; }
+[data-theme="dark"] .border-\[\#E6E4DF\]\/70 { border-color: color-mix(in srgb, var(--color-border) 70%, transparent) !important; }
+
+/* 禁用态：上面 `.bg-white` 的重映射带 !important，还多了两个 :not()，权重比这条高，
+   结果暗色下禁用态和正常态一个颜色。这条把同样的 :not() 补上，靠权重而不是顺序取胜。 */
+[data-theme="dark"] .disabled\:bg-\[\#F4F1ED\]:disabled:not([style*="--node-bg"]):not([data-glass-surface]) { background-color: var(--color-surface-hover) !important; }
+
+/* ── 节点里的浅色部件。哪些节点要管，取决于它有没有自己的纸色：
+       bg-white 且不带 --node-bg 的节点（Ambience / Agent / Ask / Essay 等）整体会跟着
+       暗色翻，它内部的浅色件也得跟着翻，否则深色节点上会留一条白边（见 AmbienceNode
+       顶部那条）。带 --node-bg 的节点（笔记、便签那类）自带纸色，不在这一列。 ── */
+[data-theme="dark"] .bg-\[\#F7F4F0\]        { background-color: var(--color-surface-muted) !important; }
+[data-theme="dark"] .hover\:bg-\[\#F7F4F0\]:hover { background-color: var(--color-surface-hover) !important; }
+[data-theme="dark"] .bg-\[\#FBF5EE\]        { background-color: var(--color-accent-subtle) !important; }
+[data-theme="dark"] .bg-\[\#FBF5EE\]\/35    { background-color: color-mix(in srgb, var(--color-accent-subtle) 35%, transparent) !important; }
+[data-theme="dark"] .bg-\[\#C2410C\]\/12    { background-color: color-mix(in srgb, var(--color-accent) 12%, transparent) !important; }
+[data-theme="dark"] .text-\[\#a0350a\]\/90  { color: color-mix(in srgb, var(--color-accent-hover) 90%, transparent) !important; }
+[data-theme="dark"] .text-\[\#2d2d29\]        { color: var(--color-text) !important; }
+[data-theme="dark"] .text-\[\#6b6963\]        { color: var(--color-text-secondary) !important; }
+
+/* ── 图谱视图的主题存在自己的 localStorage 里，用户可以显式选浅色；它在自己那层
+       DOM 上也写了 data-theme="light"（应用本身写在 <html> 上）。它不该跟着应用翻：
+       深色应用里打开浅色图谱，文字被翻成白的压在浅色底上，整屏读不出来。
+       每个类名写两条选择器：外壳类就长在带 data-theme 的那个元素**自己**身上
+       （CanvasGraphView 的根节点），卡片、按钮这些则是它的后代——少写一条，
+       外壳就会漏。 ── */
+[data-theme="dark"] [data-theme="light"].text-\[\#1a1a1a\],
+[data-theme="dark"] [data-theme="light"] .text-\[\#1a1a1a\] { color: #1a1a1a !important; }
+[data-theme="dark"] [data-theme="light"].text-\[\#8c8a84\],
+[data-theme="dark"] [data-theme="light"] .text-\[\#8c8a84\] { color: #8c8a84 !important; }
+[data-theme="dark"] [data-theme="light"].text-\[\#8c8a84\]\/70,
+[data-theme="dark"] [data-theme="light"] .text-\[\#8c8a84\]\/70 { color: rgb(140 138 132 / 0.7) !important; }
+[data-theme="dark"] [data-theme="light"].border-\[\#E6E4DF\],
+[data-theme="dark"] [data-theme="light"] .border-\[\#E6E4DF\] { border-color: #E6E4DF !important; }
+[data-theme="dark"] [data-theme="light"].bg-\[\#F4F1ED\],
+[data-theme="dark"] [data-theme="light"] .bg-\[\#F4F1ED\] { background-color: #F4F1ED !important; }
+[data-theme="dark"] [data-theme="light"].bg-\[\#F7F4F0\],
+[data-theme="dark"] [data-theme="light"] .bg-\[\#F7F4F0\] { background-color: #F7F4F0 !important; }
+[data-theme="dark"] [data-theme="light"] .hover\:bg-\[\#EAE7E2\]:hover { background-color: #EAE7E2 !important; }
+[data-theme="dark"] [data-theme="light"] .bg-white\/95:not([style*="--node-bg"]):not([data-glass-surface]),
+[data-theme="dark"] [data-theme="light"].bg-white\/95:not([style*="--node-bg"]):not([data-glass-surface]) { background-color: rgb(255 255 255 / 0.95) !important; }
+[data-theme="dark"] [data-theme="light"] .bg-white:not([style*="--node-bg"]):not([data-glass-surface]),
+[data-theme="dark"] [data-theme="light"].bg-white:not([style*="--node-bg"]):not([data-glass-surface]) { background-color: #ffffff !important; }
 
 /* Unlayered: beat Tailwind @layer + WebView2 quirks under canvas transforms. */
 .scrollbar-hide,
@@ -708,3 +837,164 @@ html[data-note-cjk='qingsong'] {
   }
 }
 
+/* 「跳回原文」落地后标出那一段（CSS Custom Highlight，注册名见 utils/bookPassage.ts）。
+   用红底而不是红字：正文要保持可读，这个标记只是指出落点。
+   只留底色不加下划线：红底已经指得出是哪一段，下划线压在每行字下面反而把正文划碎了。 */
+::highlight(spoor-book-passage) {
+  background-color: rgb(220 38 38 / 0.18);
+  color: #7f1d1d;
+}
+
+[data-theme="dark"] ::highlight(spoor-book-passage) {
+  background-color: rgb(248 113 113 / 0.26);
+  color: #fecaca;
+}
+
+/* AI 伴读标出的重点（标记由 utils/bookFocusAnnotation.ts 在正文里就地套上，
+   脚注挂在同一处的句尾——所以这里是普通的 <mark>，不是 ::highlight：
+   脚注要能点、要挂得住东西，CSS Custom Highlight 改不了 DOM，做不到）。
+   底色偏暖，和「跳回原文」那条红底一眼分得开：红是"你刚跳到这儿"，
+   黄是"这里有值得停一下的东西"。
+   只留底色，不动字色也不加粗——正文要连着读下去，
+   标注重一改动字重，整段的字距行距都会跟着跳一下。 */
+mark[data-book-focus-id] {
+  background-color: rgb(253 224 71 / 0.38);
+  color: inherit;
+  border-radius: 2px;
+  cursor: pointer;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  transition: background-color 120ms ease;
+}
+
+mark[data-book-focus-id]:hover {
+  background-color: rgb(250 204 21 / 0.5);
+}
+
+/* 长文里的 AI 标注。和书籍那边同一个色，一眼看得出是同一套功能。
+   Decoration 加的是 class 而不是 <mark> 元素——正文是活的 ProseMirror 文档，
+   往它的 DOM 里塞元素，下一次 transaction 就冲掉了。 */
+.essay-focus-mark {
+  background-color: rgb(253 224 71 / 0.38);
+  color: inherit;
+  border-radius: 2px;
+  cursor: pointer;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  transition: background-color 120ms ease;
+}
+
+.essay-focus-mark:hover {
+  background-color: rgb(250 204 21 / 0.5);
+}
+
+[data-theme="dark"] .essay-focus-mark {
+  background-color: rgb(250 204 21 / 0.28);
+}
+
+[data-theme="dark"] .essay-focus-mark:hover {
+  background-color: rgb(250 204 21 / 0.38);
+}
+
+[data-theme="dark"] mark[data-book-focus-id] {
+  background-color: rgb(250 204 21 / 0.28);
+}
+
+[data-theme="dark"] mark[data-book-focus-id]:hover {
+  background-color: rgb(250 204 21 / 0.38);
+}
+
+/* 挂在句尾的说明：绝对定位，不占行、不推开正文。
+   left / top 由 BookNode 按句尾那一行的实际位置算好后写上来——
+   靠 CSS 百分比摆不住，见那边注释里写的原因。 */
+.book-focus-note {
+  position: absolute;
+  z-index: 30;
+  width: min(26rem, 78%);
+  margin-top: 8px;
+  border: 1px solid #e6e4df;
+  border-radius: 8px;
+  background: #fffdf5;
+  /* 右上角那颗删除按钮是 absolute 摆上去的（见下面 .book-focus-note-delete），
+     所以要多留出来的是**右边**——32px 原来写在了左边，注释和实现正好对不上：
+     左边空着 32px，右边只剩 12px，第一行字反而有被那颗按钮压住的风险。 */
+  padding: 10px 32px 10px 12px;
+  font-size: 12px;
+  line-height: 1.7;
+  letter-spacing: 0.02em;
+  color: #4a4a44;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.12);
+  white-space: normal;
+  cursor: text;
+  user-select: text;
+}
+
+.book-focus-note[hidden] {
+  display: none;
+}
+
+[data-theme="dark"] .book-focus-note {
+  border-color: #3f3b32;
+  background: #26231c;
+  color: #d6d3cb;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.45);
+}
+
+
+/* 脚注里的两颗按钮：右上角删除，正文末尾复制。都是"就地能做完"的动作，
+   不做成开菜单——批注本身已经是弹层了，里面再藏一层等于要用户点两次。 */
+.book-focus-note-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: #a8a49c;
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 2px;
+  transition: color 120ms ease, background-color 120ms ease;
+}
+
+.book-focus-note-btn:hover {
+  color: #c2410c;
+  background: rgb(194 65 12 / 0.08);
+}
+
+.book-focus-note-delete {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+}
+
+.book-focus-note-delete:hover {
+  color: #b91c1c;
+  background: rgb(220 38 38 / 0.1);
+}
+
+.book-focus-note-copy {
+  vertical-align: middle;
+  margin-left: 4px;
+}
+
+.book-focus-note-copy.is-done {
+  color: #15803d;
+}
+
+[data-theme="dark"] .book-focus-note {
+  padding: 10px 32px 10px 12px;
+}
+
+[data-theme="dark"] .book-focus-note-btn {
+  color: #6f6a61;
+}
+
+[data-theme="dark"] .book-focus-note-btn:hover {
+  color: #fb923c;
+  background: rgb(251 146 60 / 0.14);
+}
+
+[data-theme="dark"] .book-focus-note-delete:hover {
+  color: #f87171;
+  background: rgb(248 113 113 / 0.14);
+}

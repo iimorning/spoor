@@ -1,23 +1,22 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react';
+import React, { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
 import { useTranslation } from 'react-i18next';
 import { MessagesSquare, X } from 'lucide-react';
 import { db, type CanvasNode, type Edge as DbEdge } from '../../db';
 import { preventDefaultIfFileDrag } from '../../utils/dnd';
-import { isDiscussionLinkEdge } from '../../utils/agentDiscussion';
+
+/** Grace period before a link loses its hover state (see armEdgeHover below). */
+const EDGE_HOVER_LEAVE_MS = 200;
 
 interface CanvasEdgeLinesProps {
   edges: DbEdge[];
-  /** All nodes on the current canvas — used to detect discussion-style edges. */
-  nodes: CanvasNode[];
-  /** True when the agent hub has a peer (persona or 阿狸) plus a context note. */
-  canStartAgentDiscussion?: (agentNodeId: string) => boolean;
-  /** Triggered when the user clicks the edge-mounted discuss button. */
-  onStartAgentDiscussion?: (agentNodeId: string) => void;
+  /**
+   * V2 房间：主角色 ↔ 在场角色，由讨论名单推导出来的纯状态标识。
+   * 不是存下来的连线，没有点击行为 —— 只为在画布上看出「这几个人正在一起聊」。
+   */
+  roomLinks?: Array<{ id: string; from: string; to: string }>;
   connectingFrom: string | null;
   svgRef: RefObject<SVGSVGElement | null>;
   edgeLabelsRef: RefObject<HTMLDivElement | null>;
-  hoveredEdgeId: string | null;
-  setHoveredEdgeId: (id: string | null) => void;
   deleteEdge: (id: string) => void;
   /** V2: hide stored links until the user turns on “show reference links”. */
   hideReferenceEdges?: boolean;
@@ -94,7 +93,11 @@ function EdgeNoteChip({
     <div
       ref={chipRef}
       data-edge-note={edge.id}
-      className={`absolute max-w-[11rem] pointer-events-auto z-[9] transition-opacity ${
+      /* 不淡入淡出：半透明的合成层会让 Chromium 重画画布层里的卡片文字（见文件内注释）。
+         隐藏时也必须吃点击：两张卡挨得近时中点会被卡片挡住（卡片自带 z-index），
+         这个 chip 是连线唯一还能被悬停到的地方——关掉它的 pointer-events，
+         中点点上去只会命中卡片，连线的控件再也亮不起来。 */
+      className={`absolute max-w-[11rem] pointer-events-auto z-[9] ${
         showIdle ? 'opacity-100' : 'opacity-0'
       }`}
       style={{ top: -100, left: -100, transform: 'translate(-50%, -50%)' }}
@@ -148,79 +151,69 @@ function EdgeNoteChip({
 
 export function CanvasEdgeLines({
   edges,
-  nodes,
-  canStartAgentDiscussion,
-  onStartAgentDiscussion,
+  roomLinks,
   connectingFrom,
   svgRef,
   edgeLabelsRef,
-  hoveredEdgeId,
-  setHoveredEdgeId,
   deleteEdge,
   hideReferenceEdges = false,
 }: CanvasEdgeLinesProps) {
   const [editingEdgeId, setEditingEdgeId] = useState<string | null>(null);
+  // Hover lives here, not in App: it only drives this component's chrome, and
+  // lifting it up made every edge enter/leave re-render every card on the
+  // canvas (~52-58ms of blocked main thread per transition, i.e. visible jank).
+  const [hoveredEdgeId, setHoveredEdgeId] = useState<string | null>(null);
+
+  // Leaving is delayed so the chrome cannot flap. The link's hit band is ~20
+  // world px and its note chip / × button sit on the midpoint, so aiming at
+  // them keeps crossing in and out of that band: without hysteresis the chrome
+  // toggles several times a second (measured 34 flips / 6s while hovering a
+  // link between two cards that nearly touch), and every toggle re-rasterizes
+  // the scaled canvas layer — which is what made nearby card text flicker.
+  const hoverEndTimerRef = useRef<number | null>(null);
+  const armEdgeHover = useCallback((id: string) => {
+    if (hoverEndTimerRef.current != null) {
+      window.clearTimeout(hoverEndTimerRef.current);
+      hoverEndTimerRef.current = null;
+    }
+    setHoveredEdgeId(id);
+  }, []);
+  const releaseEdgeHover = useCallback(() => {
+    if (hoverEndTimerRef.current != null) window.clearTimeout(hoverEndTimerRef.current);
+    hoverEndTimerRef.current = window.setTimeout(() => {
+      hoverEndTimerRef.current = null;
+      setHoveredEdgeId(null);
+    }, EDGE_HOVER_LEAVE_MS);
+  }, []);
+  useEffect(
+    () => () => {
+      if (hoverEndTimerRef.current != null) window.clearTimeout(hoverEndTimerRef.current);
+    },
+    [],
+  );
 
   const { t } = useTranslation();
 
-  // Agent↔agent and 阿狸↔agent edges get the flowing stroke + a midpoint discuss cluster.
-  const nodeTypeById = useMemo(() => {
-    const m = new Map<string, string>();
-    for (const n of nodes) m.set(n.id, n.type);
-    return m;
-  }, [nodes]);
-
-  type EdgeViewModel = {
-    edge: DbEdge;
-    isDiscussionEdge: boolean;
-    discussHubId: string | null;
-  };
-  const edgeViewModels: EdgeViewModel[] = useMemo(() => {
-    return edges.map((edge) => {
-      const fromType = nodeTypeById.get(edge.from);
-      const toType = nodeTypeById.get(edge.to);
-      const isDiscussionEdge = isDiscussionLinkEdge(fromType, toType);
-      let discussHubId: string | null = null;
-      if (isDiscussionEdge && onStartAgentDiscussion) {
-        if (fromType === 'agent' && canStartAgentDiscussion?.(edge.from)) {
-          discussHubId = edge.from;
-        } else if (toType === 'agent' && canStartAgentDiscussion?.(edge.to)) {
-          discussHubId = edge.to;
-        } else if (fromType === 'agent') {
-          discussHubId = edge.from;
-        } else if (toType === 'agent') {
-          discussHubId = edge.to;
-        }
-      }
-      return { edge, isDiscussionEdge, discussHubId };
-    });
-  }, [edges, nodeTypeById, onStartAgentDiscussion, canStartAgentDiscussion]);
-
-  const visibleEdges = hideReferenceEdges ? [] : edgeViewModels;
+  const visibleEdges = hideReferenceEdges ? [] : edges;
 
   return (
     <>
       <svg ref={svgRef} data-connecting-from={connectingFrom || ''} className="absolute inset-0 overflow-visible z-10 w-[1px] h-[1px] pointer-events-none">
-        {visibleEdges.map(({ edge, isDiscussionEdge }) => (
+        {visibleEdges.map((edge) => (
           <g
             key={edge.id}
             data-edge-id={edge.id}
             data-edge-from={edge.from}
             data-edge-to={edge.to}
-            data-edge-flowing={isDiscussionEdge ? '1' : undefined}
             className="group cursor-pointer pointer-events-auto"
             onDragEnter={(e) => preventDefaultIfFileDrag(e)}
             onDragOver={(e) => preventDefaultIfFileDrag(e)}
-            onMouseEnter={() => setHoveredEdgeId(edge.id)}
-            onMouseLeave={() => setHoveredEdgeId(null)}
+            onMouseEnter={() => armEdgeHover(edge.id)}
+            onMouseLeave={releaseEdgeHover}
           >
             <line
-              className={`node-connector ${isDiscussionEdge ? '' : 'transition-colors group-hover:stroke-[#C2410C]'}`}
-              style={
-                isDiscussionEdge
-                  ? { pointerEvents: 'none' }
-                  : { strokeWidth: 2, stroke: '#d1cfca', pointerEvents: 'none' }
-              }
+              className="node-connector transition-colors group-hover:stroke-[#C2410C]"
+              style={{ strokeWidth: 2, stroke: '#d1cfca', pointerEvents: 'none' }}
             />
             <line
               className="hit-area"
@@ -228,19 +221,50 @@ export function CanvasEdgeLines({
             />
           </g>
         ))}
+        {/* 房间状态线：只画，不可点。由讨论名单推导，不写进 edges。 */}
+        {(roomLinks ?? []).map((link) => (
+          <g
+            key={link.id}
+            data-room-link={link.id}
+            data-edge-id={link.id}
+            data-edge-from={link.from}
+            data-edge-to={link.to}
+            data-edge-flowing="1"
+            className="pointer-events-none"
+          >
+            <line className="node-connector" style={{ pointerEvents: 'none' }} />
+          </g>
+        ))}
         <line id="temp-edge" className="node-connector pointer-events-none" style={{ strokeWidth: 2, stroke: '#C2410C', strokeDasharray: '5,5', display: connectingFrom ? 'block' : 'none' }} />
       </svg>
 
-      <div ref={edgeLabelsRef} className="absolute inset-0 pointer-events-none z-20 w-[1px] h-[1px]">
-        {visibleEdges.map(({ edge, isDiscussionEdge, discussHubId }) => {
-          const showDelete =
-            !isDiscussionEdge && hoveredEdgeId === edge.id && editingEdgeId === null;
+      {/* z-40：连线控件要盖在卡片之上。卡片各自带 z-index（11–40 都有），原先这里
+          是 z-20，于是窄缝里的 × 和备注会被相邻卡片压住——鼠标只能扫到一条 1px 的缝，
+          悬停不停地断掉又接上，控件跟着闪，附近卡片的文字也被反复重画。 */}
+      <div ref={edgeLabelsRef} className="absolute inset-0 pointer-events-none z-40 w-[1px] h-[1px]">
+        {/* 房间状态线中点的小标识：只表示"这几个人正在一起讨论"，不可点。
+            位置由 useCanvasInteraction 的动画循环统一摆（和备注/删除按钮同一套）。 */}
+        {(roomLinks ?? []).map((link) => (
+          <div
+            key={`badge-${link.id}`}
+            data-room-link-badge={link.id}
+            data-testid={`room-link-discuss-${link.id}`}
+            role="img"
+            aria-label={t('canvas.v2.room_discussing')}
+            className="pointer-events-none absolute flex h-5 w-5 items-center justify-center rounded-full bg-[#C2410C] text-white ring-2 ring-white"
+            style={{ top: -100, left: -100, transform: 'translate(-50%, -50%)' }}
+          >
+            <MessagesSquare className="h-3 w-3" aria-hidden />
+          </div>
+        ))}
+        {visibleEdges.map((edge) => {
+          const showDelete = hoveredEdgeId === edge.id && editingEdgeId === null;
           return (
             <React.Fragment key={`labels-${edge.id}`}>
               <EdgeNoteChip
                 edge={edge}
                 hovered={hoveredEdgeId === edge.id}
-                onHover={setHoveredEdgeId}
+                onHover={(id) => (id ? armEdgeHover(id) : releaseEdgeHover())}
                 onEditingChange={(editing) => {
                   setEditingEdgeId((prev) => {
                     if (editing) return edge.id;
@@ -248,56 +272,25 @@ export function CanvasEdgeLines({
                   });
                 }}
               />
+              {/* 连线控件只做颜色过渡，不做 `scale-*` 缩放、也不淡入淡出。
+                  画布是一整层带缩放的 transform，里面任何合成层面的变化
+                  （缩放动画、半透明淡入）都可能让 Chromium 重新光栅化该层，
+                  把附近卡片的字形重画一遍——表现为悬停连线时卡片文字闪烁。
+                  颜色过渡是纯 paint，不创建合成层，所以留着。 */}
               <button
                 data-edge-btn={edge.id}
-                className={`absolute transform -translate-x-1/2 -translate-y-1/2 w-5 h-5 bg-white border border-[#C2410C] text-[#C2410C] hover:bg-[#C2410C] hover:text-white shadow-sm rounded-full flex items-center justify-center transition-all z-10 ${
-                  showDelete ? 'opacity-100 scale-100 pointer-events-auto' : 'opacity-0 scale-50 pointer-events-none'
+                className={`absolute transform -translate-x-1/2 -translate-y-1/2 w-5 h-5 bg-white border border-[#C2410C] text-[#C2410C] hover:bg-[#C2410C] hover:text-white shadow-sm rounded-full flex items-center justify-center transition-colors z-10 ${
+                  showDelete ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
                 }`}
                 onPointerDown={(e) => { e.preventDefault(); e.stopPropagation(); deleteEdge(edge.id); }}
-                onMouseEnter={() => setHoveredEdgeId(edge.id)}
-                onMouseLeave={() => setHoveredEdgeId(null)}
+                onMouseEnter={() => armEdgeHover(edge.id)}
+                onMouseLeave={releaseEdgeHover}
                 style={{ top: -100, left: -100 }}
+                title={t('canvas.edge_note_remove')}
+                aria-label={t('canvas.edge_note_remove')}
               >
                 <X className="w-3 h-3" />
               </button>
-              {isDiscussionEdge && discussHubId && onStartAgentDiscussion && (
-                <div
-                  data-edge-discuss-cluster={edge.id}
-                  className="absolute z-10 pointer-events-auto -translate-x-3 -translate-y-3 flex items-center gap-1.5 group"
-                  style={{ top: -100, left: -100 }}
-                  onMouseEnter={() => setHoveredEdgeId(edge.id)}
-                  onMouseLeave={() => setHoveredEdgeId(null)}
-                >
-                  <button
-                    type="button"
-                    data-edge-discuss={edge.id}
-                    className="w-6 h-6 shrink-0 bg-[#C2410C] text-white shadow-md rounded-full flex items-center justify-center hover:bg-[#9a3412]"
-                    onPointerDown={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      onStartAgentDiscussion(discussHubId);
-                    }}
-                    title={t('nodes.agent_start_discussion')}
-                    aria-label={t('nodes.agent_start_discussion')}
-                  >
-                    <MessagesSquare className="w-3.5 h-3.5" aria-hidden />
-                  </button>
-                  <button
-                    type="button"
-                    data-testid={`edge-discuss-close-${edge.id}`}
-                    className="w-5 h-5 shrink-0 bg-white border border-[#C2410C] text-[#C2410C] hover:bg-[#C2410C] hover:text-white rounded-full flex items-center justify-center shadow-sm opacity-0 scale-90 pointer-events-none transition-all group-hover:opacity-100 group-hover:scale-100 group-hover:pointer-events-auto"
-                    onPointerDown={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      deleteEdge(edge.id);
-                    }}
-                    title={t('nodes.agent_discussion_disconnect')}
-                    aria-label={t('nodes.agent_discussion_disconnect')}
-                  >
-                    <X className="w-3 h-3" aria-hidden />
-                  </button>
-                </div>
-              )}
             </React.Fragment>
           );
         })}

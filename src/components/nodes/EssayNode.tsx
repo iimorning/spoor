@@ -88,7 +88,6 @@ export function EssayNode({
   );
 
   const title = article?.title?.trim() || node.description?.trim() || t('nodes.essay_untitled');
-  const typeBadge = article?.type?.trim() || 'ESSAY';
   const previewBlocks = useMemo(
     () => (article ? essayPreviewBlocks(essayBodyMarkdown(article)) : []),
     [article],
@@ -125,9 +124,6 @@ export function EssayNode({
         <FileText className="w-4 h-4 text-[#C2410C] shrink-0" />
         <span className="text-[10px] font-sans font-bold uppercase tracking-wider text-[#8c8a84]">
           {t('nodes.essay')}
-        </span>
-        <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-[#F4F1ED] text-[#8c8a84] truncate max-w-[7rem]">
-          {typeBadge}
         </span>
         <div className="ml-auto flex items-center gap-1 shrink-0">
           <WebSearchSourcesToggle

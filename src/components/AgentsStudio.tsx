@@ -1,6 +1,19 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
+  MINIMAX_SYSTEM_VOICES,
+  minimaxVoiceGroups,
+  minimaxVoiceLanguage,
+} from '../constants/minimaxVoices';
+import { MINIMAX_DEFAULT_TTS_MODEL } from '../constants/voiceWriting';
+import { createTtsSentenceQueue, speakWholeText } from '../utils/ttsSentenceQueue';
+import {
+  readVoicePreviewClip,
+  voicePreviewCacheKey,
+  writeVoicePreviewClip,
+} from '../utils/voicePreviewCache';
+import { hasMinimaxTtsAccess } from '../lib/serverConfig';
+import {
   Plus,
   Search,
   Bot,
@@ -14,6 +27,11 @@ import {
   Loader2,
   Trash2,
   RotateCcw,
+  Check,
+  ChevronDown,
+  Play,
+  Square,
+  Volume2,
 } from 'lucide-react';
 import type { AgentConfig, AgentMarkdownKnowledgeFile } from '../db';
 import { db } from '../db';
@@ -33,7 +51,7 @@ import {
 import { useAppDialog } from './AppDialogProvider';
 import { AgentIcon } from './AgentIcon';
 import { CanvasTemplatesTab } from './CanvasTemplatesTab';
-import { readFileAsDataURL } from '../utils/file';
+import { toCoverImageDataUrl } from '../utils/file';
 import {
   extractDocumentText,
   isPersonaPromptDocument,
@@ -114,6 +132,9 @@ export interface AgentsStudioProps {
     apiKey: string;
     baseUrl: string;
     model: string;
+    /** 试听音色要用；App 传的是完整配置，这里只多声明这两个用到的字段。 */
+    minimaxApiKey?: string;
+    minimaxTtsModel?: string;
   };
   callAI: CallAIFn;
   onGenerateCover?: (agentId: string) => void;
@@ -204,32 +225,6 @@ export function AgentsStudio({
         a.id === activeAgentId ? { ...a, knowledgeMarkdownFiles: next?.length ? next : undefined } : a,
       ),
     );
-  };
-
-  const openKnowledgeFilePicker = () => knowledgeFileInputRef.current?.click();
-  const openCoverFilePicker = () => coverFileInputRef.current?.click();
-
-  const handleCoverFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    e.target.value = '';
-    if (!file || !activeAgentId) return;
-    if (!file.type.startsWith('image/')) {
-      void appAlert({ message: t('agents.card_cover_not_image') });
-      return;
-    }
-    if (file.size > AGENT_COVER_MAX_BYTES) {
-      void appAlert({ message: t('agents.card_cover_too_large') });
-      return;
-    }
-    try {
-      const dataUrl = await readFileAsDataURL(file);
-      await setAgentConfigs(
-        agentConfigs.map((a) => (a.id === activeAgentId ? { ...a, coverImageUrl: dataUrl } : a)),
-      );
-      await syncAgentCanvasCardSize(activeAgentId, true);
-    } catch {
-      void appAlert({ message: t('agents.card_cover_read_failed') });
-    }
   };
 
   const readOneFileAsText = (file: File) =>
@@ -466,6 +461,304 @@ export function AgentsStudio({
 }
 
 /** Persona editor split out so the tab strip above stays minimal. */
+/**
+ * 朗读音色选择器。原生 <select> 的选项列表由系统绘制（蓝色高亮、系统字体），
+ * 跟 Spoor 的暖纸调对不上，所以照房间邀请菜单那套自己画：白底圆角面板、暖灰描边、
+ * 选中行用 #FFF7ED + 对勾。
+ */
+/**
+ * 试听用的样句。按**音色自己的语言**选，不按界面语言：中文音色在英文界面下也要念中文，
+ * 否则听不出它真实的中文效果。（MiniMax 没有给系统音色提供试听音频的接口 ——
+ * `get_voice` 只返回 id / 名字 / 描述，所以这里用我们自己的合成链路现念一句。）
+ */
+const VOICE_PREVIEW_LINE: Record<'zh' | 'en', string> = {
+  zh: '你好，我是这个角色的声音。',
+  en: 'Hi, this is how this voice sounds.',
+};
+
+export function voicePreviewLine(voiceId: string | undefined, uiLanguage: string | null | undefined) {
+  const voiceLanguage = voiceId ? minimaxVoiceLanguage(voiceId) : undefined;
+  const language =
+    voiceLanguage ?? ((uiLanguage ?? '').trim().toLowerCase().startsWith('zh') ? 'zh' : 'en');
+  return VOICE_PREVIEW_LINE[language];
+}
+
+function VoicePicker({
+  value,
+  onChange,
+  aiConfig,
+}: {
+  value?: string;
+  onChange: (next: string | undefined) => void;
+  aiConfig: AgentsStudioProps['aiConfig'];
+}) {
+  const { t, i18n } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const [previewingId, setPreviewingId] = useState<string | null>(null);
+  const rootRef = useRef<HTMLSpanElement>(null);
+  /** 正在合成的试听队列：再点一次 / 换个音色 / 关掉菜单都要把它停掉。 */
+  const previewRef = useRef<ReturnType<typeof createTtsSentenceQueue> | null>(null);
+  /** 正在播放的缓存音频。缓存命中时不走合成，所以得单独留个把柄给"停止"。 */
+  const previewAudioRef = useRef<HTMLAudioElement | null>(null);
+  /**
+   * 每次试听的代号。读缓存是异步的，中途可能被"再点一次"停掉或者切到别的音色 ——
+   * 那时闭包里的 state 还是旧值，只有代号能判断这次请求还算不算数。
+   */
+  const previewTokenRef = useRef(0);
+  const canPreview = hasMinimaxTtsAccess(aiConfig.minimaxApiKey);
+
+  // 换了角色就收起并清空搜索，免得把上一个人的筛选条件带过来。
+  useEffect(() => {
+    setOpen(false);
+    setQuery('');
+  }, [value]);
+
+  const stopPreview = useCallback(() => {
+    previewTokenRef.current += 1;
+    const queue = previewRef.current;
+    previewRef.current = null;
+    const audio = previewAudioRef.current;
+    previewAudioRef.current = null;
+    setPreviewingId(null);
+    try {
+      queue?.stop();
+    } catch {
+      /* ignore */
+    }
+    if (audio) {
+      audio.pause();
+      URL.revokeObjectURL(audio.src);
+    }
+  }, []);
+
+  useEffect(() => stopPreview, [stopPreview]);
+
+  const previewVoice = useCallback(
+    async (voiceId: string) => {
+      if (previewingId === voiceId) {
+        stopPreview();
+        return;
+      }
+      stopPreview();
+      const model = aiConfig.minimaxTtsModel || MINIMAX_DEFAULT_TTS_MODEL;
+      const line = voicePreviewLine(voiceId, i18n.language);
+      const cacheKey = voicePreviewCacheKey({ model, voiceId, line });
+      const token = previewTokenRef.current + 1;
+      previewTokenRef.current = token;
+      setPreviewingId(voiceId);
+
+      // 听过一次就是本地播放，不用再等合成。
+      const cached = await readVoicePreviewClip(cacheKey);
+      if (token !== previewTokenRef.current) return; // 等待期间被停掉/换了别的音色
+      if (cached) {
+        const audio = new Audio(URL.createObjectURL(cached));
+        previewAudioRef.current = audio;
+        audio.onended = () => {
+          if (previewAudioRef.current !== audio) return;
+          previewAudioRef.current = null;
+          URL.revokeObjectURL(audio.src);
+          setPreviewingId(null);
+        };
+        try {
+          await audio.play();
+        } catch (e) {
+          console.error('[Spoor] voice preview playback failed', e);
+          if (previewAudioRef.current === audio) stopPreview();
+        }
+        return;
+      }
+
+      // 第一次：现合成，一边放一边把音频留下来给下次用。
+      const queue = createTtsSentenceQueue({
+        apiKey: (aiConfig.minimaxApiKey || '').trim(),
+        model,
+        voiceId,
+        language: i18n.language,
+        recordAudio: true,
+        onError: (message) => {
+          console.error('[Spoor] voice preview failed', message);
+          if (previewRef.current === queue) {
+            previewRef.current = null;
+            setPreviewingId(null);
+          }
+        },
+      });
+      previewRef.current = queue;
+      const finished = await speakWholeText(queue, line, {
+        isStillCurrent: () => previewRef.current === queue && token === previewTokenRef.current,
+      });
+      if (previewRef.current !== queue) return;
+      previewRef.current = null;
+      setPreviewingId(null);
+      if (!finished) return; // 被停掉/被打断：录到的音频可能不完整，不缓存
+      const wavBytes = queue.takeRecordedWavBytes();
+      if (wavBytes) void writeVoicePreviewClip(cacheKey, wavBytes);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [aiConfig.minimaxApiKey, aiConfig.minimaxTtsModel, i18n.language, previewingId, stopPreview, t],
+  );
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (e: PointerEvent) => {
+      const target = e.target;
+      if (!(target instanceof Node)) return;
+      if (rootRef.current?.contains(target)) return;
+      setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      setOpen(false);
+    };
+    document.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  const selected = value ? MINIMAX_SYSTEM_VOICES.find((v) => v.id === value) : undefined;
+  // 表里查不到的 id（自填或账号里的克隆音色）也照实显示，别让它看起来像没设置。
+  const triggerLabel = value ? (selected?.label ?? value) : t('agents.voice_default');
+
+  const needle = query.trim().toLowerCase();
+  const groups = minimaxVoiceGroups(i18n.language).map((group) => ({
+    language: group.language,
+    voices: needle
+      ? group.voices.filter(
+          (v) => v.label.toLowerCase().includes(needle) || v.id.toLowerCase().includes(needle),
+        )
+      : group.voices,
+  }));
+  const noMatch = groups.every((g) => g.voices.length === 0);
+
+  const optionRow = (opts: {
+    key: string;
+    testId: string;
+    label: string;
+    isSelected: boolean;
+    onPick: () => void;
+    /** 试听用的音色 id；给 undefined（默认项、克隆音色）就不显示试听键。 */
+    previewId?: string;
+  }) => {
+    const previewing = Boolean(opts.previewId) && previewingId === opts.previewId;
+    return (
+      <div
+        key={opts.key}
+        className={`flex w-full min-w-0 items-center gap-1 rounded-lg transition-colors ${
+          opts.isSelected ? 'bg-[#FFF7ED]' : 'hover:bg-[#F4F1ED]'
+        }`}
+      >
+        <button
+          type="button"
+          role="menuitem"
+          aria-checked={opts.isSelected}
+          data-testid={opts.testId}
+          onClick={opts.onPick}
+          className={`flex min-w-0 flex-1 items-center gap-2 rounded-lg px-3 py-1.5 text-left text-[13px] ${
+            opts.isSelected ? 'font-bold text-[#C2410C]' : 'text-[#1a1a1a]'
+          }`}
+        >
+          <span className="min-w-0 flex-1 truncate">{opts.label}</span>
+          {opts.isSelected ? <Check className="h-3.5 w-3.5 shrink-0" aria-hidden /> : null}
+        </button>
+        {canPreview && opts.previewId ? (
+          <button
+            type="button"
+            data-testid={`${opts.testId}-preview`}
+            onClick={() => void previewVoice(opts.previewId!)}
+            title={t(previewing ? 'agents.voice_preview_stop' : 'agents.voice_preview')}
+            aria-label={t(previewing ? 'agents.voice_preview_stop' : 'agents.voice_preview')}
+            className="mr-1 flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[#8c8a84] transition-colors hover:bg-white hover:text-[#C2410C]"
+          >
+            {previewing ? (
+              <Square className="h-3 w-3" aria-hidden />
+            ) : (
+              <Play className="h-3 w-3" aria-hidden />
+            )}
+          </button>
+        ) : null}
+      </div>
+    );
+  };
+
+  return (
+    <span ref={rootRef} className="relative inline-flex shrink-0">
+      <button
+        type="button"
+        data-testid="agent-studio-voice"
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        className="flex h-9 max-w-[11rem] items-center gap-1.5 rounded-lg border border-[#E6E4DF] bg-white px-2.5 text-left text-[13px] text-[#1a1a1a] transition-colors hover:border-[#C2410C]/40 focus:outline-none focus:ring-1 focus:ring-[#C2410C]"
+      >
+        <Volume2 className="h-4 w-4 shrink-0 text-[#8c8a84]" aria-hidden />
+        <span className="min-w-0 truncate">{triggerLabel}</span>
+        <ChevronDown className="h-4 w-4 shrink-0 text-[#8c8a84]" aria-hidden />
+      </button>
+      {open ? (
+        <div
+          role="dialog"
+          data-testid="agent-studio-voice-menu"
+          className="absolute right-0 top-full z-30 mt-1 w-72 rounded-xl border border-[#E6E4DF] bg-white p-1 shadow-xl"
+        >
+          <input
+            data-testid="agent-studio-voice-search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder={t('agents.voice_search')}
+            className="mb-1 w-full rounded-lg bg-[#F4F1ED] px-3 py-1.5 text-[12px] text-[#1a1a1a] outline-none placeholder:text-[#a8a49c] focus:bg-white focus:ring-1 focus:ring-[#C2410C]/30"
+          />
+          <div className="max-h-64 overflow-y-auto overscroll-contain">
+            {optionRow({
+              key: 'default',
+              testId: 'agent-studio-voice-option-default',
+              label: t('agents.voice_default'),
+              isSelected: !value,
+              onPick: () => {
+                onChange(undefined);
+                setOpen(false);
+              },
+            })}
+            {groups.map((group) =>
+              group.voices.length === 0 ? null : (
+                <div key={group.language}>
+                  <p className="px-2 pb-0.5 pt-1 text-[10px] tracking-[0.06em] text-[#8c8a84]">
+                    {t(
+                      group.language === 'zh'
+                        ? 'agents.voice_group_zh'
+                        : 'agents.voice_group_en',
+                    )}
+                  </p>
+                  {group.voices.map((voice) =>
+                    optionRow({
+                      key: voice.id,
+                      testId: `agent-studio-voice-option-${voice.id}`,
+                      label: voice.label,
+                      isSelected: voice.id === value,
+                      previewId: voice.id,
+                      onPick: () => {
+                        onChange(voice.id);
+                        setOpen(false);
+                      },
+                    }),
+                  )}
+                </div>
+              ),
+            )}
+            {noMatch ? (
+              <p className="px-3 py-2 text-[11px] text-[#8a8a82]">{t('agents.voice_empty')}</p>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+    </span>
+  );
+}
+
 function PersonasPane({
   agentConfigs,
   setAgentConfigs,
@@ -474,7 +767,7 @@ function PersonasPane({
   onGenerateCover,
   generatingCoverAgentId,
 }: AgentsStudioProps) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const { confirm, alert: appAlert } = useAppDialog();
   const [activeAgentId, setActiveAgentId] = useState<string | null>(agentConfigs[0]?.id || null);
   const [searchQuery, setSearchQuery] = useState('');
@@ -606,7 +899,9 @@ function PersonasPane({
       return;
     }
     try {
-      const dataUrl = await readFileAsDataURL(file);
+      // 手机相片几 MB，直接当 data URL 存会把本地库撑大、也过不了云端单次上传上限：
+      // 这里先转成 WebP（长边 1600），压不动的情况会原样返回。
+      const dataUrl = await toCoverImageDataUrl(file);
       await setAgentConfigs(
         agentConfigs.map((a) => (a.id === activeAgentId ? { ...a, coverImageUrl: dataUrl } : a)),
       );
@@ -979,36 +1274,33 @@ function PersonasPane({
                 />
                 <button
                   type="button"
-                  data-testid="agent-studio-prompt-from-doc"
-                  onClick={openPromptDocPicker}
-                  disabled={isImportingFromDoc || isEnhancing}
-                  title={t('agents.prompt_from_doc_hint')}
-                  aria-label={t('agents.prompt_from_doc')}
-                  className="shrink-0 flex items-center gap-1.5 px-3 py-2 rounded-lg font-sans font-bold text-sm bg-white border border-[#E6E4DF] text-[#5a5a54] hover:text-[#C2410C] hover:border-[#C2410C]/30 hover:bg-[#F4F1ED] transition-colors disabled:opacity-50"
-                >
-                  {isImportingFromDoc ? (
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                  ) : (
-                    <FileUp className="w-4 h-4" />
-                  )}
-                  {isImportingFromDoc ? t('agents.prompt_from_doc_working') : t('agents.prompt_from_doc')}
-                </button>
-                <button
-                  type="button"
                   data-testid="agent-studio-generate-cover"
                   onClick={() => onGenerateCover?.(activeAgent.id)}
                   disabled={!onGenerateCover || generatingCoverAgentId !== null}
-                  className="shrink-0 flex items-center gap-1.5 px-3 py-2 rounded-lg font-sans font-bold text-sm bg-white border border-[#E6E4DF] text-[#5a5a54] hover:text-[#C2410C] hover:border-[#C2410C]/30 hover:bg-[#F4F1ED] transition-colors disabled:opacity-50"
+                  title={
+                    activeAgent.coverImageUrl
+                      ? t('agents.card_cover_regenerate')
+                      : t('agents.card_cover_generate')
+                  }
+                  aria-label={
+                    activeAgent.coverImageUrl
+                      ? t('agents.card_cover_regenerate')
+                      : t('agents.card_cover_generate')
+                  }
+                  className="shrink-0 flex h-9 w-9 items-center justify-center rounded-lg bg-white border border-[#E6E4DF] text-[#5a5a54] hover:text-[#C2410C] hover:border-[#C2410C]/30 hover:bg-[#F4F1ED] transition-colors disabled:opacity-50"
                 >
                   {generatingCoverAgentId === activeAgent.id ? (
                     <Loader2 className="w-4 h-4 animate-spin" />
                   ) : (
                     <Image className="w-4 h-4" />
                   )}
-                  {activeAgent.coverImageUrl
-                    ? t('agents.card_cover_regenerate')
-                    : t('agents.card_cover_generate')}
                 </button>
+                {/* 朗读音色：和名旁这几个小按钮排在一起，菜单里每个音色都能试听。 */}
+                <VoicePicker
+                  aiConfig={aiConfig}
+                  value={activeAgent.voiceId}
+                  onChange={(next) => patchActiveAgent({ voiceId: next })}
+                />
               </div>
               <div className="flex gap-3 shrink-0">
                 <button 
@@ -1035,6 +1327,27 @@ function PersonasPane({
                   <div className="flex items-center gap-4">
                     <div className="w-1 h-8 bg-[#C2410C] rounded-full"></div>
                     <h3 className="text-xl font-serif font-bold text-[#1a1a1a]">{t('agents.identity_tone')}</h3>
+                    {/* 从文档生成：归到这一节里，只留图标 —— 说明放在 title/aria-label 上，
+                        免得跟标题抢注意力。 */}
+                    <button
+                      type="button"
+                      data-testid="agent-studio-prompt-from-doc"
+                      onClick={openPromptDocPicker}
+                      disabled={isImportingFromDoc || isEnhancing}
+                      title={
+                        isImportingFromDoc
+                          ? t('agents.prompt_from_doc_working')
+                          : t('agents.prompt_from_doc_hint')
+                      }
+                      aria-label={t('agents.prompt_from_doc')}
+                      className="shrink-0 flex h-8 w-8 items-center justify-center rounded-lg bg-white border border-[#E6E4DF] text-[#5a5a54] hover:text-[#C2410C] hover:border-[#C2410C]/30 hover:bg-[#F4F1ED] transition-colors disabled:opacity-50"
+                    >
+                      {isImportingFromDoc ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <FileUp className="w-4 h-4" />
+                      )}
+                    </button>
                   </div>
                   <div className="space-y-2">
                     <div className="flex justify-between items-end">

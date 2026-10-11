@@ -26,6 +26,13 @@ vi.mock('../../src/services/flux302', async (importOriginal) => {
     generateGptImage2: vi.fn(async () => ({ url: 'https://img.example/cover.jpg' })),
   };
 });
+// 回复之后还有一次"相关问题"的请求（1e80cf6 加的），走的是同一个 callUniversalAI，
+// 会把本文件按次数断言的用例算成两次。隔离掉，让调用次数只统计回复本身
+// —— 同目录 useAiActions.test.ts 在加这个功能时就做了同样的隔离。
+vi.mock('../../src/utils/suggestedFollowUps', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../src/utils/suggestedFollowUps')>()),
+  attachSuggestedFollowUpsToThreadMessage: vi.fn(async () => {}),
+}));
 
 import { callUniversalAI } from '../../src/services/ai';
 

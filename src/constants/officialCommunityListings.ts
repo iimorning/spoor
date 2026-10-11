@@ -328,7 +328,10 @@ export function localizeOfficialListing<
     description: string | null;
     cover_url?: string | null;
   },
->(listing: T): T {
+// 返回值带上 cover_url：函数内部会在封面缺失时补上一张打包的图（见下面的 cover_url），
+// 但返回类型原本写的是 T（与入参同型），于是调用方读 `listing.cover_url` 会被判成
+// 「这个类型上没有这个属性」。只有早退那两条路不保证有，所以是可选。
+>(listing: T): T & { cover_url?: string | null } {
   if (listing.is_official !== true) return listing;
   const meta = resolveOfficialListingMeta(listing.id);
   // The /community gallery shows large cards in a masonry — use the bundled

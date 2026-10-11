@@ -9,12 +9,14 @@
  *
  * Source (kept as a comment for attribution):
  * - bubblePop: universfield-bubble-pop-06-351337
+ * - paperSwish: the1957files-paper-swish-ui-529818
  */
 
-export type UiSfxKind = 'bubblePop';
+export type UiSfxKind = 'bubblePop' | 'paperSwish';
 
 const SFX_SRC: Record<UiSfxKind, string> = {
   bubblePop: '/sfx/bubble-pop.mp3',
+  paperSwish: '/sfx/paper-swish.mp3?v=2',
 };
 
 const VOLUME = 0.45;
@@ -72,9 +74,10 @@ function startBuffer(ctx: AudioContext, buffer: AudioBuffer): void {
   source.start();
 }
 
-/** Fetch + decode so the first + click does not pay decode cost. */
+/** Fetch + decode so the first click does not pay decode cost. */
 export function preloadUiSfx(): void {
   void loadBuffer('bubblePop');
+  void loadBuffer('paperSwish');
 }
 
 export function playUiSfx(kind: UiSfxKind): void {

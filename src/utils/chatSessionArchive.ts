@@ -63,3 +63,28 @@ export function removeChatSession<TMessage>(
     session,
   };
 }
+
+/**
+ * 恢复一条历史会话：把当前对话归档，再把选中那条取出来当当前对话。
+ * 当前对话为空时不产生多余的空归档。
+ */
+export function buildRestoreChatSessionPlan<
+  TMessage extends { role: string; text: string; createdAt?: number },
+  TSession extends ChatSessionLike<TMessage>,
+>(
+  current: TMessage[],
+  archive: TSession[] | undefined,
+  sessionId: string,
+  idPrefix: string,
+): { nextMessages: TMessage[]; nextArchive: TSession[] } | null {
+  const { archive: without, session } = removeChatSession<TMessage>(archive, sessionId);
+  if (!session) return null;
+  // `removeChatSession` / `prependChatArchive` 只声明了基类型 `ChatSessionLike`；
+  // 这里是同一条归档线的往返，断言回 TSession[] 是安全的。
+  const nextArchive = (
+    current.length > 0
+      ? prependChatArchive(without, buildChatSession(current, idPrefix) as TSession)
+      : without
+  ) as TSession[];
+  return { nextMessages: session.messages, nextArchive };
+}

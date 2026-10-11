@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html class="light h-full min-h-0" lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Spoor · 论坛痛点雷达</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.bunny.net/css?family=be-vietnam-pro:400,500,600|noto-serif:400,600,700" rel="stylesheet"/>
+<script>
+  // content-factory 主题 —— 来自 tailwind.config.mjs
+  tailwind.config = {
+    darkMode: 'class',
+    safelist: [
+      'w-64', 'xl:mr-64', 'max-h-[50vh]', 'xl:max-h-none', 'w-[380px]',
+      'lg:w-[70%]', 'lg:w-[30%]', 'max-w-[min(100%,1680px)]',
+      'min-h-[min(72vh,40rem)]', 'lg:min-h-[calc(100vh-12rem)]',
+      'max-h-[min(520px,58vh)]', 'md:max-w-[min(92vw,26rem)]',
+      'w-[3.75rem]', 'sm:w-[4.25rem]', 'focus:ring-primary/25',
+      'transition-[filter]', 'max-h-[4.5rem]', 'max-h-[min(50vh,320px)]'
+    ],
+    theme: {
+      extend: {
+        colors: {
+          error: '#ba1a1a', secondary: '#705a49', tertiary: '#634b2d',
+          'secondary-fixed-dim': '#dec1ac', 'on-error': '#ffffff',
+          'tertiary-container': '#7d6343', 'surface-tint': '#b91d20',
+          'surface-bright': '#fcfaef', 'inverse-primary': '#ffb4ac',
+          'outline-variant': '#e4beba', 'on-primary-container': '#ffe0dd',
+          'inverse-surface': '#30312a', outline: '#8f706c',
+          'primary-fixed': '#ffdad6', 'on-secondary-container': '#755e4d',
+          'surface-container': '#f0eee3', 'surface-container-high': '#eae8de',
+          'secondary-container': '#f8dac5', 'on-primary-fixed': '#410003',
+          'on-secondary': '#ffffff', 'primary-container': '#c62828',
+          'error-container': '#ffdad6', 'on-secondary-fixed': '#28180b',
+          'surface-container-highest': '#e4e3d8', surface: '#fcfaef',
+          'inverse-on-surface': '#f3f1e6', 'on-primary': '#ffffff',
+          'on-error-container': '#93000a', 'on-tertiary-fixed': '#291801',
+          'on-tertiary-fixed-variant': '#594325',
+          'surface-container-lowest': '#ffffff', primary: '#a20513',
+          'on-tertiary': '#ffffff', 'on-surface-variant': '#5b403d',
+          'tertiary-fixed': '#ffddb6', 'surface-container-low': '#f6f4e9',
+          'on-surface': '#1b1c16', background: '#fcfaef',
+          'on-primary-fixed-variant': '#93000e', 'surface-dim': '#dcdad0',
+          'secondary-fixed': '#fbddc7', 'on-secondary-fixed-variant': '#574333',
+          'tertiary-fixed-dim': '#e2c19b', 'primary-fixed-dim': '#ffb4ac',
+          'on-tertiary-container': '#ffe3c3', 'surface-variant': '#e4e3d8',
+          'on-background': '#1b1c16'
+        },
+        borderRadius: { DEFAULT: '0.25rem', lg: '0.5rem', xl: '0.75rem', full: '9999px' },
+        spacing: {
+          lg: '48px', 'margin-mobile': '16px', md: '24px', gutter: '24px',
+          'margin-desktop': '64px', xl: '80px', sm: '12px', xs: '4px', base: '8px'
+        },
+        fontFamily: {
+          'body-md': ['Be Vietnam Pro', 'sans-serif'],
+          'headline-md': ['Noto Serif', 'serif'],
+          'headline-xl': ['Noto Serif', 'serif'],
+          'headline-lg': ['Noto Serif', 'serif'],
+          'label-md': ['Be Vietnam Pro', 'sans-serif'],
+          'body-lg': ['Be Vietnam Pro', 'sans-serif']
+        },
+        fontSize: {
+          'body-md': ['16px', { lineHeight: '1.6', fontWeight: '400' }],
+          'headline-md': ['24px', { lineHeight: '1.4', fontWeight: '600' }],
+          'headline-xl': ['48px', { lineHeight: '1.2', letterSpacing: '-0.02em', fontWeight: '700' }],
+          'headline-lg': ['32px', { lineHeight: '1.3', fontWeight: '600' }],
+          'label-md': ['14px', { lineHeight: '1.0', letterSpacing: '0.05em', fontWeight: '600' }],
+          'body-lg': ['18px', { lineHeight: '1.6', fontWeight: '400' }]
+        }
+      }
+    }
+  };
+</script>
+<style>
+  #ins-lab-body {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  #ins-lab-body::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+    display: none;
+  }
+  body.ins-archive-modal-active #insights-site-header {
+    display: none;
+  }
+  body.ins-archive-modal-active #insights-page-shell {
+    padding-top: 0;
+  }
+  #ins-archive-modal-scroll {
+    -webkit-overflow-scrolling: touch;
+  }
+</style>
+</head>
+<body class="font-body-md text-on-background bg-background box-border h-screen min-h-0 overflow-hidden">
+<div id="insights-toast" class="hidden fixed top-20 left-1/2 z-[60] -translate-x-1/2 rounded-lg border border-stone-200 bg-white px-4 py-2 text-sm text-stone-700 shadow-lg" role="status"></div>
+<!-- Top bar -->
+<header id="insights-site-header" class="fixed top-0 left-0 right-0 z-50 flex h-16 items-center justify-between border-b border-stone-200/80 bg-[#fdfbf7]/95 px-4 backdrop-blur-md md:px-8">
+<div class="flex items-center gap-6 md:gap-10">
+<nav class="hidden items-center gap-6 md:flex">
+<a class="font-serif text-sm text-stone-500 transition-colors hover:text-on-background" href="/">头脑风暴</a>
+<a class="font-serif text-sm font-bold text-on-background border-b border-primary pb-0.5" href="/insights.html" aria-current="page">数据分析</a>
+</nav>
+</div>
+<div class="flex items-center gap-3">
+<button type="button" class="rounded-full p-2 text-stone-500 transition-colors hover:bg-stone-100" title="通知" aria-label="通知">
+<span class="inline-flex shrink-0" data-lc-icon="bell"></span>
+</button>
+</div>
+</header>
+<div id="insights-page-shell" class="box-border flex h-full min-h-0 w-full flex-col overflow-hidden pt-16">
+<main class="flex min-h-0 w-full flex-1 flex-col overflow-hidden">
+<div class="flex min-h-0 flex-1 flex-col overflow-hidden xl:flex-row">
+<section class="custom-scrollbar lc-touch-scroll min-h-0 flex-1 overflow-y-auto overflow-x-hidden bg-surface p-4 md:p-gutter">
+<div id="ins-main-inner" class="mx-auto max-w-4xl space-y-6 pb-24">
+<!-- populated by insights.js -->
+</div>
+</section>
+<aside class="flex max-h-[45vh] min-h-0 w-full shrink-0 flex-col overflow-hidden border-t border-stone-200 bg-surface-container-low p-4 md:p-6 xl:max-h-none xl:w-[380px] xl:shrink-0 xl:self-stretch xl:border-l xl:border-t-0">
+  <div class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-stone-100 bg-white shadow-sm">
+    <div id="ins-lab-header" class="hidden border-b border-stone-100 px-4 py-3 text-xs font-semibold uppercase tracking-wider text-stone-400">AI 回复草稿</div>
+    <div id="ins-lab-body" class="flex-1 overflow-y-auto p-6 text-sm leading-relaxed text-stone-800"></div>
+    <div class="border-t border-stone-100 p-4">
+      <button type="button" id="ins-btn-pain-analysis" class="flex w-full items-center justify-center gap-2 rounded-full bg-primary px-4 py-2.5 text-xs font-bold text-white shadow-sm transition-all hover:brightness-110 active:scale-[0.97]">
+        <span class="inline-flex shrink-0" data-lc-icon="sparkles"></span>
+        分析学习痛点
+      </button>
+    </div>
+    <div id="ins-chat-area" class="hidden flex flex-col border-t border-stone-100">
+      <div class="flex items-center gap-2 p-3">
+        <input type="text" id="ins-chat-input" placeholder="继续对话…" class="flex-1 rounded-full border border-stone-200 bg-stone-50 px-4 py-2 text-sm text-on-background outline-none transition-colors placeholder:text-stone-400 focus:border-primary focus:bg-white focus:ring-1 focus:ring-primary/20"/>
+        <button type="button" id="ins-chat-send" class="flex shrink-0 items-center justify-center rounded-full bg-primary px-3 py-2 text-white shadow-sm transition-all hover:brightness-110 active:scale-[0.97] disabled:opacity-40" disabled>
+          <span class="inline-flex shrink-0" data-lc-icon="send"></span>
+        </button>
+      </div>
+    </div>
+  </div>
+</aside>
+</div>
+</main>
+</div>
+<div id="ins-archive-modal" class="hidden fixed inset-0 z-[100] flex flex-col items-center overflow-y-auto overflow-x-hidden overscroll-contain bg-black/45 p-4 backdrop-blur-sm sm:p-6" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="ins-archive-modal-title">
+  <div class="ins-archive-modal-panel my-auto flex w-full max-w-5xl min-h-0 max-h-[min(92svh,900px)] flex-col overflow-hidden rounded-2xl border border-stone-200/90 bg-white shadow-2xl" role="document">
+    <div class="flex shrink-0 items-start justify-between gap-4 border-b border-stone-200/90 bg-white px-6 py-4 sm:px-8">
+      <h2 id="ins-archive-modal-title" class="font-serif text-lg font-bold leading-snug text-on-background">归档历史记录</h2>
+      <button type="button" id="ins-archive-modal-close" class="shrink-0 rounded-lg p-2 text-stone-400 transition-colors hover:bg-stone-100 hover:text-stone-600" aria-label="关闭归档记录弹窗">
+        <span class="inline-flex shrink-0" data-lc-icon="close"></span>
+      </button>
+    </div>
+    <div id="ins-archive-modal-scroll" class="box-border min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-6 py-4 sm:px-8 sm:py-5">
+      <div class="mb-3 flex flex-wrap gap-2" id="ins-archive-modal-tabs">
+        <button type="button" class="ins-archive-tab-btn rounded-full bg-primary px-4 py-1.5 text-xs font-semibold text-white shadow-sm" data-category="responded">已回复 <span class="ml-1 text-[10px]" data-role="count">0</span></button>
+        <button type="button" class="ins-archive-tab-btn rounded-full border border-stone-200 bg-white px-4 py-1.5 text-xs font-semibold text-stone-600 transition-colors hover:bg-stone-50" data-category="notTarget">不是目标客户 <span class="ml-1 text-[10px]" data-role="count">0</span></button>
+      </div>
+      <div class="overflow-x-auto rounded-lg border border-stone-200 bg-white shadow-sm">
+        <table class="w-full min-w-[640px] table-fixed border-collapse text-left text-sm" aria-label="归档历史记录列表">
+          <colgroup>
+            <col class="w-[18%]"/>
+            <col class="w-[52%]"/>
+            <col class="w-[12%]"/>
+            <col class="w-[18%]"/>
+          </colgroup>
+          <thead>
+            <tr class="border-b border-stone-200 bg-stone-50/90 text-stone-600">
+              <th scope="col" class="box-border px-4 py-3 font-semibold font-body-md">用户</th>
+              <th scope="col" class="box-border px-4 py-3 font-semibold font-body-md">反馈内容</th>
+              <th scope="col" class="box-border px-4 py-3 font-semibold font-body-md whitespace-nowrap">来源</th>
+              <th scope="col" class="box-border px-4 py-3 font-semibold font-body-md whitespace-nowrap">归档时间</th>
+            </tr>
+          </thead>
+          <tbody id="ins-archive-modal-table-body" class="divide-y divide-stone-100 font-body-md text-on-background"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+<script type="module" src="./insights.js"></script>
+</body>
+</html>

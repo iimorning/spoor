@@ -45,6 +45,7 @@ vi.stubGlobal('AudioContext', FakeAudioContext as unknown as typeof AudioContext
 vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ token: 'opaque' }), { status: 200 })));
 
 import { openMinimaxTtsStream } from '../../src/services/minimaxTtsStream';
+import { MINIMAX_ENGLISH_VOICE_ID } from '../../src/constants/voiceWriting';
 
 describe('MiniMax WebSocket TTS stream', () => {
   beforeEach(() => {
@@ -72,7 +73,61 @@ describe('MiniMax WebSocket TTS stream', () => {
     await stream.waitUntilIdle();
   });
 
-  it('uses English_CalmWoman and English boost when language is en', async () => {
+  it('recordAudio：把流回来的 PCM 收下来，拼成能播的 WAV 字节', async () => {
+    const stream = await openMinimaxTtsStream({ apiKey: 'key', recordAudio: true });
+    const ws = FakeWebSocket.instances[0]!;
+    stream.enqueueText('你好。');
+    stream.finish();
+    ws.open();
+    ws.message({ event: 'connected_success', base_resp: { status_code: 0 } });
+    ws.message({ event: 'task_started', base_resp: { status_code: 0 } });
+    // 两片 PCM：0123 4567（16 进制）
+    ws.message({
+      event: 'task_continued',
+      data: { audio: '01234567' },
+      base_resp: { status_code: 0 },
+    });
+    ws.message({
+      event: 'task_continued',
+      is_final: true,
+      data: { audio: '89abcdef' },
+      base_resp: { status_code: 0 },
+    });
+    await stream.waitUntilIdle();
+
+    const wav = stream.takeRecordedWavBytes()!;
+    expect(wav).toBeTruthy();
+    const ascii = (offset: number, len: number) =>
+      String.fromCharCode(...wav.slice(offset, offset + len));
+    expect(ascii(0, 4)).toBe('RIFF');
+    expect(ascii(8, 4)).toBe('WAVE');
+    expect(ascii(36, 4)).toBe('data');
+    // 头部 44 字节 + 两片 PCM 8 字节
+    expect(wav.byteLength).toBe(44 + 8);
+    expect([...wav.slice(44)]).toEqual([0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef]);
+    stream.stop();
+  });
+
+  it('没开 recordAudio 时不存音频，也拿不到东西', async () => {
+    const stream = await openMinimaxTtsStream({ apiKey: 'key' });
+    const ws = FakeWebSocket.instances[0]!;
+    stream.enqueueText('你好。');
+    stream.finish();
+    ws.open();
+    ws.message({ event: 'connected_success', base_resp: { status_code: 0 } });
+    ws.message({ event: 'task_started', base_resp: { status_code: 0 } });
+    ws.message({
+      event: 'task_continued',
+      is_final: true,
+      data: { audio: '01234567' },
+      base_resp: { status_code: 0 },
+    });
+    await stream.waitUntilIdle();
+    expect(stream.takeRecordedWavBytes()).toBeNull();
+    stream.stop();
+  });
+
+  it('uses the English default voice and English boost when language is en', async () => {
     const stream = await openMinimaxTtsStream({ apiKey: 'key', language: 'en' });
     const ws = FakeWebSocket.instances[0]!;
     ws.open();
@@ -80,7 +135,7 @@ describe('MiniMax WebSocket TTS stream', () => {
     expect(JSON.parse(ws.sent[0]!)).toMatchObject({
       event: 'task_start',
       language_boost: 'English',
-      voice_setting: { voice_id: 'English_CalmWoman' },
+      voice_setting: { voice_id: MINIMAX_ENGLISH_VOICE_ID },
     });
     stream.stop();
   });
@@ -284,6 +339,9 @@ describe('MiniMax WebSocket TTS stream', () => {
 });
 
 // ─── Server-managed path (logged-in + useServerKeys) ────────────────────
+// 开源版没有 Edge Function 托管路径：getSupabase() 恒为 null、
+// resolveAccessToken() 恒返回 null，所以 edgeFunctionHeaders() 拿不到
+// VITE_SUPABASE_ANON_KEY 就会抛。这一段在带托管的构建里跑。
 describe.skip('openMinimaxTtsStream — server-managed', () => {
   let fetchMock: ReturnType<typeof vi.fn>;
   let setServerConfigFn: typeof import('../../src/lib/serverConfig').setServerConfig;

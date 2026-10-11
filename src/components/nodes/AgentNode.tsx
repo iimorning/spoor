@@ -4,6 +4,7 @@ import { Loader2, MessagesSquare, Play } from 'lucide-react';
 import type { AgentNodeProps } from './types';
 import { resolveAgentLocalizedName } from '../../utils/aiI18n';
 import { AgentIcon } from '../AgentIcon';
+import { ProactiveStatusPill } from './ProactiveStatusPill';
 
 const EDGE_BTN =
   'w-6 h-6 bg-white border border-[#E6E4DF] rounded-full flex items-center justify-center text-[#8c8a84] hover:text-[#C2410C] hover:border-[#C2410C] transition-all shadow-sm disabled:opacity-40 disabled:pointer-events-none';
@@ -85,6 +86,7 @@ export function AgentNode({
   agentConfigs,
   isAnalyzing,
   isGeneratingCover,
+  proactiveStatus,
 }: AgentNodeProps) {
   const [coverFailed, setCoverFailed] = useState(false);
 
@@ -143,6 +145,7 @@ export function AgentNode({
             <Loader2 className="w-8 h-8 text-[#C2410C] animate-spin" aria-hidden />
           </div>
         ) : null}
+        <ProactiveStatusPill status={proactiveStatus} />
       </div>
     </div>
   );

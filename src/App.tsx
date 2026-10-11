@@ -10,7 +10,8 @@ import {
 import { commitCanvasInlineEditing } from './utils/commitCanvasInlineEditing';
 import { registerCanvasUnloadFlush } from './utils/registerCanvasUnloadFlush';
 import { getCanvasNodeContextText } from './utils/canvasNodeContextText';
-import { canStartAgentDiscussion, isAgentDiscussionLeaf } from './utils/agentDiscussion';
+import { isAgentDiscussionLeaf } from './utils/agentDiscussion';
+import { readLocalStorage, writeLocalStorage } from './utils/safeStorage';
 import { askAiRequiresLinkedPersona, canAskAiOnNode, nodeIdsLinkedToAskPersona } from './utils/canvasAskAi';
 import { spokenFallbackFromWritten } from './utils/voiceSpokenBrief';
 import { visibleAiReplyText } from './utils/visibleAiReply';
@@ -31,6 +32,23 @@ import {
   pickPersonaToClaimUnboundZone,
 } from './utils/agentWorkZone';
 import { reconcileNodeScopesFromZones, stampWorkZoneScopeOnNewNodes } from './utils/syncWorkZoneScopes';
+import {
+  PANEL_ROOM_MAX_PARTICIPANTS,
+  buildRoomGuestIndex,
+  buildRoomLabelText,
+  buildRoomParticipants,
+  clampRoomDiscussionRounds,
+  listRoomInviteCandidates,
+  listRoomLibraryCandidates,
+  personaNodeDisplayName,
+  personaVoiceIdForNode,
+  personaVoiceIdForMessage,
+  pruneRoomRoster,
+  sanitizeRoomRoster,
+  toggleRoomId,
+} from './utils/personaChatRoom';
+import { getOrCreatePersonaThread } from './utils/personaStreamingAi';
+import { spawnAgentCardOnCanvas } from './utils/spawnAgentCard';
 import { planSourceSelectionAsk } from './utils/sourceSelectionAsk';
 import {
   hitTestWorkZoneBody,
@@ -59,11 +77,11 @@ import { DraggableNode } from './components/canvas/DraggableNode';
 import { PublishSequenceMode, PublishSequenceBadge } from './components/PublishSequenceMode';
 import { useAuth } from './contexts/AuthContext';
 import { useBilling } from './contexts/BillingContext';
-import { setServerConfig, isServerManaged } from './lib/serverConfig';
+import { setServerConfig, isServerManaged, hasMinimaxTtsAccess } from './lib/serverConfig';
 import { Sidebar } from './components/Sidebar';
 import { PocketView } from './components/PocketView';
 import { CanvasHistoryPopover } from './components/CanvasHistoryPopover';
-import { POCKET_CANVAS_ID, pocketNotePreview } from './utils/pocketNotes';
+import { POCKET_CANVAS_ID, isPocketImageNode, pocketNotePreview } from './utils/pocketNotes';
 import { useOnboarding, ONBOARDING_INTUITION_PUMP_STORAGE_KEY, ONBOARDING_TURTLE_SOUP_STORAGE_KEY } from './onboarding/useOnboarding';
 import { useOnboardingGates } from './onboarding/useOnboardingGates';
 import { OnboardingOverlay } from './onboarding/OnboardingOverlay';
@@ -106,10 +124,14 @@ import { useFullscreen } from './hooks/useFullscreen';
 import { useCanvasInteraction } from './hooks/useCanvasInteraction';
 import { useNodeActions } from './hooks/useNodeActions';
 import { useAiActions } from './hooks/useAiActions';
+import { useRoomProactiveChat } from './hooks/useRoomProactiveChat';
 import { useVoiceWritingMode } from './hooks/useVoiceWritingMode';
+import { resolveVoiceInputMode } from './constants/voiceWriting';
 import { useAppDialog } from './components/AppDialogProvider';
+import { countBookExcerptsInSelection } from './utils/bookExcerpts';
+import { imageFileFromClipboard, spawnPastedImageNode } from './utils/spawnPastedImageNode';
 import { detectAdaptiveLayout, useAdaptiveLayout } from './hooks/useAdaptiveLayout';
-import { ASK_NODE_SIZE, DEFAULT_NODE_SIZE, estimateNodeRect, findOpenCanvasPosition, getCanvasCenterPosition, THEME_NODE_SIZE } from './utils/canvas';
+import { AGENT_NODE_SIZE, ASK_NODE_SIZE, DEFAULT_NODE_SIZE, estimateNodeRect, findOpenCanvasPosition, findOpenPositionInsideRect, getCanvasCenterPosition, THEME_NODE_SIZE } from './utils/canvas';
 import {
   clientToWorld,
   isNearMarqueeEdge,
@@ -208,9 +230,7 @@ const AgentsStudio = React.lazy(() =>
 );
 
 /** 控制台执行 localStorage.setItem('SCRIBE_DEBUG_DND','1') 并刷新；桌面打包版也可用（不设 DEV 门槛）。 */
-const DEBUG_DND =
-  typeof localStorage !== 'undefined' &&
-  localStorage.getItem('SCRIBE_DEBUG_DND') === '1';
+const DEBUG_DND = readLocalStorage('SCRIBE_DEBUG_DND') === '1';
 
 /** tp- Token 套餐密钥须走 token-plan-cn；旧版默认 api.xiaomimimo.com 会导致 401 */
 function migrateStoredAiConfig(raw: unknown): AIConfig | null {
@@ -253,7 +273,7 @@ function migrateStoredAiConfig(raw: unknown): AIConfig | null {
 }
 export default function App() {
   const { t, i18n } = useTranslation();
-  const { alert: appAlert } = useAppDialog();
+  const { alert: appAlert, confirm: appConfirm } = useAppDialog();
   const { touchChrome, phone } = useAdaptiveLayout();
   const nodesRef = useRef<Record<string, HTMLElement | null>>({});
   const svgRef = useRef<SVGSVGElement>(null);
@@ -263,7 +283,7 @@ export default function App() {
 
   // Local-only UI states
   const [activeCanvasId, setActiveCanvasId] = useState<string>(() => {
-    const saved = localStorage.getItem('active_canvas_id') || 'default';
+    const saved = readLocalStorage('active_canvas_id') || 'default';
     return saved === POCKET_CANVAS_ID ? 'default' : saved;
   });
 
@@ -287,7 +307,9 @@ export default function App() {
     () => db.nodes.where('canvasId').equals(POCKET_CANVAS_ID).toArray(),
     [],
   ) ?? [];
-  const pocketCount = pocketNodes.filter((node) => pocketNotePreview(node.content)).length;
+  const pocketCount = pocketNodes.filter(
+    (node) => isPocketImageNode(node) || pocketNotePreview(node.content),
+  ).length;
   const dynamicNodes = dynamicNodesQuery ?? [];
   const edges = useLiveQuery(() => 
     db.edges.filter(edge => (edge.canvasId === activeCanvasId) || (!edge.canvasId && activeCanvasId === 'default')).toArray()
@@ -337,7 +359,6 @@ export default function App() {
   const [fullscreenEssay, setFullscreenEssay] = useState<{ articleId: string; nodeId: string } | null>(null);
   const [fullscreenBookNodeId, setFullscreenBookNodeId] = useState<string | null>(null);
   const canvasImmersive = Boolean(fullscreenEssay || fullscreenBookNodeId);
-  const [hoveredEdgeId, setHoveredEdgeId] = useState<string | null>(null);
   const [connectingFrom, setConnectingFrom] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState(() =>
     detectAdaptiveLayout().phone ? 'pocket' : 'personal',
@@ -940,7 +961,7 @@ export default function App() {
   const [aiConfig, setAiConfig] = useState(() => {
     let parsed: AIConfig | null = null;
     try {
-      const saved = localStorage.getItem('ai_config');
+      const saved = readLocalStorage('ai_config');
       parsed = saved ? migrateStoredAiConfig(JSON.parse(saved)) : null;
     } catch (error) {
       console.warn('[Spoor] Ignoring invalid stored AI config', error);
@@ -988,16 +1009,16 @@ export default function App() {
     // sit in the browser. Non-key fields (provider/model/voiceId/resourceId)
     // are still persisted so the user's UI selections survive reloads.
     if (!isServerManaged()) {
-      localStorage.setItem('ai_config', JSON.stringify(aiConfig));
+      writeLocalStorage('ai_config', JSON.stringify(aiConfig));
       return;
     }
     const { apiKey: _k, metasoApiKey: _m, api302Key: _a, volcAsrApiKey: _va, volcAsrAppId: _vai, volcAsrAccessToken: _vat, minimaxApiKey: _mm, ...persisted } = aiConfig;
     void _k; void _m; void _a; void _va; void _vai; void _vat; void _mm;
-    localStorage.setItem('ai_config', JSON.stringify(persisted));
+    writeLocalStorage('ai_config', JSON.stringify(persisted));
   }, [aiConfig]);
 
   useEffect(() => {
-    localStorage.setItem('active_canvas_id', activeCanvasId);
+    writeLocalStorage('active_canvas_id', activeCanvasId);
   }, [activeCanvasId]);
 
   useSeedData();
@@ -1153,9 +1174,31 @@ export default function App() {
 
   /** Trash / programmatic delete: same undo snapshot as Delete/Backspace & Cut. */
   const deleteNodesWithUndo = useCallback(
-    (ids: string[]) => {
+    async (ids: string[]) => {
       if (ids.length === 0) return;
       const { dynamicNodes: nodes, edges: canvasEdges } = canvasClipboardRef.current;
+
+      /**
+       * 书籍卡和别的卡片不一样：它里面藏着别处复制不出来的东西。
+       *
+       * 摘抄、右侧的对话、AI 伴读的标注，全都存在这一行上（`bookExcerpts` 之类），
+       * 删卡就是删它们。虽然能撤销，但在撤销之前用户并不知道自己刚扔掉了什么——
+       * 而"我攒了三十条摘抄"这种事实，只有他自己知道。所以只在有摘抄时问一句。
+       *
+       * 没摘抄的书不问：每天要删好几次卡片，为一张空书弹窗只会把人训练成不看。
+       */
+      const excerptTotal = countBookExcerptsInSelection(nodes, ids);
+      if (excerptTotal > 0) {
+        const ok = await appConfirm({
+          title: t('nodes.book_delete_excerpts_title'),
+          message: t('nodes.book_delete_excerpts_confirm', { count: excerptTotal }),
+          confirmLabel: t('nodes.book_delete_confirm_action'),
+          cancelLabel: t('dialog.cancel'),
+          variant: 'danger',
+        });
+        if (!ok) return;
+      }
+
       const snap = snapshotNodesAndTouchingEdges(ids, nodes, canvasEdges);
       if (snap.nodes.length === 0) return;
       void (async () => {
@@ -1171,7 +1214,7 @@ export default function App() {
         if (editingNodeId && deleted.includes(editingNodeId)) setEditingNodeId(null);
       })();
     },
-    [editingNodeId],
+    [appConfirm, editingNodeId, t],
   );
 
   useEffect(() => {
@@ -1209,27 +1252,39 @@ export default function App() {
       const picked = resolveTargetNodes();
       const ids = picked.map((n) => n.id);
       if (ids.length === 0) return;
-      const snap = snapshotNodesAndTouchingEdges(
-        ids,
-        canvasClipboardRef.current.dynamicNodes,
-        canvasClipboardRef.current.edges,
-      );
-      void (async () => {
-        const deleted = await canvasClipboardRef.current.removeNodeIds(ids);
-        if (deleted.length === 0) return;
-        setActiveChatAgentNodeId((current) =>
-          current && deleted.includes(current) ? null : current,
-        );
-        const keptNodes = snap.nodes.filter((n) => deleted.includes(n.id));
-        const keptIds = new Set(keptNodes.map((n) => n.id));
-        const keptEdges = snap.edges.filter((ed) => keptIds.has(ed.from) || keptIds.has(ed.to));
-        canvasUndoStackRef.current.push({ type: 'delete', nodes: keptNodes, edges: keptEdges });
-        if (editingNodeId && deleted.includes(editingNodeId)) setEditingNodeId(null);
-      })();
+      // 走同一条删除路径，而不是在这里再抄一遍——抄的那份绕过了"书里有摘抄就先问一句"，
+      // Ctrl+X 会把一本书连同几十条摘抄一声不吭地删掉。
+      void deleteNodesWithUndo(ids);
     };
 
     const onPaste = (e: ClipboardEvent) => {
       if (isTextEditingTarget(e.target)) return;
+
+      /**
+       * 图片先看。
+       *
+       * 复制一张图时剪贴板里 `text/plain` 是空的，东西在文件槽里（浏览器自己会弹
+       * 一句"已复制图片"）。下面三条路都只读文本，于是这种复制会被静默丢掉——
+       * 按了 Ctrl+V 什么都没发生，也没有报错可查。
+       *
+       * 放在文本分支之前：明确的图片比顺带附上的文字更像用户真正想贴的东西。
+       */
+      const pastedImage = imageFileFromClipboard(e.clipboardData);
+      if (pastedImage) {
+        e.preventDefault();
+        const { activeCanvasId: canvasId, transformRef: tRef } = canvasClipboardRef.current;
+        void (async () => {
+          const nodeId = await spawnPastedImageNode({
+            file: pastedImage,
+            canvasId,
+            position: getCanvasCenterPosition(tRef.current),
+          });
+          canvasUndoStackRef.current.push({ type: 'paste', nodeIds: [nodeId], edgeIds: [] });
+          setSelectedNodes(new Set([nodeId]));
+        })();
+        return;
+      }
+
       const text = e.clipboardData?.getData('text/plain') ?? '';
       const payload = parseCanvasClipboardPayload(text);
       if (payload) {
@@ -1378,6 +1433,10 @@ export default function App() {
     isAnyAiBusy,
     isNonPersonaAiBusy,
     personaStreams,
+    roomDiscussion,
+    advanceRoomDiscussion,
+    stopRoomDiscussion,
+    setRoomDiscussionRounds,
     extractBookSelectionToCard,
     transcribeAudioCard,
     transcribingAudioNodeId,
@@ -1385,17 +1444,31 @@ export default function App() {
     expandingBookNodeId,
     handlePublish: startPublishSequence,
     triggerAgentAnalysis,
-    startAgentDiscussion,
     continueAgentDiscussion,
     generateAgentCover,
     generatingCoverAgentId,
     runAskCardGeneration,
     retryAiCardGeneration,
     sendPersonaMessage,
+    markProactiveBusy,
   } = useAiActions({
     aiConfig, agentConfigs, activeCanvasId, nodesRef, transformRef,
     dynamicNodes, edges, selectedNodes, setSelectedNodes,
     onOpenSettings: () => setIsSettingsOpen(true),
+  });
+
+  const {
+    statusById: proactiveStatusById,
+    isProactiveEnabled,
+    setProactiveEnabled,
+  } = useRoomProactiveChat({
+    canvasId: activeCanvasId,
+    nodes: dynamicNodes,
+    zones: canvasWorkZones,
+    agentConfigs,
+    aiConfig,
+    nodesRef,
+    markProactiveBusy,
   });
 
   const handlePublish = useCallback(() => {
@@ -1426,6 +1499,216 @@ export default function App() {
     : activeChatPersonaConfig
       ? resolveAgentLocalizedName(activeChatPersonaConfig)
       : undefined;
+
+  // 多角色房间：参与者/禁言名单挂在主 Agent 的侧栏 thread 上，这里对着活节点校准后展示。
+  const activeChatThread = useLiveQuery(
+    () =>
+      activeChatPersona
+        ? db.canvasPersonaThreads.get(personaThreadId(activeCanvasId, activeChatPersona.id))
+        : undefined,
+    [activeCanvasId, activeChatPersona?.id],
+  );
+  const activeRoomRoster = React.useMemo(
+    () =>
+      sanitizeRoomRoster(
+        activeChatPersona?.id ?? '',
+        activeChatThread?.participantNodeIds,
+        activeChatThread?.mutedNodeIds,
+        dynamicNodes,
+      ),
+    [
+      activeChatPersona?.id,
+      activeChatThread?.participantNodeIds,
+      activeChatThread?.mutedNodeIds,
+      dynamicNodes,
+    ],
+  );
+  const activeRoomParticipants = React.useMemo(
+    () =>
+      activeChatPersona
+        ? buildRoomParticipants(
+            activeChatPersona,
+            activeRoomRoster.participantNodeIds,
+            activeRoomRoster.mutedNodeIds,
+            dynamicNodes,
+            agentConfigs,
+            t('ask.character_name'),
+            t('nodes.agent_fallback_name'),
+          )
+        : [],
+    [activeChatPersona, activeRoomRoster, dynamicNodes, agentConfigs, t],
+  );
+  const activeRoomInviteCandidates = React.useMemo(() => {
+    if (!activeChatPersona) return [];
+    return listRoomInviteCandidates(
+      activeChatPersona.id,
+      activeRoomRoster.participantNodeIds,
+      dynamicNodes,
+    ).map((n) => {
+      const conf = n.agentConfigId
+        ? agentConfigs.find((a) => a.id === n.agentConfigId)
+        : undefined;
+      return {
+        id: n.id,
+        agentConfigId: n.agentConfigId,
+        name: personaNodeDisplayName(
+          n,
+          agentConfigs,
+          t('ask.character_name'),
+          t('nodes.agent_fallback_name'),
+        ),
+        coverUrl: conf?.coverImageUrl,
+      };
+    });
+  }, [activeChatPersona, activeRoomRoster.participantNodeIds, dynamicNodes, agentConfigs, t]);
+  // 角色库里还没在这张画布上的角色：选中会先放到画布上再加入讨论。
+  const activeRoomLibraryCandidates = React.useMemo(
+    () =>
+      listRoomLibraryCandidates(agentConfigs, dynamicNodes).map((agent) => ({
+        id: agent.id,
+        agentConfigId: agent.id,
+        name: resolveAgentLocalizedName(agent),
+        coverUrl: agent.coverImageUrl,
+      })),
+    [agentConfigs, dynamicNodes],
+  );
+  // 房间里任何人还在回复时，整个侧栏都算忙（发送按钮与角色 chip 一起禁用）。
+  const activeRoomBusy = Boolean(
+    activeChatPersona &&
+      (personaStreams[activeChatPersona.id] ||
+        activeRoomRoster.participantNodeIds.some((id) => personaStreams[id])),
+  );
+  const persistRoomRoster = React.useCallback(
+    async (
+      reduce: (prev: { participantNodeIds: string[]; mutedNodeIds: string[] }) => {
+        participantNodeIds: string[];
+        mutedNodeIds: string[];
+      },
+      /** 刚放到画布、可能还没进 dynamicNodes 的新卡：清残留时不能把它当残留丢掉。 */
+      keepIds: Iterable<string> = [],
+    ) => {
+      if (!activeChatPersona) return;
+      // 基于刚读出来的行做增量，而不是渲染时的快照：连续两次点 chip 不会互相覆盖。
+      const row = await getOrCreatePersonaThread(activeCanvasId, activeChatPersona.id);
+      // 判断"哪个角色卡已经没了"必须问数据库：dynamicNodes 在页面刚加载时可能还是空的，
+      // 拿它当依据会把整份名单误清空。
+      const rosterIds = [...new Set([
+        ...(row.participantNodeIds ?? []),
+        ...(row.mutedNodeIds ?? []),
+      ])];
+      const liveRows = rosterIds.length > 0
+        ? ((await db.nodes.bulkGet(rosterIds)).filter(Boolean) as CanvasNode[])
+        : [];
+      const live = pruneRoomRoster(
+        {
+          participantNodeIds: row.participantNodeIds ?? [],
+          mutedNodeIds: row.mutedNodeIds ?? [],
+        },
+        liveRows,
+        keepIds,
+      );
+      const next = reduce(live);
+      await db.canvasPersonaThreads.put({
+        ...row,
+        participantNodeIds: next.participantNodeIds,
+        mutedNodeIds: next.mutedNodeIds,
+        updatedAt: Date.now(),
+      });
+    },
+    [activeCanvasId, activeChatPersona],
+  );
+  const handleAddRoomParticipant = (nodeId: string) => {
+    void persistRoomRoster((prev) => ({
+      participantNodeIds: [...prev.participantNodeIds, nodeId].slice(
+        0,
+        PANEL_ROOM_MAX_PARTICIPANTS,
+      ),
+      mutedNodeIds: prev.mutedNodeIds,
+    }));
+  };
+  const handleRemoveRoomParticipant = (nodeId: string) => {
+    void persistRoomRoster((prev) => ({
+      participantNodeIds: prev.participantNodeIds.filter((id) => id !== nodeId),
+      mutedNodeIds: prev.mutedNodeIds.filter((id) => id !== nodeId),
+    }));
+  };
+  const handleToggleRoomParticipantMuted = (nodeId: string) => {
+    void persistRoomRoster((prev) => ({
+      participantNodeIds: prev.participantNodeIds,
+      mutedNodeIds: toggleRoomId(prev.mutedNodeIds, nodeId),
+    }));
+  };
+  /** 角色库里的角色：先落到画布上（优先放进主角色房间里），再加入讨论。 */
+  const handleAddRoomFromLibrary = (agentConfigId: string) => {
+    void (async () => {
+      if (!activeChatPersona) return;
+      const agent = agentConfigs.find((a) => a.id === agentConfigId);
+      if (!agent) return;
+      // 有封面的角色卡按 16:9 写死尺寸，没有封面的走默认尺寸——预留面积要和实际一致，
+      // 否则会少留 20px，压到下面的卡片。
+      const cardSize = (agent.coverImageUrl ?? '').trim() ? AGENT_NODE_SIZE : DEFAULT_NODE_SIZE;
+      // 房间里的空位优先：卡片落在房间外面，用户看不出来它已经在这个房间里了。
+      const room = canvasWorkZonesRef.current.find(
+        (zone) => zone.personaNodeId === activeChatPersona.id,
+      );
+      const position =
+        (room &&
+          findOpenPositionInsideRect(room, cardSize, dynamicNodesRef.current, {
+            preferBeside: activeChatPersona,
+          })) ??
+        findOpenCanvasPosition({
+          transform: transformRef.current,
+          obstacles: dynamicNodesRef.current,
+          size: cardSize,
+          preferBeside: activeChatPersona,
+        });
+      const nodeId = await spawnAgentCardOnCanvas({
+        canvasId: activeCanvasId,
+        agentConfig: agent,
+        position,
+      });
+      await persistRoomRoster(
+        (prev) => ({
+          participantNodeIds: [...prev.participantNodeIds, nodeId].slice(
+            0,
+            PANEL_ROOM_MAX_PARTICIPANTS,
+          ),
+          mutedNodeIds: prev.mutedNodeIds,
+        }),
+        [nodeId],
+      );
+    })();
+  };
+
+  // 讨论名单：谁在哪间房里当客人。房间仍只属于主角色，这里只用来放宽拖拽规则——
+  // 名单里的人可以把自己的卡停进主角色的房间。
+  const canvasRoomThreads = useLiveQuery(
+    () => db.canvasPersonaThreads.where('canvasId').equals(activeCanvasId).toArray(),
+    [activeCanvasId],
+  );
+  const roomGuestIndexRef = useRef<Map<string, Set<string>>>(new Map());
+  roomGuestIndexRef.current = buildRoomGuestIndex(canvasRoomThreads);
+  const isRoomGuest = React.useCallback(
+    (zoneHostNodeId: string, personaNodeId: string) =>
+      roomGuestIndexRef.current.get(zoneHostNodeId)?.has(personaNodeId) ?? false,
+    [],
+  );
+  // 画布上的房间状态线（主角色 ↔ 在场角色）。纯视觉，不写进 edges —— 它只是
+  // 「这几个人正在一起聊」的状态，不是第二条记忆。
+  const roomLinks = React.useMemo(() => {
+    const byId = new Map(dynamicNodes.map((n) => [n.id, n]));
+    const links: Array<{ id: string; from: string; to: string }> = [];
+    for (const [hostNodeId, guests] of roomGuestIndexRef.current) {
+      const host = byId.get(hostNodeId);
+      if (!host || !isPersonaAnchorNode(host)) continue;
+      for (const guestNodeId of guests) {
+        const guest = byId.get(guestNodeId);
+        if (!guest || !isPersonaAnchorNode(guest)) continue;
+        links.push({ id: `room:${hostNodeId}:${guestNodeId}`, from: hostNodeId, to: guestNodeId });
+      }
+    }
+    return links;
+  }, [canvasRoomThreads, dynamicNodes]);
 
   const onboardingAskNodeId = React.useMemo(
     () =>
@@ -1580,19 +1863,18 @@ export default function App() {
       if (!zone.personaNodeId) return t('canvas.v2.work_zone_empty');
       const persona = dynamicNodes.find((n) => n.id === zone.personaNodeId);
       if (!persona) return t('canvas.v2.work_zone_empty');
-      const name = persona.type === 'ask'
-        ? t('ask.character_name')
-        : (() => {
-            const cfg = persona.agentConfigId
-              ? agentConfigs.find((a) => a.id === persona.agentConfigId)
-              : undefined;
-            return cfg
-              ? resolveAgentLocalizedName(cfg)
-              : t('nodes.agent_fallback_name', { defaultValue: '角色' });
-          })();
-      return t('canvas.v2.work_zone_room', { name });
+      // 在场的人也写进标签：「阿狸的房间 · 真知镜」——画布上就能看出谁在讨论。
+      return buildRoomLabelText({
+        hostNode: persona,
+        guestNodeIds: roomGuestIndexRef.current.get(zone.personaNodeId) ?? [],
+        nodes: dynamicNodes,
+        agentConfigs,
+        askName: t('ask.character_name'),
+        fallbackName: t('nodes.agent_fallback_name', { defaultValue: '角色' }),
+        t,
+      });
     },
-    [dynamicNodes, agentConfigs, t],
+    [dynamicNodes, agentConfigs, t, canvasRoomThreads],
   );
 
   const handleSelectWorkZone = useCallback((zoneId: string) => {
@@ -1714,6 +1996,9 @@ export default function App() {
     endTtsReply,
     pushTtsChunk,
     stopTts,
+    speakMessage,
+    stopSpeaking,
+    manualSpeechMessageId,
     markThinking,
   } =
     useVoiceWritingMode({
@@ -1727,6 +2012,15 @@ export default function App() {
       targetAskCardIdRef: voiceTargetAskCardIdRef,
       onTranscript: (text, askId) => {
         if (!askId) return;
+        if (resolveVoiceInputMode(aiConfig.voiceInputMode) === 'dictation' && canvasV2Enabled) {
+          setActiveChatAgentNodeId(askId);
+          setChatComposerPrefill((prev) => ({
+            personaNodeId: askId,
+            composerSegments: [{ type: 'text', content: text }],
+            token: (prev?.token ?? 0) + 1,
+          }));
+          return;
+        }
         setAskComposerPrefill((prev) => ({
           nodeId: askId,
           text,
@@ -1735,8 +2029,11 @@ export default function App() {
       },
       onCommit: (text, askId) => {
         const trimmed = text.trim();
-        // Handshake MiniMax before the Ask request so first-sentence TTS is ready.
-        markThinking();
+        // Handshake MiniMax before the Ask request so first-sentence TTS is ready,
+        // 而且要按"用户在跟谁说话"的音色握手：流一开就是这个音色，回复卡随后才出现。
+        markThinking(
+          askId ? personaVoiceIdForNode(askId, dynamicNodesRef.current, agentConfigs) : undefined,
+        );
         if (askId && trimmed) submitAskFromVoiceRef.current(askId, trimmed);
       },
       onOpenSettings: () => setIsSettingsOpen(true),
@@ -2012,29 +2309,36 @@ export default function App() {
   /** Voice: stream sentences into TTS while the side-panel reply is still being written. */
   const handleAskSubmitWithVoice = useCallback(
     async (askId: string, prompt: string) => {
-      let lastRaw = '';
+      let hostRaw = '';
       let replyId: string | null = null;
+      /** 最后一个进朗读队列的发言人。房间里主人说完还有人接话，收尾得看最后那一位。 */
+      let lastSpeaker: { messageId: string; text: string } | null = null;
       const generatedId = await runAskCardGeneration(askId, prompt, {
         voiceBrief: true,
         preferredAgentNodeId: pinnedVoiceAgentNodeIdRef.current,
         onReplyNodeCreated: (id) => {
           replyId = id;
         },
-        onStreamChunk: (accumulated) => {
-          lastRaw = accumulated;
-          const id = replyId;
-          if (id) pushTtsChunk(id, accumulated);
+        onSpeakerStream: ({ messageId, speakerNodeId, accumulated }) => {
+          // 谁说的就用谁的音色：房间里几个角色因此各念各的。
+          const voiceId = personaVoiceIdForNode(speakerNodeId, dynamicNodes, agentConfigs);
+          pushTtsChunk(messageId, accumulated, voiceId);
+          lastSpeaker = { messageId, text: accumulated };
+          if (messageId === replyId) hostRaw = accumulated;
         },
       });
       if (voiceTargetAskCardIdRef.current !== askId) return;
       const id = generatedId || replyId;
-      const thread = await db.canvasPersonaThreads.get(personaThreadId(activeCanvasId, askId));
-      const threadText = id ? thread?.messages.find((m) => m.id === id)?.text ?? '' : '';
-      const spoken =
-        visibleAiReplyText(lastRaw).trim() || spokenFallbackFromWritten(threadText);
-      await endTtsReply(id ?? '', spoken);
+      if (lastSpeaker && lastSpeaker.messageId === id) {
+        // 主人自己就是最后一位（单人房间、或参与者全被禁言）：用他写下来的全文收尾。
+        const thread = await db.canvasPersonaThreads.get(personaThreadId(activeCanvasId, askId));
+        const threadText = id ? thread?.messages.find((m) => m.id === id)?.text ?? '' : '';
+        const spoken = visibleAiReplyText(hostRaw).trim() || spokenFallbackFromWritten(threadText);
+        if (spoken.length >= lastSpeaker.text.length) lastSpeaker.text = spoken;
+      }
+      await endTtsReply(lastSpeaker?.messageId ?? id ?? '', lastSpeaker?.text ?? '');
     },
-    [activeCanvasId, runAskCardGeneration, endTtsReply, pushTtsChunk],
+    [activeCanvasId, runAskCardGeneration, endTtsReply, pushTtsChunk, dynamicNodes, agentConfigs],
   );
   submitAskFromVoiceRef.current = (askId, prompt) => {
     void handleAskSubmitWithVoice(askId, prompt);
@@ -2261,16 +2565,6 @@ export default function App() {
     [retryAiCardGeneration],
   );
 
-  const contextTextForDiscussion = useCallback(
-    (nodeId: string) => {
-      const el = nodesRef.current[nodeId];
-      if (el) return getCanvasNodeContextText(el);
-      const n = dynamicNodes.find((x) => x.id === nodeId);
-      return (n?.content ?? '').trim();
-    },
-    [dynamicNodes],
-  );
-
   const runAgentAnalysisFromCard = (agentNodeId: string) => {
     if (isNonPersonaAiBusy || personaStreams[agentNodeId]) return;
     const agentNode = dynamicNodes.find(n => n.id === agentNodeId && n.type === 'agent');
@@ -2315,21 +2609,12 @@ export default function App() {
     void appAlert({ message: t('nodes.agent_no_context') });
   };
 
-  const runAgentDiscussionFromCard = (agentNodeId: string) => {
-    if (isAnyAiBusy) return;
-    void startAgentDiscussion(agentNodeId);
-  };
-
+  // 画布连线那套多角色讨论（第二种形式）的入口暂时摘掉了：它还是 V1 的阵容/
+  // 门槛逻辑，点下去只会提示要再连一张内容卡。侧栏房间接管了这个角色。
   const runContinueDiscussionFromCard = (aiNodeId: string) => {
     if (isAnyAiBusy) return;
     void continueAgentDiscussion(aiNodeId);
   };
-
-  const agentCanStartDiscussion = useCallback(
-    (agentNodeId: string) =>
-      canStartAgentDiscussion(agentNodeId, dynamicNodes, edges, contextTextForDiscussion),
-    [dynamicNodes, edges, contextTextForDiscussion],
-  );
 
   const agentCanContinueDiscussion = useCallback(
     (aiNodeId: string) => isAgentDiscussionLeaf(aiNodeId, dynamicNodes, edges),
@@ -2456,6 +2741,7 @@ export default function App() {
             pos,
             canvasWorkZonesRef.current,
             nodesSnapshot,
+            isRoomGuest,
           );
         });
         if (blocked) {
@@ -2537,7 +2823,7 @@ export default function App() {
               id === draggedId
                 ? finalPos
                 : { x: peer.x + delta.dx, y: peer.y + delta.dy };
-            const result = await applyWorkZoneOnDragEnd(id, pos, nodesSnapshot, canvasWorkZonesRef.current);
+            const result = await applyWorkZoneOnDragEnd(id, pos, nodesSnapshot, canvasWorkZonesRef.current, isRoomGuest);
             await syncBoundZone(result);
           }
         }
@@ -2573,6 +2859,7 @@ export default function App() {
             finalPos,
             nodesSnapshot,
             canvasWorkZonesRef.current,
+            isRoomGuest,
           );
           await syncBoundZone(result);
         }
@@ -2920,13 +3207,11 @@ export default function App() {
             className="canvas-cjk absolute inset-0 origin-top-left z-0 pointer-events-none"
           >
             <CanvasEdgeLines
-              edges={edges} nodes={dynamicNodes}
+              edges={edges}
               connectingFrom={connectingFrom}
               svgRef={svgRef} edgeLabelsRef={edgeLabelsRef}
-              hoveredEdgeId={hoveredEdgeId} setHoveredEdgeId={setHoveredEdgeId}
+              roomLinks={roomLinks}
               deleteEdge={deleteEdge}
-              canStartAgentDiscussion={agentCanStartDiscussion}
-              onStartAgentDiscussion={runAgentDiscussionFromCard}
             />
 
             {canvasV2Enabled && (
@@ -3239,6 +3524,15 @@ export default function App() {
                       isAmbienceFixtureNode(node.type)
                         ? undefined
                         : (prompt) => {
+                            if (
+                              resolveVoiceInputMode(aiConfig.voiceInputMode) === 'dictation' &&
+                              voiceModeActive &&
+                              voiceTargetAskCardId === node.id
+                            ) {
+                              markThinking(personaVoiceIdForNode(node.id, dynamicNodes, agentConfigs));
+                              void handleAskSubmitWithVoice(node.id, prompt);
+                              return;
+                            }
                             void runAskCardGeneration(node.id, prompt);
                           }
                     }
@@ -3290,6 +3584,7 @@ export default function App() {
                         : analyzingAgentNodeId
                     }
                     generatingCoverAgentId={generatingCoverAgentId}
+                    proactiveStatusById={proactiveStatusById}
                     onContinueDiscussion={runContinueDiscussionFromCard}
                     canContinueDiscussion={agentCanContinueDiscussion}
                     isContinueDiscussionDisabled={isAnyAiBusy}
@@ -3322,11 +3617,12 @@ export default function App() {
                     ttsHighlightSentence={
                       ttsHighlight?.nodeId === node.id ? ttsHighlight.sentence : null
                     }
-                    onExtractBookSelectionToCard={(quote, sourceLabel, sourceNodeId) => {
+                    onExtractBookSelectionToCard={(quote, sourceLabel, sourceNodeId, note) => {
                       void extractBookSelectionToCard(
                         sourceNodeId || node.id,
                         quote,
                         sourceLabel,
+                        note,
                       );
                     }}
                     onAskAboutBookSelection={
@@ -3370,19 +3666,84 @@ export default function App() {
               nodesRef={nodesRef}
               composerSegments={composerSegments}
               onComposerSegmentsChange={setComposerSegments}
-              isStreaming={Boolean(personaStreams[activeChatPersona.id])}
+              isStreaming={activeRoomBusy}
               streamingMessageId={personaStreams[activeChatPersona.id]?.messageId ?? null}
               streamingThought={personaStreams[activeChatPersona.id]?.thought ?? ''}
+              proactiveEnabled={isProactiveEnabled()}
+              onToggleProactive={(next) => {
+                void setProactiveEnabled(activeChatPersona.id, next);
+              }}
+              roomParticipants={activeRoomParticipants}
+              roomInviteCandidates={activeRoomInviteCandidates}
+              roomLibraryCandidates={activeRoomLibraryCandidates}
+              roomMaxParticipants={PANEL_ROOM_MAX_PARTICIPANTS}
+              onAddRoomParticipant={handleAddRoomParticipant}
+              onAddRoomFromLibrary={handleAddRoomFromLibrary}
+              onRemoveRoomParticipant={handleRemoveRoomParticipant}
+              onToggleRoomParticipantMuted={handleToggleRoomParticipantMuted}
+              streamsByPersona={personaStreams}
+              // 自动讨论的进度只显示在它所属的那个房间面板上
+              roomDiscussion={
+                roomDiscussion?.hostNodeId === activeChatPersona.id ? roomDiscussion : null
+              }
+              roomDiscussionRounds={clampRoomDiscussionRounds(
+                activeChatThread?.roomDiscussionRounds,
+              )}
+              onChangeRoomDiscussionRounds={(rounds) => {
+                void setRoomDiscussionRounds(activeChatPersona.id, rounds);
+              }}
+              onStartRoomDiscussion={() => {
+                void advanceRoomDiscussion(
+                  activeChatPersona.id,
+                  clampRoomDiscussionRounds(activeChatThread?.roomDiscussionRounds),
+                );
+              }}
+              onStopRoomDiscussion={() => {
+                // 只停这个房间：别的房间在聊不该被这里按停。
+                void stopRoomDiscussion(activeChatPersona.id);
+              }}
               ttsHighlightMessageId={ttsHighlight?.nodeId ?? null}
               ttsHighlightSentence={ttsHighlight?.sentence ?? null}
+              // 朗读/重播：高亮正在读哪一条就够了（会话朗读和手动朗读都会点亮它）
+              canReadAloud={hasMinimaxTtsAccess(aiConfig.minimaxApiKey)}
+              speakingMessageId={ttsHighlight?.nodeId ?? null}
+              lastSpokenMessageId={manualSpeechMessageId}
+              onReadMessage={(messageId, text) => {
+                // 谁说的就用谁的音色：房间里几个角色的声音因此能分开。
+                const voiceId = personaVoiceIdForMessage(
+                  activeChatThread?.messages,
+                  messageId,
+                  dynamicNodes,
+                  agentConfigs,
+                );
+                void speakMessage(messageId, text, voiceId);
+              }}
+              onStopSpeaking={() => {
+                void stopSpeaking();
+              }}
               scrollToMessageId={scrollToChatMessageId}
               onClose={() => setActiveChatAgentNodeId(null)}
-              onSend={(segments, onAccepted) =>
-                sendPersonaMessage(activeChatPersona.id, userTextFromSegments(segments), {
+              onSend={(segments, onAccepted) => {
+                const text = userTextFromSegments(segments);
+                if (
+                  resolveVoiceInputMode(aiConfig.voiceInputMode) === 'dictation' &&
+                  voiceModeActive &&
+                  voiceTargetAskCardId === activeChatPersona.id
+                ) {
+                  onAccepted();
+                  markThinking(
+                    personaVoiceIdForNode(activeChatPersona.id, dynamicNodes, agentConfigs),
+                  );
+                  void handleAskSubmitWithVoice(activeChatPersona.id, text);
+                  return;
+                }
+                // 要把 promise 交回去：面板据此判断这条到底发出去没有。
+                // 讨论中插话要先等正在说的那一轮写完，这段时间里"没发出去"是误报。
+                return sendPersonaMessage(activeChatPersona.id, text, {
                   composerSegments: segments,
                   onAccepted,
-                })
-              }
+                });
+              }}
               onIngestFiles={ingestChatPanelFiles}
               onToggleVoice={() => {
                 if (activeChatPersona.type === 'agent') pinVoicePersona(activeChatPersona.id);
@@ -3392,6 +3753,7 @@ export default function App() {
               voiceModeActive={voiceModeActive && voiceTargetAskCardId === activeChatPersona.id}
               voicePhase={voicePhase}
               liveTranscript={liveTranscript}
+              voiceInputMode={resolveVoiceInputMode(aiConfig.voiceInputMode)}
               composerPrefill={chatComposerPrefill}
               onRemoveFocus={(nodeId) => {
                 setSelectedNodes((prev) => {
@@ -3700,18 +4062,16 @@ export default function App() {
           {fullscreenBookNodeId && (
             <BookFullscreen
               nodeId={fullscreenBookNodeId}
+              aiConfig={aiConfig}
               onClose={closeBookFullscreen}
               isExpanding={expandingBookNodeId === fullscreenBookNodeId}
-              onExtractSelectionToCard={(quote, sourceLabel, sourceNodeId) => {
+              onExtractSelectionToCard={(quote, sourceLabel, sourceNodeId, note) => {
                 void extractBookSelectionToCard(
                   sourceNodeId || fullscreenBookNodeId,
                   quote,
                   sourceLabel,
+                  note,
                 );
-              }}
-              onAskAboutSelection={askAboutBookSelection}
-              onExpandSelection={(quote, sourceLabel) => {
-                void expandBookSelection(fullscreenBookNodeId, quote, sourceLabel);
               }}
             />
           )}

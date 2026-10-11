@@ -13,17 +13,18 @@ function readSrc(rel: string): string {
 }
 
 describe('画布节点 blur 写库源码契约', () => {
-  it('ThemeNode：三处字段失焦写库，且聚焦时不被 props 回写（无 onInput 防抖）', () => {
+  it('ThemeNode：标题失焦写库，且聚焦时不被 props 回写（无 onInput 防抖）', () => {
     const src = readSrc('src/components/nodes/ThemeNode.tsx');
     expect(src).toContain('db.nodes.update(node.id, patch)');
-    expect(src).toContain("persistField('content')");
-    expect(src).toContain("persistField('description')");
-    expect(src).toContain("persistField('themeTag')");
+    expect(src).toContain('db.nodes.update(node.id, { content: raw })');
     expect(src).toContain('isFocusedRef.current');
     expect(src).not.toContain('onInput');
     expect(src).not.toContain('schedulePersist');
     expect(src).not.toContain('createDebouncedThemePersist');
     expect(src).not.toContain('fitThemeCardWidth');
+    // 主题卡重设计（b067739 起）后卡上只剩标题一个可编辑字段：description / themeTag
+    // 不再显示，但字段仍留在数据模型里供存档、检索与 ASR 偏置使用。
+    expect((src.match(/contentEditable/g) ?? []).length).toBe(1);
   });
 
   it('NoteBody：编辑区 onBlur 写入 content', () => {

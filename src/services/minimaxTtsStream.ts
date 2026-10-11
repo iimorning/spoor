@@ -1,6 +1,7 @@
 import { MINIMAX_DEFAULT_TTS_MODEL } from '../constants/voiceWriting';
 import { resolveMinimaxTtsProfile } from '../utils/minimaxTtsVoice';
 import { isServerManaged, getFunctionsBase, resolveAccessToken, edgeFunctionHeaders, withEdgeFunctionWsParams } from '../lib/serverConfig';
+import { pcm16ToWavBytes } from '../utils/pcmToWav';
 import { isTauriRuntime } from '../utils/isTauriRuntime';
 
 const ISSUE_PATH = '/api/minimax-tts/issue-token';
@@ -25,6 +26,11 @@ export type MinimaxTtsStreamOptions = {
   /** Fires when a sentence's audio actually starts playing; `null` when the queue goes idle. */
   onActiveTextChange?: (text: string | null) => void;
   onError?: (message: string) => void;
+  /**
+   * 把合成出来的 PCM 也留一份，供 {@link MinimaxTtsStream.takeRecordedWav} 取走做缓存
+   * （试听用）。默认关：正常朗读几十秒的音频没必要留在内存里。
+   */
+  recordAudio?: boolean;
 };
 
 export type MinimaxTtsStream = {
@@ -32,6 +38,11 @@ export type MinimaxTtsStream = {
   finish: () => void;
   waitUntilIdle: () => Promise<void>;
   stop: () => void;
+  /**
+   * 开了 recordAudio 才有：把这次合成拼成 WAV 字节（不包 Blob —— 缓存直接存字节，
+   * 存 Blob 再取字节在某些环境里没有 `Blob.arrayBuffer`，会静默存不进去）。
+   */
+  takeRecordedWavBytes: () => Uint8Array | null;
 };
 
 function hexToBytes(hex: string): Uint8Array {
@@ -135,6 +146,8 @@ export async function openMinimaxTtsStream(options: MinimaxTtsStreamOptions): Pr
   let activeSources = 0;
   let audioChain: Promise<void> = Promise.resolve();
   const texts: string[] = [];
+  /** recordAudio 时攒下的 PCM 分片，最后由 takeRecordedWav 拼成 WAV。 */
+  const recordedChunks: Uint8Array[] | null = options.recordAudio ? [] : null;
   const idleWaiters: Array<() => void> = [];
   /** Sentence currently being synthesized (may still be ahead of audible playback). */
   let currentTaskText: string | null = null;
@@ -221,6 +234,7 @@ export async function openMinimaxTtsStream(options: MinimaxTtsStreamOptions): Pr
     audioChain = audioChain
       .then(async () => {
         const bytes = hexToBytes(hex);
+        if (recordedChunks && bytes.length) recordedChunks.push(bytes);
         if (!bytes.length || playbackAborted) {
           activeSources -= 1;
           settleIdle();
@@ -357,6 +371,10 @@ export async function openMinimaxTtsStream(options: MinimaxTtsStreamOptions): Pr
     waitUntilIdle() {
       if (isIdle()) return Promise.resolve();
       return new Promise<void>((resolve) => idleWaiters.push(resolve));
+    },
+    takeRecordedWavBytes() {
+      if (!recordedChunks || recordedChunks.length === 0) return null;
+      return pcm16ToWavBytes(recordedChunks, PCM_SAMPLE_RATE);
     },
     stop() {
       if (closed) return;

@@ -16,14 +16,11 @@ export async function deleteCanvasWithContents(canvasId: string): Promise<void> 
     db.canvasPersonaThreads.filter((t) => belongsToCanvas(t.canvasId, canvasId)).toArray(),
   ]);
 
+  // 表超过 5 张就得走数组形式：Dexie 的类型定义只 overload 到 5 张，
+  // 运行时却一直都支持更多张（见 dexie.d.ts 的 `tables: readonly (string | Table)[]`）。
   await db.transaction(
     'rw',
-    db.nodes,
-    db.edges,
-    db.canvases,
-    db.articles,
-    db.canvasWorkZones,
-    db.canvasPersonaThreads,
+    [db.nodes, db.edges, db.canvases, db.articles, db.canvasWorkZones, db.canvasPersonaThreads],
     async () => {
       const orphanedArticles = await articleIdsOrphanedByRemovingEssayNodes(nodes);
       if (nodes.length > 0) await db.nodes.bulkDelete(nodes.map((n) => n.id));

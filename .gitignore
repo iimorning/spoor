@@ -142,6 +142,10 @@ public/fonts/JasonHandwriting1.woff2
 public/fonts/ZhuqueFangsong-Regular.woff2
 public/fonts/split/
 
+# 词典子集：由 scripts/build-ecdict-subset.mjs 从使用者自己取的 ECDICT.csv 生成。
+# 数据本身不入库；没有它词典会安静地回落到模型那条路。
+public/data/dictionary/
+
 # Append-only local snapshots produced by the Reddit monitor viewer
 /scripts/reddit-monitor/data/history/
 /scripts/reddit-monitor/data/forum-state.json

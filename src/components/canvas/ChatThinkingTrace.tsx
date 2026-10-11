@@ -55,7 +55,7 @@ export function ChatThinkingTrace({
   return (
     <div className="flex w-full min-w-0 flex-col items-stretch gap-2">
       <div className="flex min-w-0 items-center gap-2">
-        <span className={`min-w-0 truncate ${nameClassName ?? ''}`}>{name}</span>
+        <span className={`min-w-0 ${nameClassName ?? 'truncate'}`}>{name}</span>
         {body ? (
           <button
             type="button"

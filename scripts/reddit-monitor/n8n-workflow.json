@@ -1,0 +1,257 @@
+{
+  "name": "Spoor · Reddit RSS monitor (note-taking pain points)",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 30
+            }
+          ]
+        }
+      },
+      "id": "f19ad103-6ae9-4c5b-8b5a-fe4192659d0f",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        200,
+        300
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "1f1aa019-9441-4689-bc5e-b8796cd7be50",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        200,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://www.reddit.com/r/NoteTaking+PKMS+ObsidianMD+productivity/search.rss",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "q",
+              "value": "frustrated OR stuck OR issue OR broken OR \"looking for alternative\" OR migration OR \"sync issue\" OR slow OR lag OR crash OR \"switching from\" OR limitation OR clunky OR bloated OR \"data loss\" OR \"lock-in\""
+            },
+            {
+              "name": "restrict_sr",
+              "value": "on"
+            },
+            {
+              "name": "sort",
+              "value": "new"
+            },
+            {
+              "name": "t",
+              "value": "year"
+            },
+            {
+              "name": "limit",
+              "value": "100"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Spoor-NoteTaking-Pain-Monitor/1.0 (local research monitor)"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "en-US,en;q=0.9"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "e4bd48e6-ee0d-4a5b-bef9-c4c866a8b3f9",
+      "name": "Fetch NoteTaking Pain Feed",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        420,
+        380
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "3f9d65f6-6376-4cf0-892c-c41148fd82ae",
+      "name": "Parse RSS XML",
+      "type": "n8n-nodes-base.xml",
+      "typeVersion": 1,
+      "position": [
+        620,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "feed.entry",
+        "options": {}
+      },
+      "id": "a67f961b-ceec-4401-8b80-ef6b4e697090",
+      "name": "Split Posts",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        800,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const PAIN_WORDS = [\n  'frustrated', 'frustrating', 'stuck', 'hate', 'broken', 'annoying',\n  'pain', 'painful', 'tired of', 'struggling', 'disappointed', 'mess',\n  'clunky', 'bloated', 'slow', 'lag', 'laggy', 'freeze', 'crash',\n  'sync issue', 'sync problem', 'sync conflict', 'conflict', 'data loss',\n  'lost data', 'looking for', 'alternative', 'alternatives', 'replace',\n  'migration', 'migrate', 'switch', 'switching', 'limitation', 'missing',\n  'overpriced', 'pricing', 'subscription', 'lock-in', 'locked in'\n];\n\nconst NOTE_WORDS = [\n  'note', 'notes', 'note-taking', 'notetaking', 'pkm', 'knowledge management',\n  'obsidian', 'markdown', 'canvas', 'graph view', 'backlink', 'backlinks',\n  'offline', 'export', 'import', 'pdf', 'formatting', 'tagging', 'folder',\n  'hierarchy', 'database', 'search', 'notion', 'logseq', 'roam'\n];\n\nfunction scalar(value) {\n  const current = Array.isArray(value) ? value[0] : value;\n  if (current && typeof current === 'object') {\n    return current._ ?? current['#text'] ?? current.name ?? '';\n  }\n  return current ?? '';\n}\n\nfunction cleanText(value) {\n  return String(scalar(value) || '')\n    .replace(/<[^>]+>/g, ' ')\n    .replace(/&amp;/g, '&')\n    .replace(/&quot;/g, '\"')\n    .replace(/&#39;/g, \"'\")\n    .replace(/&gt;/g, '>')\n    .replace(/&lt;/g, '<')\n    .replace(/&#(\\d+);/g, (_, code) => String.fromCodePoint(Number(code)))\n    .replace(/\\s+/g, ' ')\n    .trim();\n}\n\nfunction linkOf(entry) {\n  const links = Array.isArray(entry.link) ? entry.link : [entry.link];\n  for (const link of links) {\n    const href = link?.$?.href ?? link?.href;\n    if (href && (!link?.$?.rel || link.$.rel === 'alternate')) return String(href);\n  }\n  return '';\n}\n\nfunction subredditOf(entry) {\n  const fromLink = linkOf(entry).match(/reddit\\.com\\/r\\/([^/]+)/i)?.[1];\n  if (fromLink) return decodeURIComponent(fromLink);\n  const categories = Array.isArray(entry.category) ? entry.category : [entry.category];\n  const terms = categories.map((category) => String(category?.$?.term ?? category?.term ?? ''));\n  return terms.find((term) => /^r\\//i.test(term))?.replace(/^r\\//i, '') || '';\n}\n\nconst matched = [];\nfor (const item of $input.all()) {\n  const entry = item.json || {};\n  const title = cleanText(entry.title);\n  const content = cleanText(entry.content ?? entry.summary);\n  const subreddit = subredditOf(entry);\n  const fullText = `${title}\\n${content}\\n${subreddit}`.toLowerCase();\n  const painKeywords = PAIN_WORDS.filter((word) => fullText.includes(word));\n  const hasNoteContext = NOTE_WORDS.some((word) => fullText.includes(word));\n\n  if (painKeywords.length === 0 || !hasNoteContext || title.length + content.length < 15) continue;\n\n  const rawId = cleanText(entry.id) || linkOf(entry) || Math.random().toString(36).slice(2);\n  matched.push({\n    json: {\n      id: rawId.startsWith('reddit_') ? rawId : `reddit_${rawId}`,\n      title,\n      link: linkOf(entry),\n      content,\n      author: cleanText(entry.author?.name ?? entry.author),\n      subreddit,\n      score: 0,\n      numComments: 0,\n      isoDate: cleanText(entry.published ?? entry.updated) || new Date().toISOString(),\n      painKeywords,\n      source: 'Reddit NoteTaking Monitor'\n    }\n  });\n}\n\nreturn matched;"
+      },
+      "id": "fc0e617b-c203-4c84-aa0e-20408b1bc255",
+      "name": "Filter · NoteTaking Pain",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        980,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const MAX_ITEMS = 1500;\nconst byId = new Map();\n\nfor (const item of $input.all()) {\n  const post = item.json || {};\n  const id = String(post.id || post.link || '').trim();\n  if (id) byId.set(id, post);\n}\n\nconst items = [...byId.values()]\n  .sort((a, b) => {\n    const ta = Date.parse(a.isoDate || 0);\n    const tb = Date.parse(b.isoDate || 0);\n    return (Number.isFinite(tb) ? tb : 0) - (Number.isFinite(ta) ? ta : 0);\n  })\n  .slice(0, MAX_ITEMS);\n\nconst payload = {\n  fetchedAt: new Date().toISOString(),\n  source: 'reddit-notetaking-monitor',\n  topic: 'Note-Taking Pain Points',\n  totalCount: items.length,\n  items\n};\n\nreturn [{\n  json: { payload },\n  binary: {\n    data: {\n      data: Buffer.from(JSON.stringify(payload, null, 2), 'utf8').toString('base64'),\n      mimeType: 'application/json',\n      fileName: 'forum-raw.json'\n    }\n  }\n}];"
+      },
+      "id": "9a4fe4a6-96c9-41bc-a406-5be3b824bbb1",
+      "name": "Build & Format Binary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1180,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "write",
+        "fileName": "/data/forum-raw.json",
+        "options": {}
+      },
+      "id": "b32d321e-412e-4c5a-9af2-3b1616561a0f",
+      "name": "Write forum-raw.json",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [
+        1400,
+        380
+      ],
+      "notesInFlow": true,
+      "notes": "Docker 需将 scripts/reddit-monitor/data 挂载到 /data，并设置 N8N_RESTRICT_FILE_ACCESS_TO=/data。"
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Fetch NoteTaking Pain Feed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Fetch NoteTaking Pain Feed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch NoteTaking Pain Feed": {
+      "main": [
+        [
+          {
+            "node": "Parse RSS XML",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse RSS XML": {
+      "main": [
+        [
+          {
+            "node": "Split Posts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Posts": {
+      "main": [
+        [
+          {
+            "node": "Filter · NoteTaking Pain",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter · NoteTaking Pain": {
+      "main": [
+        [
+          {
+            "node": "Build & Format Binary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build & Format Binary": {
+      "main": [
+        [
+          {
+            "node": "Write forum-raw.json",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "pinData": {}
+}

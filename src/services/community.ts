@@ -93,7 +93,7 @@ export async function listCommunityListings(opts: {
     const { data, error } = await supabase.from('community_listings').select('*').in('id', ids);
     if (error) throw new Error(error.message);
     const mapped = (data ?? []).map((row) => mapListing(row as Record<string, unknown>)).filter(Boolean) as CommunityListing[];
-    const order = new Map(ids.map((id, i) => [id, i]));
+    const order = new Map<string, number>(ids.map((id, i) => [id, i]));
     mapped.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
     const scoped =
       opts.kind === 'canvas' || opts.kind === 'persona'

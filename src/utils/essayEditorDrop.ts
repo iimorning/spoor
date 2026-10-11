@@ -22,7 +22,15 @@ export function resolveEssayEditorDrop(
   ) {
     return null;
   }
-  const hit = editor.view.posAtCoords({ left: clientX, top: clientY });
+  // posAtCoords 内部用 document.elementFromPoint 做命中测试；在没有该 API 的环境
+  // （jsdom）或视图已卸载时它会直接抛异常。解析不出落点只意味着"这一下没有落点"，
+  // 调用方本来就有默认插入位置的回退，不该让整次拖放中断。
+  let hit: { pos: number } | null = null;
+  try {
+    hit = editor.view.posAtCoords({ left: clientX, top: clientY });
+  } catch {
+    return null;
+  }
   if (!hit) return null;
   const coords = editor.view.coordsAtPos(hit.pos);
   return {

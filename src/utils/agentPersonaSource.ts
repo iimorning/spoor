@@ -117,6 +117,8 @@ export function mergeCommunityAgentFields(keeper: AgentConfig, other: AgentConfi
     communityPersonaKey: keeper.communityPersonaKey ?? other.communityPersonaKey,
     temperature: keeper.temperature ?? other.temperature,
     creativity: keeper.creativity ?? other.creativity,
+    // 音色是用户挑的偏好，合并重复人设时别把它丢了（两条都配了就听 keeper 的）。
+    voiceId: keeper.voiceId ?? other.voiceId,
     knowledgeMarkdownFiles: keeper.knowledgeMarkdownFiles?.length
       ? keeper.knowledgeMarkdownFiles
       : other.knowledgeMarkdownFiles,

@@ -45,6 +45,27 @@ export function nextBookReaderScrollTop(options: {
 export const BOOK_READER_SCROLL_END_SENTINEL = 1_000_000_000;
 
 /**
+ * 判定"这一格还能不能继续滚"的容差（px）。
+ *
+ * 不能直接拿 `nextTop - scrollTop` 和 0 比：`scrollHeight` 与 `clientHeight`
+ * 都是**取整值**，两者相减得到的 maxScroll 与浏览器真实可滚距离最多差 1px。
+ * 曾经就卡在这里：真机上 scrollHeight=2779 / clientHeight=767 算出 maxScroll=2012，
+ * 而浏览器实际只能滚到 2011.2 —— 页面肉眼已经到底，代码却认为还剩 0.8px，
+ * 每滚一格都只是把它钳回原地，于是章节永远不翻。
+ *
+ * 一档就是一屏（数百 px），所以留 2px 容差不会吞掉任何真实滚动。
+ */
+export const BOOK_READER_EDGE_EPSILON_PX = 2;
+
+/** 从当前 `scrollTop` 滚到 `nextScrollTop` 是否真的能移动内容。 */
+export function bookReaderHasRoomToScroll(options: {
+  scrollTop: number;
+  nextScrollTop: number;
+}): boolean {
+  return Math.abs(options.nextScrollTop - options.scrollTop) > BOOK_READER_EDGE_EPSILON_PX;
+}
+
+/**
  * When in-page scroll cannot move further in `direction`, decide whether wheel
  * should flip chapters. Prefer `canScrollFurther` from comparing nextTop vs scrollTop
  * (more reliable than pixel epsilon at subpixel edges).

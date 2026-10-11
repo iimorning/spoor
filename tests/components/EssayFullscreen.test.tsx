@@ -72,6 +72,11 @@ describe('EssayFullscreen', () => {
     if (typeof rangeProto.getBoundingClientRect !== 'function') {
       rangeProto.getBoundingClientRect = () => emptyRect as DOMRect;
     }
+
+    // fake-indexeddb 存回来的 blob 是结构化克隆的普通对象，jsdom 原生的
+    // createObjectURL 一收到就抛 "must be an instance of Blob"。真浏览器里 Dexie
+    // 克隆回来的就是货真价实的 Blob，所以这是环境的毛病，得在这个文件里统一直掉。
+    URL.createObjectURL = () => 'blob:essay-fullscreen-test';
   });
 
   beforeEach(async () => {
@@ -114,8 +119,8 @@ describe('EssayFullscreen', () => {
     });
     expect(screen.getByTestId('essay-fullscreen')).toBeInTheDocument();
     expect(screen.getByTestId('essay-word-count')).toHaveTextContent('16');
-    expect(screen.getByTestId('essay-chat-panel')).toBeInTheDocument();
-    expect(screen.getByTestId('essay-chat-input')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-panel')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-panel-input')).toBeInTheDocument();
 
     fireEvent.keyDown(window, { key: 'Escape' });
     expect(onClose).toHaveBeenCalled();
@@ -360,17 +365,33 @@ describe('EssayFullscreen', () => {
     expect(downloadBlob).toHaveBeenCalled();
   });
 
-  it('copies title and body from the top bar', async () => {
+  it('copies title and body from the export menu', async () => {
     const user = userEvent.setup();
     render(withAppDialogProvider(<EssayFullscreen articleId="a-alpha" onClose={() => {}} />));
     await waitFor(() => {
-      expect(screen.getByTestId('essay-copy-all')).toBeEnabled();
+      expect(screen.getByTestId('essay-export-menu')).toBeEnabled();
     });
-    await user.click(screen.getByTestId('essay-copy-all'));
+
+    // 「复制全文」收在导出菜单里，不是顶栏单独一颗按钮。
+    expect(screen.queryByTestId('essay-copy-all')).toBeNull();
+
+    await user.click(screen.getByTestId('essay-export-menu'));
+    const menuItem = await screen.findByTestId('essay-copy-all');
+    await user.click(menuItem);
+
     await waitFor(() => {
-      expect(copyTextToClipboard).toHaveBeenCalledWith('Alpha Unique Title\n\nSome body for alpha');
+      // 两份一起写：纯文本给记事本/聊天框，富文本给 Word/Google Docs。
+      expect(copyTextToClipboard).toHaveBeenCalledWith(
+        'Alpha Unique Title\n\nSome body for alpha',
+        { html: '<h1>Alpha Unique Title</h1>\n<p>Some body for alpha</p>' },
+      );
     });
-    expect(screen.getByTestId('essay-copy-all')).toHaveAttribute('aria-label', 'nodes.essay_copy_done');
+    // 菜单点完就关，没地方显示成功——确认态落在触发按钮上。
+    expect(screen.queryByTestId('essay-export-menu-panel')).toBeNull();
+    expect(screen.getByTestId('essay-export-menu')).toHaveAttribute(
+      'aria-label',
+      'nodes.essay_copy_done',
+    );
   });
 
   it('opens a lightbox when double-clicking a sidebar image thumbnail', async () => {
@@ -474,25 +495,217 @@ describe('EssayFullscreen', () => {
     });
   });
 
-  it('collapses and expands side rails from the header fold control', async () => {
+  it('collapses the linked-notes rail and the chat rail independently', async () => {
     const user = userEvent.setup();
     render(withAppDialogProvider(<EssayFullscreen articleId="a-alpha" onClose={() => {}} />));
     await waitFor(() => {
-      expect(screen.getByTestId('essay-chat-panel')).toBeInTheDocument();
+      expect(screen.getByTestId('chat-panel')).toBeInTheDocument();
     });
 
-    const toggle = screen.getByTestId('essay-fullscreen-toggle-rails');
-    const chatPanel = screen.getByTestId('essay-chat-panel');
-    expect(toggle).toHaveAttribute('aria-pressed', 'false');
+    const notesToggle = screen.getByTestId('essay-fullscreen-toggle-rails');
+    const chatToggle = screen.getByTestId('essay-fullscreen-toggle-chat');
+    const chatPanel = screen.getByTestId('chat-panel');
+    expect(notesToggle).toHaveAttribute('aria-expanded', 'true');
+    expect(chatToggle).toHaveAttribute('aria-expanded', 'true');
     expect(chatPanel.closest('[aria-hidden="true"]')).toBeNull();
 
-    await user.click(toggle);
-    expect(toggle).toHaveAttribute('aria-pressed', 'true');
+    // 收左栏不该顺手动到对话栏。
+    await user.click(notesToggle);
+    expect(notesToggle).toHaveAttribute('aria-expanded', 'false');
+    expect(chatToggle).toHaveAttribute('aria-expanded', 'true');
+    expect(chatPanel.closest('[aria-hidden="true"]')).toBeNull();
+
+    await user.click(notesToggle);
+    expect(notesToggle).toHaveAttribute('aria-expanded', 'true');
+
+    // 反过来也一样：收对话栏时便签还开着。
+    await user.click(chatToggle);
+    expect(chatToggle).toHaveAttribute('aria-expanded', 'false');
+    expect(notesToggle).toHaveAttribute('aria-expanded', 'true');
     expect(chatPanel.closest('[aria-hidden="true"]')).not.toBeNull();
 
-    await user.click(toggle);
-    expect(toggle).toHaveAttribute('aria-pressed', 'false');
+    await user.click(chatToggle);
+    expect(chatToggle).toHaveAttribute('aria-expanded', 'true');
     expect(chatPanel.closest('[aria-hidden="true"]')).toBeNull();
+  });
+
+  it('角色条不会把对话栏的输入框顶出可视区', async () => {
+    // ChatPanel 的根是 h-full（按父容器满高算）。它直接和角色条并排的话，满高加上
+    // 顶框那一行就溢出了，外层 overflow-hidden 会把底部的输入框裁掉。
+    //
+    // 修法是给两者之间加一个占剩余高度的壳——但那只在**栏本身是列容器**时成立。
+    // 书籍那一栏本来不是：它是外层行里的一个 flex item，靠行拉伸拿到高度，
+    // `flex-1` 在里面完全不生效，壳会缩成内容高度，面板就贴到顶上去了。
+    // jsdom 量不出高度，所以这里钉的是两条结构不变式。
+        render(withAppDialogProvider(<EssayFullscreen articleId="a-alpha" onClose={() => {}} />));
+    await screen.findByTestId('surface-persona-controls');
+    const rail = screen.getByTestId('surface-persona-strip').parentElement as HTMLElement;
+    expect(rail.className).toContain('flex-col');
+
+    const shell = screen.getByTestId('chat-panel').parentElement as HTMLElement;
+    expect(shell.className).toContain('flex-1');
+    expect(shell.className).toContain('min-h-0');
+    expect(shell.parentElement).toBe(rail);
+  });
+
+
+  it('「历史 / 新建」常驻在对话栏顶部那一行的右边，和房间里的人同层', async () => {
+    // 它们曾经在顶栏对话按钮的悬停弹层里。现在和对象并排放在同一行，
+    // 按钮本身仍由 ChatPanel 拥有，这里只借一个空位。
+    render(withAppDialogProvider(<EssayFullscreen articleId="a-alpha" onClose={() => {}} />));
+    // 等那一行本身：角色条要等角色库查完才渲染，等对话面板不算数。
+    const slot = await screen.findByTestId('surface-persona-controls');
+
+    // 对话栏自己的标题行仍然不留。
+    expect(screen.queryByText('reference.essay_chat_title')).toBeNull();
+    expect(slot.querySelector('[data-testid="chat-panel-history"]')).not.toBeNull();
+    expect(slot.querySelector('[data-testid="chat-panel-new"]')).not.toBeNull();
+    // 按钮只有一个去处：既在角色条的空位里，就不能同时留在对话栏自己身上。
+    expect(screen.getByTestId('chat-panel').contains(slot)).toBe(false);
+    // 顶栏那颗按钮回归成纯粹的开关，弹层整个没了。
+    expect(screen.queryByTestId('essay-fullscreen-chat-menu')).toBeNull();
+  });
+
+  it('收起的对话栏把角色条和历史/新建一起带出 tab 序', async () => {
+    const user = userEvent.setup();
+    render(withAppDialogProvider(<EssayFullscreen articleId="a-alpha" onClose={() => {}} />));
+    // 等角色条那一行本身：它要等角色库查完才渲染。
+    await screen.findByTestId('surface-persona-controls');
+
+    // 角色条是对话栏的直接子元素，所以它的父元素就是那一栏本身。
+    const chatRail = screen.getByTestId('surface-persona-strip')
+      .parentElement as HTMLElement;
+    await user.click(screen.getByTestId('essay-fullscreen-toggle-chat'));
+    expect(chatRail).toHaveAttribute('inert');
+  });
+
+  it('takes a collapsed rail out of the tab order', async () => {
+    const user = userEvent.setup();
+    render(withAppDialogProvider(<EssayFullscreen articleId="a-alpha" onClose={() => {}} />));
+    // 等角色条那一行本身：它要等角色库查完才渲染。
+    await screen.findByTestId('surface-persona-controls');
+
+    const chatToggle = screen.getByTestId('essay-fullscreen-toggle-chat');
+    // 角色条是对话栏的直接子元素，所以它的父元素就是那一栏本身。
+    const chatRail = screen.getByTestId('surface-persona-strip').parentElement as HTMLElement;
+    expect(chatRail).not.toHaveAttribute('inert');
+
+    // aria-hidden 只挡读屏，Tab 照样能走进一条看不见的栏。
+    await user.click(chatToggle);
+    expect(chatRail).toHaveAttribute('inert');
+
+    await user.click(chatToggle);
+    expect(chatRail).not.toHaveAttribute('inert');
+  });
+
+  it('names the notes rail in the top bar only, not twice', async () => {
+    render(withAppDialogProvider(<EssayFullscreen articleId="a-alpha" onClose={() => {}} />));
+    await waitFor(() => {
+      expect(screen.getByTestId('chat-panel')).toBeInTheDocument();
+    });
+
+    // 「长文」不再是抬头可见的标题；左栏的名字顶到了顶栏上。
+    expect(screen.queryByText('nodes.essay')).toBeNull();
+    // 只剩顶栏那一处——左栏自己那行标题已经删掉，便签区多出一屏。
+    expect(screen.getAllByText('reference.linked_drafts')).toHaveLength(1);
+  });
+
+  it('inviting a persona writes the room onto the article, not into panel state', async () => {
+    // 名单要跟着这篇文章走：换一篇就该换一个说话的人，关掉全屏再打开也还在。
+    const user = userEvent.setup();
+    await db.agents.clear();
+    await db.agents.add({ id: 'astr', name: '问镜', role: '记者', prompt: 'P' });
+    render(withAppDialogProvider(<EssayFullscreen articleId="a-alpha" onClose={() => {}} />));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('surface-persona-strip')).toBeInTheDocument();
+    });
+    await user.click(await screen.findByTestId('canvas-chat-room-add'));
+    await user.click(await screen.findByTestId('canvas-chat-room-library-astr'));
+
+    await waitFor(async () => {
+      const row = await db.articles.get('a-alpha');
+      expect(row?.chatPersonaIds).toEqual(['astr']);
+    });
+  });
+
+  it('pasting an image stores it as media and never drops the body into the loading state', async () => {
+    // 这条是端到端守那条 bug 的：Base64 一旦写进 article.content，
+    // articleHasLegacyMedia 就把正文判成待迁移，正文整棵子树被卸载重挂——用户看到
+    // 的就是「闪一下重新加载」，而且之后每敲一个字都重来一遍。
+    // fake-indexeddb 存回来的 blob 由文件级的 beforeAll 统一处理了。
+    render(withAppDialogProvider(<EssayFullscreen articleId="a-alpha" onClose={() => {}} />));
+    const prose = await screen.findByTestId('essay-body-editor-prose');
+    const before = await db.articles.get('a-alpha');
+
+    const png = new File([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])], 'shot.png', {
+      type: 'image/png',
+    });
+    const items = [{ kind: 'file', type: png.type, getAsFile: () => png }];
+    const clipboardData = {
+      items,
+      files: [png],
+      types: ['Files'],
+      getData: () => '',
+    };
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', { value: clipboardData });
+    prose.dispatchEvent(event);
+
+    await waitFor(async () => {
+      const row = await db.articles.get('a-alpha');
+      expect(row?.media?.length ?? 0).toBe((before?.media?.length ?? 0) + 1);
+    });
+
+    const row = await db.articles.get('a-alpha');
+    // 存进去的是真字节，不是一段 Base64 文本。（fake-indexeddb 存回来的是结构化克隆的
+    // 普通对象，不是真正的 Blob 实例，所以断形状而不是断 instanceof。）
+    const stored = row?.media?.[0];
+    expect(stored?.mimeType).toBe('image/png');
+    expect(stored?.blob).toBeTruthy();
+    expect(JSON.stringify(row?.content)).not.toMatch(/data:image\//);
+    // 正文从头到尾没进过「迁移中」那一支。
+    expect(screen.queryByTestId('essay-fullscreen-loading')).toBeNull();
+    expect(screen.getByTestId('essay-body-editor')).toBeInTheDocument();
+  });
+
+  it('dropping an image file from the desktop stores it as media like a paste does', async () => {
+    // 从桌面/微信拖进来的图必须走和粘贴同一条路：存字节，正文只留 spoor-article-media: 引用。
+    render(withAppDialogProvider(<EssayFullscreen articleId="a-alpha" onClose={() => {}} />));
+    await screen.findByTestId('essay-body-editor-prose');
+    const before = await db.articles.get('a-alpha');
+
+    const png = new File([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])], 'from-desktop.png', {
+      type: 'image/png',
+    });
+    fireEvent.drop(screen.getByTestId('essay-body-drop-target'), {
+      dataTransfer: { files: [png], items: [], types: ['Files'], getData: () => '' },
+    });
+
+    await waitFor(async () => {
+      const row = await db.articles.get('a-alpha');
+      expect(row?.media?.length ?? 0).toBe((before?.media?.length ?? 0) + 1);
+    });
+
+    const row = await db.articles.get('a-alpha');
+    const stored = row?.media?.at(-1);
+    expect(stored?.mimeType).toBe('image/png');
+    expect(stored?.blob).toBeTruthy();
+    expect(row?.content).toContain(`spoor-article-media:${stored?.id}`);
+    // 拖放最容易出的岔：Base64 直接进了正文，把整块正文打成待迁移并卸载重挂。
+    expect(JSON.stringify(row?.content)).not.toMatch(/data:image\//);
+    expect(screen.queryByTestId('essay-fullscreen-loading')).toBeNull();
+  });
+
+  it('accepts a file drag over the body so the browser never navigates away', async () => {
+    // 不接住这次 dragover，浏览器会把拖进来的文件当页面导航处理——那一屏正文直接没了。
+    // fireEvent 在事件被 preventDefault 时返回 false。
+    render(withAppDialogProvider(<EssayFullscreen articleId="a-alpha" onClose={() => {}} />));
+    await screen.findByTestId('essay-body-editor-prose');
+    const notCancelled = fireEvent.dragOver(screen.getByTestId('essay-body-drop-target'), {
+      dataTransfer: { files: [], items: [], types: ['Files'], getData: () => '' },
+    });
+    expect(notCancelled).toBe(false);
   });
 
   it('disables export while the article is missing', async () => {
@@ -500,8 +713,10 @@ describe('EssayFullscreen', () => {
     await waitFor(() => {
       expect(screen.getByText('nodes.essay_missing')).toBeInTheDocument();
     });
-    expect(screen.getByTestId('essay-export-menu')).toBeDisabled();
-    expect(screen.getByTestId('essay-copy-all')).toBeDisabled();
+    const menu = screen.getByTestId('essay-export-menu');
+    expect(menu).toBeDisabled();
+    // 菜单都开不了，里面的「复制全文」自然也够不着。
+    expect(screen.queryByTestId('essay-copy-all')).toBeNull();
   });
 });
 
