@@ -40,10 +40,24 @@ console.warn = (...args: unknown[]) => {
 };
 
 // Suppress window.matchMedia not available in jsdom
+//
+// 以前这是一块死板：`matches` 永远是 false，于是 `useAdaptiveLayout` 的 `compact`
+// 在**所有**用例里都是 false——窄屏那条分支从来没被测到过，而它恰好是抽屉、弹层、
+// 被折起来的侧栏这些最脆的东西。
+//
+// 默认仍然全 false（既有行为一个字没变），但留了 `setMatchMediaQueries` 让单个用例
+// 按需覆写某几条查询。测窄屏就在自己的 beforeEach 里写：
+//   setMatchMediaQueries(['max-width: 1279px'])
+let matchMediaOverrides: string[] = [];
+
+function matchMediaMatches(query: string): boolean {
+  return matchMediaOverrides.some((candidate) => query.includes(candidate));
+}
+
 Object.defineProperty(window, 'matchMedia', {
   writable: true,
   value: (query: string) => ({
-    matches: false,
+    matches: matchMediaMatches(query),
     media: query,
     onchange: null,
     addListener: () => {},
@@ -53,6 +67,11 @@ Object.defineProperty(window, 'matchMedia', {
     dispatchEvent: () => false,
   }),
 });
+
+/** 让接下来的用例里指定的媒体查询命中（比如窄屏）。`[]` 恢复成"全部不命中"。 */
+export function setMatchMediaQueries(queries: string[]): void {
+  matchMediaOverrides = queries;
+}
 
 // Mock window.confirm and window.alert to prevent test interruptions
 window.confirm = () => true;

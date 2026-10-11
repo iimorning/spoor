@@ -15,7 +15,27 @@ export type EssayExportBlock =
   | { type: 'image'; alt: string; src: string }
   | { type: 'hr' };
 
-const INLINE_RE = /(\*\*[^*]+?\*\*|\*[^*\n]+?\*|`[^`]+?`|\[[^\]]+\]\([^)]+\))/g;
+const INLINE_RE = /(\*\*[^*]+?\*\*|\*[^*\n]+?\*|`[^`]+?`|\[[^\]]+\]\([^)]*\))/g;
+
+/**
+ * 链接地址里带括号时，正则 `\([^)]*\)` 会在地址的第一个 `)` 处收尾，
+ * 把尾巴漏成正文（`[标签](https://x.test/a(b))` 会留下一个孤零零的 `)`）。
+ * 这里从那个位置起逐字符数括号，配平了才算链接结束。
+ *
+ * 用扫描而不是把正则改成贪婪 `\(.+\)`：贪婪会让**同一行里的多个链接**连成一片
+ * （"看[甲](a)和[乙](b)" 只剩"看"），那比原来的残留括号更糟。
+ */
+function extendLinkPastParens(text: string, end: number): number {
+  let depth = 1; // 已经吃掉了地址开头的那个 (
+  let i = end;
+  while (i < text.length && depth > 0) {
+    const ch = text[i];
+    if (ch === '(') depth += 1;
+    else if (ch === ')') depth -= 1;
+    i += 1;
+  }
+  return depth === 0 ? i : end;
+}
 
 export function parseEssayExportInlines(text: string): EssayExportInline[] {
   const out: EssayExportInline[] = [];
@@ -33,7 +53,15 @@ export function parseEssayExportInlines(text: string): EssayExportInline[] {
   INLINE_RE.lastIndex = 0;
   while ((match = INLINE_RE.exec(text))) {
     pushText(text.slice(last, match.index));
-    const tok = match[0];
+    let tok = match[0];
+    if (tok.startsWith('[')) {
+      // 地址里有括号时正则在第一个 ) 就收了尾，补齐剩下的部分。
+      const trueEnd = extendLinkPastParens(text, match.index + tok.length);
+      if (trueEnd > match.index + tok.length) {
+        tok = text.slice(match.index, trueEnd);
+        INLINE_RE.lastIndex = trueEnd;
+      }
+    }
     if (tok.startsWith('**')) {
       out.push({ type: 'strong', text: tok.slice(2, -2) });
     } else if (tok.startsWith('*')) {
@@ -41,7 +69,7 @@ export function parseEssayExportInlines(text: string): EssayExportInline[] {
     } else if (tok.startsWith('`')) {
       out.push({ type: 'code', text: tok.slice(1, -1) });
     } else {
-      const link = /^\[([^\]]+)\]\(([^)]+)\)$/.exec(tok);
+      const link = /^\[([^\]]+)\]\((.*)\)$/.exec(tok);
       if (link) out.push({ type: 'link', text: link[1], href: link[2] });
     }
     last = match.index + tok.length;

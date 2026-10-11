@@ -138,6 +138,84 @@ function isFree(candidate: CanvasRect, obstacles: CanvasRect[], gap: number): bo
   return !obstacles.some((o) => rectsOverlap(candidate, o, gap));
 }
 
+/** Fine-scan step + cap for the in-rect fallback search (see below). */
+const RECT_SCAN_STEP_PX = 20;
+const RECT_SCAN_MAX_CANDIDATES = 1500;
+
+/**
+ * Find a free spot for `size` that lies entirely inside `rect` — e.g. dropping a new
+ * persona into the host persona's room, so the canvas shows it as a participant
+ * instead of parking it outside the drawn room.
+ *
+ * Two passes, because a single fixed-step grid is phase-locked and misses free space:
+ * first the spots beside/below the host card (visually the natural place for a new
+ * participant), then a fine scan of the whole rect so any room with room to spare
+ * yields a position. Returns null when nothing inside fits, leaving the caller free to
+ * place the card outside the rect instead.
+ */
+export function findOpenPositionInsideRect(
+  rect: CanvasRect,
+  size: { width: number; height: number },
+  obstacles: CanvasObstacle[],
+  options?: { preferBeside?: CanvasObstacle | null; gap?: number; maxRings?: number },
+): { x: number; y: number } | null {
+  const gap = options?.gap ?? DEFAULT_GAP;
+  const maxRings = options?.maxRings ?? 12;
+  const obstacleRects = obstacles.map(estimateNodeRect);
+  const fits = (x: number, y: number) =>
+    x >= rect.x &&
+    y >= rect.y &&
+    x + size.width <= rect.x + rect.width &&
+    y + size.height <= rect.y + rect.height &&
+    isFree({ x, y, width: size.width, height: size.height }, obstacleRects, gap);
+
+  const stepX = Math.min(size.width, DEFAULT_NODE_SIZE.width) + gap;
+  const stepY = Math.min(size.height, DEFAULT_NODE_SIZE.height) + gap;
+  const spiral = (seed: { x: number; y: number }) => {
+    for (let ring = 0; ring <= maxRings; ring++) {
+      if (ring === 0) {
+        if (fits(seed.x, seed.y)) return { x: seed.x, y: seed.y };
+        continue;
+      }
+      for (let dx = -ring; dx <= ring; dx++) {
+        for (const dy of [-ring, ring] as const) {
+          if (fits(seed.x + dx * stepX, seed.y + dy * stepY)) {
+            return { x: seed.x + dx * stepX, y: seed.y + dy * stepY };
+          }
+        }
+      }
+      for (let dy = -ring + 1; dy <= ring - 1; dy++) {
+        for (const dx of [-ring, ring] as const) {
+          if (fits(seed.x + dx * stepX, seed.y + dy * stepY)) {
+            return { x: seed.x + dx * stepX, y: seed.y + dy * stepY };
+          }
+        }
+      }
+    }
+    return null;
+  };
+
+  if (options?.preferBeside) {
+    const anchor = estimateNodeRect(options.preferBeside);
+    for (const seed of [
+      positionBesideRect(anchor, size, gap),
+      positionBelowRect(anchor, size, gap),
+    ]) {
+      const hit = spiral(seed);
+      if (hit) return hit;
+    }
+  }
+
+  let scanned = 0;
+  for (let y = rect.y; y <= rect.y + rect.height; y += RECT_SCAN_STEP_PX) {
+    for (let x = rect.x; x <= rect.x + rect.width; x += RECT_SCAN_STEP_PX) {
+      if (++scanned > RECT_SCAN_MAX_CANDIDATES) return null;
+      if (fits(x, y)) return { x, y };
+    }
+  }
+  return null;
+}
+
 /** Prefer the open lane to the right of an anchor (same idea as book-expand hub). */
 export function positionBesideRect(
   anchor: CanvasRect,

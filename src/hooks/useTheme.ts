@@ -1,11 +1,12 @@
 import { useState, useEffect, useCallback } from 'react';
+import { readLocalStorage, writeLocalStorage } from '../utils/safeStorage';
 
 export type ThemeMode = 'light' | 'dark';
 
 const STORAGE_KEY = 'app_theme';
 
 function readStoredMode(): ThemeMode {
-  const stored = localStorage.getItem(STORAGE_KEY);
+  const stored = readLocalStorage(STORAGE_KEY);
   if (stored === 'dark' || stored === 'light') return stored;
   // Legacy "system": snap once to the current OS preference, then stay explicit.
   if (stored === 'system') {
@@ -22,8 +23,8 @@ function applyTheme(theme: ThemeMode) {
 /** Call once at startup (before React renders) to prevent flash of wrong theme. */
 export function initTheme() {
   const mode = readStoredMode();
-  if (localStorage.getItem(STORAGE_KEY) === 'system') {
-    localStorage.setItem(STORAGE_KEY, mode);
+  if (readLocalStorage(STORAGE_KEY) === 'system') {
+    writeLocalStorage(STORAGE_KEY, mode);
   }
   applyTheme(mode);
 }
@@ -32,7 +33,7 @@ export function useTheme() {
   const [mode, setMode] = useState<ThemeMode>(() => readStoredMode());
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, mode);
+    writeLocalStorage(STORAGE_KEY, mode);
     applyTheme(mode);
   }, [mode]);
 

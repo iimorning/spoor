@@ -33,9 +33,28 @@ export const MINIMAX_DEFAULT_TTS_MODEL = 'speech-2.6-turbo';
 /** Common Mandarin system voice. */
 export const MINIMAX_DEFAULT_VOICE_ID = 'Chinese (Mandarin)_Gentle_Senior';
 
-/** MiniMax English system voice used when the app language is English. */
-export const MINIMAX_ENGLISH_VOICE_ID = 'English_CalmWoman';
+/**
+ * MiniMax English system voice used when the app language is English.
+ *
+ * 原来是 English_CalmWoman —— 那个 id 只在国际版音色表里，我们调用的国内版
+ * （api.minimaxi.com）没有它。列表见 `src/constants/minimaxVoices.ts`。
+ */
+export const MINIMAX_ENGLISH_VOICE_ID = 'Serene_Woman';
 
 export const VOICE_NOTE_COLUMN_GAP_X = 360;
 /** Vertical gap between rows in the two-column voice layout (card height + spacing). */
 export const VOICE_NOTE_ROW_GAP_Y = 260;
+
+/**
+ * How canvas voice input finishes a turn.
+ * - `dictation` (default): write into the composer; user edits, then clicks send.
+ * - `handsfree`: 1.5s of silence auto-sends.
+ */
+export type VoiceInputMode = 'handsfree' | 'dictation';
+
+export const DEFAULT_VOICE_INPUT_MODE: VoiceInputMode = 'dictation';
+
+export function resolveVoiceInputMode(mode: string | undefined | null): VoiceInputMode {
+  if (mode === 'handsfree' || mode === 'dictation') return mode;
+  return DEFAULT_VOICE_INPUT_MODE;
+}

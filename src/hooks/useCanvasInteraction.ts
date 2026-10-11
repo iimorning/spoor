@@ -7,7 +7,7 @@ import {
 } from '../utils/nestedScrollChain';
 import { loadCanvasViewport, saveCanvasViewport } from '../utils/canvasViewport';
 import { readNodeDragOffset } from '../utils/nodeDragVisual';
-import { edgeLineGeomEqual, edgeVisibleSegmentAnchor, writeSvgLineGeom } from '../utils/edgeGeometry';
+import { edgeLineNeedsWrite, edgeVisibleSegmentAnchor, writeSvgLineGeom } from '../utils/edgeGeometry';
 import { placeLinkNoteGhost } from '../utils/linkNoteGhost';
 
 export interface CanvasTransform {
@@ -410,7 +410,11 @@ export function useCanvasInteraction(
     // Skip SVG setAttribute / label style writes when geometry is unchanged.
     // Rewriting x1/y1/x2/y2 every frame restarts the CSS dash animation on
     // agent-to-agent edges, which is what makes the flow look stuttery.
-    const edgeLineCache = new Map<string, { x1: number; y1: number; x2: number; y2: number }>();
+    // 缓存里连元素一起记：切画布会把 <line> 换成新元素，只比几何就会漏写（见 edgeLineNeedsWrite）。
+    const edgeLineCache = new Map<
+      string,
+      { geom: { x1: number; y1: number; x2: number; y2: number }; line: SVGLineElement | null }
+    >();
     const edgeLabelCache = new Map<string, { mx: number; my: number; noteX: number; noteY: number; labelDeg: number }>();
 
     const updateLines = () => {
@@ -451,26 +455,25 @@ export function useCanvasInteraction(
             y2: toBox.centerY,
           };
 
-          if (!edgeLineGeomEqual(edgeLineCache.get(edgeId), geom)) {
-            g.querySelectorAll('line').forEach((line: SVGLineElement) => {
-              writeSvgLineGeom(line, geom);
-            });
-            edgeLineCache.set(edgeId, geom);
+          const edgeLines = Array.from(g.querySelectorAll('line')) as SVGLineElement[];
+          if (edgeLineNeedsWrite(edgeLineCache.get(edgeId), edgeLines[0] ?? null, geom)) {
+            edgeLines.forEach((line) => writeSvgLineGeom(line, geom));
+            edgeLineCache.set(edgeId, { geom, line: edgeLines[0] ?? null });
           }
 
           if (!edgeLabelsContainer) return;
 
           const note = edgeLabelsContainer.querySelector(`[data-edge-note="${edgeId}"]`) as HTMLElement | null;
           const btn = edgeLabelsContainer.querySelector(`[data-edge-btn="${edgeId}"]`) as HTMLButtonElement | null;
-          const discussCluster = edgeLabelsContainer.querySelector(`[data-edge-discuss-cluster="${edgeId}"]`) as HTMLElement | null;
+          const badge = edgeLabelsContainer.querySelector(
+            `[data-room-link-badge="${edgeId}"]`,
+          ) as HTMLElement | null;
           const { x: mx, y: my, angleDeg } = edgeVisibleSegmentAnchor(fromBox, toBox);
           // Keep label readable (never upside-down).
           const labelDeg = angleDeg > 90 || angleDeg < -90 ? angleDeg + 180 : angleDeg;
           const rad = (angleDeg * Math.PI) / 180;
-          // Nudge the note farther from the stroke when the discuss cluster sits on the midpoint.
-          const offset = discussCluster ? 32 : 20;
-          const noteX = mx + Math.sin(rad) * offset;
-          const noteY = my - Math.cos(rad) * offset;
+          const noteX = mx + Math.sin(rad) * 20;
+          const noteY = my - Math.cos(rad) * 20;
           const label = { mx, my, noteX, noteY, labelDeg };
 
           const prevLabel = edgeLabelCache.get(edgeId);
@@ -485,7 +488,7 @@ export function useCanvasInteraction(
           const chromeNeedsInit =
             (note != null && note.style.left === '-100px') ||
             (btn != null && btn.style.left === '-100px') ||
-            (discussCluster != null && discussCluster.style.left === '-100px');
+            (badge != null && badge.style.left === '-100px');
           if (labelsMatch && !chromeNeedsInit) return;
 
           if (note) {
@@ -497,9 +500,11 @@ export function useCanvasInteraction(
             btn.style.left = `${mx}px`;
             btn.style.top = `${my}px`;
           }
-          if (discussCluster) {
-            discussCluster.style.left = `${mx}px`;
-            discussCluster.style.top = `${my}px`;
+          // 房间状态线的中点标识：正压在中点上（transform 在 JSX 里已给），
+          // 看上去像线上的一颗珠子。
+          if (badge) {
+            badge.style.left = `${mx}px`;
+            badge.style.top = `${my}px`;
           }
           edgeLabelCache.set(edgeId, label);
         });

@@ -167,46 +167,24 @@ vi.mock('react-i18next', () => ({
 }));
 
 // Mock lucide-react icons - 简单返回 SVG 占位
-vi.mock('lucide-react', () => {
-  const iconNames = [
-    'MessageSquare', 'Terminal', 'Network', 'Search', 'Bell', 'Settings', 'Plus',
-    'BookOpen', 'Users', 'Library', 'Microscope', 'Sparkles', 'Maximize2', 'Minimize2',
-    'Quote', 'Brain', 'Bot', 'Coffee', 'Wand2', 'Send', 'SlidersHorizontal',     'History', 'ZoomIn',
-    'Focus', 'Scan', 'Image', 'FilePlus', 'Trash2', 'Link2', 'X', 'Camera', 'ChevronLeft',
-    'ChevronRight', 'Check', 'Cpu', 'ArrowRight', 'ListChecks', 'CheckCircle2',
-    'Loader2', 'PenLine', 'Edit3', 'FileText', 'Globe', 'ExternalLink', 'RotateCcw',
-    'Monitor', 'Download', 'Mic', 'MicOff', 'Layers2',
-    'GripVertical', 'Pencil', 'Video', 'Layers', 'Type',
-    'Sun', 'Moon',
-    'Cloud', 'CloudOff', 'LogOut',
-    'Headphones', 'GitBranch', 'Square', 'SquareDashed', 'StickyNote', 'MapPin',
-    'MessagesSquare', 'Play', 'Pause', 'Waves', 'Droplets', 'Trees', 'Flower2',
-    'AudioLines', 'SkipBack', 'SkipForward', 'RotateCcw',
-    'Volume2', 'VolumeX',
-    'Archive', 'ArrowUpRight',
-    'Folder', 'FolderPlus', 'FolderOpen', 'Inbox',
-    'Grid3x3', 'Share2', 'Heart', 'Bookmark', 'MessageCircle', 'CreditCard',
-    'Mail', 'Github',
-    // AmbienceNode's SceneIcon — omitting these throws and takes the whole tree down.
-    'CloudLightning', 'Flame', 'Snowflake',
-    // From AgentsStudio "From document" button + Essay editor toolbar (commits ahead of origin/master).
-    'FileUp', 'FileDown', 'Copy',
-    'PanelLeftOpen', 'PanelLeftClose',
-    'Bold', 'Italic',
-    'Heading1', 'Heading2', 'Heading3',
-    'List', 'ListOrdered',
-    'Undo2', 'Redo2',
-    'Link',
-    'NotebookPen', 'LayoutGrid', 'ArrowLeft', 'CircleUser',
-  ];
-  const icons: Record<string, React.FC> = {};
-  for (const name of iconNames) {
-    icons[name] = (props: Record<string, unknown>) => {
-      const { createElement } = require('react');
-      return createElement('svg', { 'data-testid': `icon-${name}`, ...props });
-    };
-  }
-  return icons;
+vi.mock('lucide-react', async (importOriginal) =>
+  (await import('./mocks/lucideReactMock')).lucideReactMock(importOriginal),
+);
+
+// 设置面板里的提供商下拉/Base URL 这些本地配置项，只在 `configured` 为真时
+// 渲染（AISettingsModal: `{!serverManaged && configured ? …}`）。开源版的
+// AuthContext 桩把 configured 钉成 false，所以这里改成 true —— 这批用例验的是
+// 各 provider 的表单布局，跟登录无关；不换的话它们只会全部卡在"找不到那个开关"。
+//
+// 包一层真实 useAuth 而不是自己造一个对象：AuthContextValue 有十几个字段，
+// 手写一份迟早会和桩漂移。
+vi.mock('../src/contexts/AuthContext', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/contexts/AuthContext')>();
+  const realUseAuth = actual.useAuth;
+  return {
+    ...actual,
+    useAuth: () => ({ ...realUseAuth(), configured: true }),
+  };
 });
 
 // Mock react-markdown
@@ -397,8 +375,8 @@ describe('App 组件', () => {
       await waitFor(() => {
         expect(screen.getByRole('button', { name: '关闭' })).toBeInTheDocument();
       });
-      const apiToggle = screen.queryByTestId('settings-show-api-config');
-      if (apiToggle) await user.click(apiToggle);
+      // 默认显示账号面板，需点一下「自己配置 API Key」展开本地 AI 表单
+      await user.click(screen.getByTestId('settings-show-api-config'));
       await waitFor(() => {
         expect(document.querySelector('select')).toBeInTheDocument();
       });
@@ -420,10 +398,13 @@ describe('App 组件', () => {
       const newNoteBtn = screen.getAllByTitle('新建便签')[0];
       await user.click(newNoteBtn);
 
-      // 验证数据库中有新节点
-      const nodes = await db.nodes.toArray();
-      expect(nodes.length).toBeGreaterThanOrEqual(1);
-      expect(nodes.some(n => n.type === 'text')).toBe(true);
+      // 处理器先读一次工作区（stampWorkZoneScopeOnNewNodes）再写节点，所以写库
+      // 晚于 click 返回：紧跟 click 读库会读到"还没有这张卡"，得等它落地。
+      await waitFor(async () => {
+        const nodes = await db.nodes.toArray();
+        expect(nodes.length).toBeGreaterThanOrEqual(1);
+        expect(nodes.some(n => n.type === 'text')).toBe(true);
+      });
     });
   });
 
@@ -597,8 +578,8 @@ describe('App 组件', () => {
      */
     const openSettingsApi = async (user: ReturnType<typeof userEvent.setup>) => {
       await openSettings(user);
-      const apiToggle = screen.queryByTestId('settings-show-api-config');
-      if (apiToggle) await user.click(apiToggle);
+      const apiToggle = screen.getByTestId('settings-show-api-config');
+      await user.click(apiToggle);
       await waitFor(() => {
         expect(document.querySelector('select')).toBeInTheDocument();
       });
@@ -611,12 +592,14 @@ describe('App 组件', () => {
       expect(screen.getByRole('button', { name: '关闭' })).toBeInTheDocument();
     });
 
-    it('设置面板包含 API 密钥输入框', async () => {
+    it('设置面板里的 API 密钥是掩码输入', async () => {
+      // 开源版没有云端登录表单（CloudAccountPanel 不存在），所以这里验的是
+      // 用户自己的 AI 密钥字段：它必须掩码显示，不能明文摊在页面上。
       const user = userEvent.setup();
       await act(async () => { render(<App />); });
-      await openSettings(user);
-      const passwordInputs = document.querySelectorAll('input[type="password"]');
-      expect(passwordInputs.length).toBeGreaterThanOrEqual(1);
+      await openSettingsApi(user);
+      const keyInputs = Array.from(document.querySelectorAll('input[type="password"]'));
+      expect(keyInputs.length).toBeGreaterThanOrEqual(1);
     });
 
     it('网页版设置面板显示桌面版下载入口', async () => {
@@ -983,10 +966,12 @@ describe('App 组件', () => {
       await act(async () => { render(<App />); });
       const newNoteBtn = screen.getAllByTitle('新建便签')[0];
       await user.click(newNoteBtn);
-      const nodes = await db.nodes.toArray();
-      const textNodes = nodes.filter(n => n.type === 'text');
-      expect(textNodes.length).toBeGreaterThanOrEqual(1);
-      expect(textNodes[0].canvasId).toBeDefined();
+      // 写库是异步的（先读工作区再写节点），等它落地再断言。
+      await waitFor(async () => {
+        const textNodes = (await db.nodes.toArray()).filter(n => n.type === 'text');
+        expect(textNodes.length).toBeGreaterThanOrEqual(1);
+        expect(textNodes[0].canvasId).toBeDefined();
+      });
     });
 
     it('新建便签的节点有正确的 canvasId', async () => {
@@ -994,9 +979,10 @@ describe('App 组件', () => {
       await act(async () => { render(<App />); });
       const newNoteBtn = screen.getAllByTitle('新建便签')[0];
       await user.click(newNoteBtn);
-      const nodes = await db.nodes.toArray();
-      const textNode = nodes.find(n => n.type === 'text');
-      expect(textNode?.canvasId).toBe('default');
+      await waitFor(async () => {
+        const textNode = (await db.nodes.toArray()).find(n => n.type === 'text');
+        expect(textNode?.canvasId).toBe('default');
+      });
     });
 
     it('节点有 x 和 y 坐标', async () => {
@@ -1065,6 +1051,38 @@ describe('App 组件', () => {
 
       const edges = await db.edges.toArray();
       expect(edges.find(e => e.id === 'kbd-edge')).toBeUndefined();
+    });
+
+    it('剪切（Ctrl+X）带摘抄的书之前也要问一句', async () => {
+      // 剪切当初是另抄了一份删除逻辑，所以漏掉了"书里有摘抄就先问"这道闸——
+      // Ctrl+X 会一声不吭地把一本书连同几十条摘抄删掉。
+      await db.nodes.add({
+        id: 'cut-book',
+        canvasId: 'default',
+        type: 'book',
+        content: '',
+        x: 100,
+        y: 100,
+        bookExcerpts: [
+          { id: 'e1', text: '一条摘抄', unitIndex: 0, unitLabel: 'Ch1', bookTitle: 'B', createdAt: 1 },
+          { id: 'e2', text: '另一条摘抄', unitIndex: 0, unitLabel: 'Ch1', bookTitle: 'B', createdAt: 2 },
+        ],
+      });
+      // jsdom 没有 ClipboardEvent 构造器，自己造一个带剪贴板的事件。
+      const written: Record<string, string> = {};
+      const cut = new Event('cut', { bubbles: true, cancelable: true });
+      Object.defineProperty(cut, 'clipboardData', {
+        value: {
+          setData: (type: string, value: string) => { written[type] = value; },
+          getData: (type: string) => written[type] ?? '',
+        },
+      });
+      await act(async () => {
+        window.dispatchEvent(cut);
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      });
+      // 问句出现了（这条路径以前根本不问），所以节点还在。
+      expect((await db.nodes.get('cut-book'))).toBeDefined();
     });
 
     it('框选一张卡片后 Backspace 删除，Ctrl+Z 可恢复', async () => {

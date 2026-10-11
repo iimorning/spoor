@@ -10,6 +10,7 @@ import {
 import { DEEPSEEK_BASE_URL, DEEPSEEK_DEFAULT_MODEL } from '../../src/constants/deepseek';
 import { MINIMAX_BASE_URL, MINIMAX_DEFAULT_MODEL } from '../../src/constants/minimax';
 import { MIMO_TOKEN_PLAN_BASE_URL } from '../../src/constants/mimo';
+import { MINIMAX_ENGLISH_VOICE_ID } from '../../src/constants/voiceWriting';
 import type { AIConfig } from '../../src/components/AISettingsModal';
 
 const openExternalUrlMock = vi.hoisted(() => vi.fn());
@@ -80,14 +81,6 @@ vi.mock('lucide-react', () => {
 vi.mock('../../src/components/AISettingsDocsPanel', () => ({
   AISettingsDocsPanel: ({ provider }: { provider: string }) =>
     React.createElement('div', { 'data-testid': 'docs-panel', 'data-provider': provider }),
-}));
-
-vi.mock('../../src/components/CloudAccountPanel', () => ({
-  CloudAccountPanel: () => React.createElement('div', { 'data-testid': 'cloud-panel' }),
-}));
-
-vi.mock('../../src/components/BillingPanel', () => ({
-  BillingPanel: () => React.createElement('div', { 'data-testid': 'billing-panel' }),
 }));
 
 vi.mock('../../src/components/AddToHomeScreenPanel', () => ({
@@ -563,7 +556,7 @@ describe('AISettingsModal', () => {
       const { setConfig } = renderModal();
       const user = await openApiConfigPanel();
       const voiceInput = Array.from(document.querySelectorAll('input')).find(
-        (el) => (el as HTMLInputElement).placeholder === 'English_CalmWoman',
+        (el) => (el as HTMLInputElement).placeholder === MINIMAX_ENGLISH_VOICE_ID,
       )!;
       await user.type(voiceInput, 'm');
       const arg = setConfig.mock.calls.at(-1)![0];

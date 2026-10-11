@@ -13,16 +13,24 @@ import {
   type ComposerSegment,
 } from '../../utils/chatComposer';
 import { filesFromDataTransfer } from '../../utils/chatPanelFileUpload';
+import { readComposerEditableOffset, readComposerEditableText } from '../../utils/composerEditableText';
 import { placeCaretAtOffset } from '../../utils/placeCaretAtEnd';
 
+/**
+ * 拖放提示。两支互斥：`split`（落在文字中间，**一定**带字符偏移）和 before/after
+ * （落在卡片两侧，没有偏移）。
+ *
+ * 写成联合而不是「一个 place 联合 + 一个可选 offset」，是为了把这个不变量交给类型保证：
+ * 以前 offset 可空，收尾那里只能写 `hint.place === 'split' && hint.offset != null`，
+ * 而 `&&` 两侧不是同一个判断，TypeScript 没法把 `place` 收窄回 before|after，
+ * 只能报 `'"split"' 不能赋给 '"before" | "after"'`。
+ */
 type DropHint = {
   index: number;
-  place: 'before' | 'after' | 'split';
-  offset?: number;
   x: number;
   y: number;
   height: number;
-};
+} & ({ place: 'before' | 'after'; offset?: undefined } | { place: 'split'; offset: number });
 
 type Props = {
   segments: ComposerSegment[];
@@ -174,7 +182,7 @@ export function ComposerInlineInput({
       setDropHint(null);
       setGhost(null);
       if (!armed || !hint) return;
-      if (hint.place === 'split' && hint.offset != null) {
+      if (hint.place === 'split') {
         onSegmentsChange(insertCardAtTextOffset(listRef.current, fromIndex, hint.index, hint.offset));
         return;
       }
@@ -197,7 +205,7 @@ export function ComposerInlineInput({
     <div
       ref={hostRef}
       data-testid="composer-segments"
-      className="relative min-h-[2.75rem] w-full cursor-text text-[15px] leading-7 tracking-[0.02em] text-[#2c2c28]"
+      className="relative min-h-[2.75rem] max-h-40 w-full cursor-text overflow-y-auto whitespace-pre-wrap text-[15px] leading-7 tracking-[0.02em] text-[#2c2c28]"
       onClick={(e) => {
         if (e.target !== e.currentTarget) return;
         const last = e.currentTarget.querySelector('[data-testid="canvas-chat-input"]') as HTMLElement | null;
@@ -518,19 +526,19 @@ function InlineText({
     const current = (el.textContent ?? '').replace(/\u200b/g, '');
     if (current === content) return;
     const keepCaret = focusedRef.current || document.activeElement === el;
-    const caret = keepCaret ? readPlainTextOffset(el) : null;
+    const caret = keepCaret ? readComposerEditableOffset(el) : null;
     el.textContent = content;
     if (keepCaret) placeCaretAtOffset(el, Math.min(caret ?? content.length, content.length));
   }, [content]);
 
-  const read = () => (ref.current?.textContent ?? '').replace(/\u200b/g, '').replace(/\r?\n/g, '');
+  const read = () => (ref.current ? readComposerEditableText(ref.current) : '');
 
   const flattenDom = () => {
     const el = ref.current;
     if (!el) return;
     const text = read();
     if (el.childElementCount === 0 && (el.textContent ?? '').replace(/\u200b/g, '') === text) return;
-    const caret = readPlainTextOffset(el);
+    const caret = readComposerEditableOffset(el);
     el.textContent = text;
     if (focusedRef.current || document.activeElement === el) {
       placeCaretAtOffset(el, Math.min(caret, text.length));
@@ -538,16 +546,28 @@ function InlineText({
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLSpanElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.key === 'Enter') {
+      if (e.nativeEvent.isComposing || e.keyCode === 229) return;
       e.preventDefault();
+      if (e.shiftKey) {
+        const el = e.currentTarget;
+        const offset = readComposerEditableOffset(el);
+        const text = read();
+        const next = `${text.slice(0, offset)}\n${text.slice(offset)}`;
+        el.textContent = next;
+        placeCaretAtOffset(el, offset + 1);
+        onChange(next);
+        return;
+      }
       onSubmit();
+      return;
     }
     if (e.key !== 'Backspace' && e.key !== 'Delete') return;
     if (e.nativeEvent.isComposing) return;
     const sel = window.getSelection();
     if (!sel || sel.rangeCount === 0 || !sel.isCollapsed) return;
     if (sel.anchorNode !== e.currentTarget && !e.currentTarget.contains(sel.anchorNode)) return;
-    const offset = readPlainTextOffset(e.currentTarget);
+    const offset = readComposerEditableOffset(e.currentTarget);
     const len = read().length;
     if (e.key === 'Backspace' && offset === 0 && onDeleteAdjacentChip('before')) {
       e.preventDefault();
@@ -566,8 +586,8 @@ function InlineText({
       role={isLast ? 'textbox' : undefined}
       contentEditable={disabled ? false : 'plaintext-only'}
       suppressContentEditableWarning
-      aria-multiline={isLast || undefined}
-      className={`inline cursor-text align-baseline outline-none [&_br]:hidden ${
+      aria-multiline="true"
+      className={`inline cursor-text align-baseline whitespace-pre-wrap outline-none ${
         isLast && !content ? 'min-w-[1ch]' : ''
       }`}
       onFocus={() => {
@@ -586,21 +606,4 @@ function InlineText({
       onKeyDown={onKeyDown}
     />
   );
-}
-
-function readPlainTextOffset(el: HTMLElement): number {
-  const sel = window.getSelection();
-  if (!sel || sel.rangeCount === 0) return 0;
-  const range = sel.getRangeAt(0);
-  if (range.startContainer !== el && !el.contains(range.startContainer)) {
-    return (el.textContent ?? '').length;
-  }
-  const prefix = document.createRange();
-  prefix.selectNodeContents(el);
-  try {
-    prefix.setEnd(range.startContainer, range.startOffset);
-  } catch {
-    return (el.textContent ?? '').length;
-  }
-  return prefix.toString().length;
 }

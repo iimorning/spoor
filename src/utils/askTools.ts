@@ -158,6 +158,26 @@ export function searchToolSpecKey(spec: SearchToolSpec): string {
   return `${spec.query.toLowerCase()}|${[...spec.scopes].sort().join(',')}`;
 }
 
+/**
+ * 摘抄本：书籍对话里模型主动要用户存下的那些摘抄时才输出，和 search 一样放在
+ * JSON 之后。默认不给（不给才不占 token），要了才把整个文件夹递过去。
+ */
+const EXCERPT_NAMES =
+  /^(?:excerpts?|book_?excerpts?|my_?excerpts?|saved_?excerpts?)$/i;
+const EXCERPT_FENCE =
+  /```[ \t]*(?:excerpts?|book_?excerpts?|my_?excerpts?|saved_?excerpts?)\b[^\n`]*\r?\n?([\s\S]*?)(?:```|$)/gi;
+
+function isExcerptCall(body: string): boolean {
+  try {
+    const parsed = parseLenientLlmJson(body);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
+    const obj = parsed as Record<string, unknown>;
+    return EXCERPT_NAMES.test(String(obj.name ?? obj.action ?? obj.tool ?? '').trim());
+  } catch {
+    return false;
+  }
+}
+
 function dedupeSearches(searches: SearchToolSpec[]): SearchToolSpec[] {
   const out: SearchToolSpec[] = [];
   const seen = new Set<string>();
@@ -172,17 +192,26 @@ function dedupeSearches(searches: SearchToolSpec[]): SearchToolSpec[] {
 }
 
 /**
- * Pull search + draw tool requests out of a model reply.
+ * Pull search + draw + excerpt-folder tool requests out of a model reply.
  * Search is stripped first so a ```search / search tool_call never leaks into prose.
  */
 export function extractAskToolsFromReply(text: string): {
   prose: string;
   images: DrawToolSpec[];
   searches: SearchToolSpec[];
+  /** 模型要打开摘抄本（只有书籍对话有那个文件夹，长文这边拿到也没人用）。 */
+  wantsSavedExcerpts: boolean;
 } {
-  if (!text) return { prose: '', images: [], searches: [] };
+  if (!text) return { prose: '', images: [], searches: [], wantsSavedExcerpts: false };
   const searches: SearchToolSpec[] = [];
+  let wantsSavedExcerpts = false;
   let s = text;
+
+  // 摘抄本先剥：它常排在 search 前面，先摘干净，后面的正则才不会被半截围栏带偏。
+  s = s.replace(EXCERPT_FENCE, () => {
+    wantsSavedExcerpts = true;
+    return '\n';
+  });
 
   s = s.replace(/```search\s*\r?\n?([\s\S]*?)```/gi, (_, body: string) => {
     const spec = specFromSearchFenceBody(body);
@@ -209,9 +238,12 @@ export function extractAskToolsFromReply(text: string): {
 
   const trimmedEnd = s.match(/\n[ \t]*(\{[\s\S]*\})[ \t]*$/);
   if (trimmedEnd?.[1]) {
-    const spec = specFromJsonish(trimmedEnd[1]);
-    if (spec) {
-      searches.push(spec);
+    // 尾部残留 JSON 先问一句"是不是要摘抄本"，是的话整块吃掉，别留给 search 那条路。
+    const excerptTail = isExcerptCall(trimmedEnd[1]);
+    const spec = excerptTail ? null : specFromJsonish(trimmedEnd[1]);
+    if (excerptTail || spec) {
+      if (spec) searches.push(spec);
+      if (excerptTail) wantsSavedExcerpts = true;
       s = s.slice(0, trimmedEnd.index);
     }
   }
@@ -221,17 +253,25 @@ export function extractAskToolsFromReply(text: string): {
     prose: stripThinking(drawn.prose),
     images: drawn.images,
     searches: dedupeSearches(searches),
+    wantsSavedExcerpts,
   };
 }
 
-/** Hide an unclosed ```search / ```draw / draw-shaped ```json while streaming. */
+/** Hide an unclosed ```search / ```excerpts / ```draw / draw-shaped ```json while streaming. */
 export function stripOpenAskToolFence(text: string): string {
   if (!text) return text;
-  const searchIdx = text.lastIndexOf('```search');
+  return stripOpenFenceFrom(text, ['```search', '```excerpts']);
+}
+
+/** 把从最后一个"还没闭合的工具围栏"起的内容整段砍掉。 */
+function stripOpenFenceFrom(text: string, markers: string[]): string {
   const afterDraw = stripOpenDrawFence(text);
-  if (searchIdx === -1) return afterDraw;
-  const afterMarker = text.slice(searchIdx + 3);
+  const open = markers
+    .map((marker) => ({ marker, idx: text.lastIndexOf(marker) }))
+    .filter((hit) => hit.idx >= 0)
+    .sort((a, b) => b.idx - a.idx)[0];
+  if (!open) return afterDraw;
+  const afterMarker = text.slice(open.idx + 3);
   if (afterMarker.includes('```')) return afterDraw;
-  const hiddenSearch = text.slice(0, searchIdx).trimEnd();
-  return stripOpenDrawFence(hiddenSearch);
+  return stripOpenDrawFence(text.slice(0, open.idx).trimEnd());
 }

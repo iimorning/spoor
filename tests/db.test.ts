@@ -390,6 +390,7 @@ describe('MyDatabase', () => {
           'canvases',
           'edges',
           'nodes',
+          'voicePreviewClips',
           'workspacePartitions',
           'workspaceState',
         ],

@@ -26,10 +26,42 @@
 
 .spoor-landing .lp-footer__links,
 .spoor-pricing .lp-footer__links {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.7rem;
+  font-size: 0.72rem;
+}
+
+/* Two tiers on two rows: the sibling creative tools, then the legal line.
+   The contact address makes the legal row much wider than the rest, so one
+   row was cramped. A rule between them keeps a privacy link from reading as
+   a feature. */
+.spoor-landing .lp-footer__group,
+.spoor-pricing .lp-footer__group {
   display: inline-flex;
   align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 0.85rem;
-  font-size: 0.72rem;
+}
+
+.spoor-landing .lp-footer__group + .lp-footer__group,
+.spoor-pricing .lp-footer__group + .lp-footer__group {
+  position: relative;
+  padding-top: 0.7rem;
+}
+
+.spoor-landing .lp-footer__group + .lp-footer__group::before,
+.spoor-pricing .lp-footer__group + .lp-footer__group::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 1px;
+  background: var(--lp-outline-variant);
+  opacity: 0.6;
 }
 
 .spoor-landing .lp-footer__link,
@@ -68,6 +100,18 @@
   .spoor-pricing .lp-footer {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  /* Same two rows, but ragged-right reads better than a right-aligned stack
+     once the whole footer is left-aligned. */
+  .spoor-landing .lp-footer__links,
+  .spoor-pricing .lp-footer__links {
+    align-items: flex-start;
+  }
+
+  .spoor-landing .lp-footer__group,
+  .spoor-pricing .lp-footer__group {
+    justify-content: flex-start;
   }
 }
 

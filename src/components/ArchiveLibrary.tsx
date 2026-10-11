@@ -20,6 +20,7 @@ import { db } from '../db';
 import { useAppDialog } from './AppDialogProvider';
 import type { AIConfig } from './AISettingsModal';
 import { CanvasGraphView } from './CanvasGraphView';
+import { ArchiveMoveToButton, ArchiveMoveMenuProvider } from './ArchiveMoveToButton';
 import { getCanvasCenterPosition } from '../utils/canvas';
 import type { CanvasTransformLike } from '../utils/canvas';
 import {
@@ -51,6 +52,7 @@ import { markdownBodyComponents, markdownGfmPlugins, markdownRehypePlugins } fro
 import {
   POCKET_CANVAS_ID,
   deletePocketNote,
+  isPocketImageNode,
   placePocketNoteOnCanvas,
   pocketNotePreview,
   sortPocketNotes,
@@ -92,7 +94,9 @@ export function ArchiveLibrary({
     () => db.archivedCards.orderBy('archivedAt').reverse().toArray(),
     [],
   ) ?? [];
-  const canvasEdges = useLiveQuery(() => db.edges.toArray(), []) ?? [];
+  // 只喂给关系图谱，而图谱默认关着——按需订阅，别让翻存档的人替它付这笔钱。
+  const canvasEdges =
+    useLiveQuery(() => (showGraph ? db.edges.toArray() : Promise.resolve([])), [showGraph]) ?? [];
   const pocketNodes =
     useLiveQuery(async () => {
       const all = await db.nodes.where('canvasId').equals(POCKET_CANVAS_ID).toArray();
@@ -118,7 +122,7 @@ export function ArchiveLibrary({
   const pocketItems = useMemo(
     () =>
       pocketNodes
-        .filter((node) => pocketNotePreview(node.content))
+        .filter((node) => isPocketImageNode(node) || pocketNotePreview(node.content))
         .map(buildPocketArchiveListItem),
     [pocketNodes],
   );
@@ -360,7 +364,7 @@ export function ArchiveLibrary({
           </button>
 
           {folders.map((folder) => (
-            <div key={folder.id} className="group/folder">
+            <div key={folder.id} className="group/folder relative">
               {renamingId === folder.id ? (
                 <form
                   className="px-4 py-3 border-l-4 border-transparent"
@@ -390,11 +394,12 @@ export function ArchiveLibrary({
                     <span className={`flex-1 min-w-0 ${folderNavLabel(folderFilter === folder.id)}`}>
                       {folder.name}
                     </span>
-                    <span className="text-[10px] font-mono text-[#8c8a84] shrink-0">
+                    <span className="text-[10px] font-mono text-[#8c8a84] shrink-0 transition-opacity group-hover/folder:opacity-0">
                       {folderCounts.byId.get(folder.id) ?? 0}
                     </span>
                   </button>
-                  <div className="flex shrink-0 items-center pr-2 opacity-0 group-hover/folder:opacity-100 transition-opacity">
+                  {/* 覆盖在计数之上：计数与默认行对齐，悬停时才让位 */}
+                  <div className="absolute right-3 flex items-center gap-0.5 opacity-0 group-hover/folder:opacity-100 transition-opacity">
                     <button
                       type="button"
                       className="p-1.5 rounded-md text-[#8c8a84] hover:text-[#C2410C] hover:bg-[#EAE7E2]"
@@ -504,6 +509,7 @@ export function ArchiveLibrary({
               <p className="text-sm text-[#8c8a84] font-sans max-w-sm">{emptyMessage}</p>
             </div>
           ) : (
+            <ArchiveMoveMenuProvider>
             <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-5 md:gap-6">
               {items.map((item) => (
                 <article
@@ -549,8 +555,21 @@ export function ArchiveLibrary({
                     ) : null}
                   </div>
 
-                  <div className="pt-3 border-t border-[#E6E4DF] flex flex-col gap-2 shrink-0">
-                    <div className="flex items-center justify-between">
+                  <div className="pt-3 border-t border-[#E6E4DF] flex items-center justify-between gap-2 shrink-0">
+                    <div className="flex items-center gap-1 min-w-0">
+                      {item.origin === 'pocket' ? null : (
+                        <ArchiveMoveToButton
+                          cardId={item.id}
+                          folderId={item.folderId ?? null}
+                          folderName={
+                            item.folderId
+                              ? (folders.find((f) => f.id === item.folderId)?.name ?? null)
+                              : null
+                          }
+                          disabled={busyId === item.id}
+                          onMove={(next) => void moveArchivedCard(item.id, next)}
+                        />
+                      )}
                       <button
                         type="button"
                         disabled={busyId === item.id}
@@ -562,44 +581,23 @@ export function ArchiveLibrary({
                       >
                         <Trash2 className="w-4 h-4" aria-hidden />
                       </button>
-                      <button
-                        type="button"
-                        disabled={busyId === item.id}
-                        onClick={() => void handleRestore(item)}
-                        data-testid={`archive-restore-${item.id}`}
-                        title={item.origin === 'pocket' ? t('pocket.place') : t('archive.restore')}
-                        aria-label={item.origin === 'pocket' ? t('pocket.place') : t('archive.restore')}
-                        className="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-[#C2410C] text-white hover:bg-[#a0350a] disabled:opacity-40 transition-colors"
-                      >
-                        <ArrowUpRight className="w-4 h-4" aria-hidden />
-                      </button>
                     </div>
-                    {item.origin === 'pocket' ? null : (
-                    <label className="flex items-center gap-2 text-[10px] font-sans font-bold uppercase tracking-wider text-[#8c8a84]">
-                      <span className="shrink-0">{t('archive.move_to')}</span>
-                      <select
-                        data-testid={`archive-move-${item.id}`}
-                        value={item.folderId ?? ''}
-                        disabled={busyId === item.id}
-                        onChange={(e) => {
-                          const next = e.target.value;
-                          void moveArchivedCard(item.id, next || null);
-                        }}
-                        className="flex-1 min-w-0 bg-transparent border-0 text-[#3a3a34] normal-case font-medium tracking-normal text-[11px] focus:outline-none cursor-pointer"
-                      >
-                        <option value="">{t('archive.unfiled')}</option>
-                        {folders.map((folder) => (
-                          <option key={folder.id} value={folder.id}>
-                            {folder.name}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    )}
+                    <button
+                      type="button"
+                      disabled={busyId === item.id}
+                      onClick={() => void handleRestore(item)}
+                      data-testid={`archive-restore-${item.id}`}
+                      title={item.origin === 'pocket' ? t('pocket.place') : t('archive.restore')}
+                      aria-label={item.origin === 'pocket' ? t('pocket.place') : t('archive.restore')}
+                      className="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-[#C2410C] text-white hover:bg-[#a0350a] disabled:opacity-40 transition-colors shrink-0"
+                    >
+                      <ArrowUpRight className="w-4 h-4" aria-hidden />
+                    </button>
                   </div>
                 </article>
               ))}
             </div>
+            </ArchiveMoveMenuProvider>
           )}
         </div>
       </div>

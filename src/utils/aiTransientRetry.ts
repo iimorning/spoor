@@ -59,7 +59,17 @@ function sleep(ms: number): Promise<void> {
 
 export async function withAiTransientRetry<T>(
   run: () => Promise<T>,
-  options?: { delaysMs?: number[]; label?: string },
+  options?: {
+    delaysMs?: number[];
+    label?: string;
+    /**
+     * 每次重试都报一声给调用方。
+     *
+     * "慢"有好几种：一次往返 28 秒，和三次各 9 秒、重试在救场——从外面看
+     * 长得一模一样。调用方要能拿到次数和每次的原因，才不用去翻 Network 面板。
+     */
+    onRetry?: (attempt: number, error: unknown, delayMs: number) => void;
+  },
 ): Promise<T> {
   const delays = options?.delaysMs ?? defaultAiRetryDelaysMs();
   const maxAttempts = delays.length + 1;
@@ -76,6 +86,7 @@ export async function withAiTransientRetry<T>(
       console.info(
         `[Scribe AI] retry ${attempt + 1}/${maxAttempts}${options?.label ? ` (${options.label})` : ''} after: ${detail}`,
       );
+      options?.onRetry?.(attempt, e, wait);
       await sleep(wait);
     }
   }

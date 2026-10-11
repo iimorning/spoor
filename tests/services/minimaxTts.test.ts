@@ -3,6 +3,7 @@ import { synthesizeMinimaxSpeech } from '../../src/services/minimaxTts';
 import {
   MINIMAX_DEFAULT_TTS_MODEL,
   MINIMAX_DEFAULT_VOICE_ID,
+  MINIMAX_ENGLISH_VOICE_ID,
 } from '../../src/constants/voiceWriting';
 
 const fetchMock = vi.fn();
@@ -154,10 +155,10 @@ describe('synthesizeMinimaxSpeech — request shape', () => {
     expect(body.voice_setting.voice_id).toBe('my-voice');
   });
 
-  it('switches to English_CalmWoman and English boost when language is en', async () => {
+  it('switches to the English default voice and English boost when language is en', async () => {
     await synthesizeMinimaxSpeech({ apiKey: 'k', text: 'hello', language: 'en' });
     const body = JSON.parse(fetchMock.mock.calls[0][1].body);
-    expect(body.voice_setting.voice_id).toBe('English_CalmWoman');
+    expect(body.voice_setting.voice_id).toBe(MINIMAX_ENGLISH_VOICE_ID);
     expect(body.language_boost).toBe('English');
   });
 

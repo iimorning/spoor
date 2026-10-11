@@ -34,6 +34,20 @@ export function articleHasEmbeddedDataImages(article: Article): boolean {
   return found;
 }
 
+/** Every Base64 image URL inside a chunk of text, de-duplicated, in first-seen order. */
+export function dataImageUrlsInText(text: string): string[] {
+  const urls: string[] = [];
+  const seen = new Set<string>();
+  DATA_IMAGE_RE.lastIndex = 0;
+  for (const match of text.matchAll(DATA_IMAGE_RE)) {
+    if (seen.has(match[0])) continue;
+    seen.add(match[0]);
+    urls.push(match[0]);
+  }
+  DATA_IMAGE_RE.lastIndex = 0;
+  return urls;
+}
+
 export function articleHasLegacyMedia(article: Article): boolean {
   if (articleHasEmbeddedDataImages(article)) return true;
   if (article.content.includes('media://image/')) return true;
@@ -114,15 +128,12 @@ export async function extractEmbeddedArticleMedia(article: Article): Promise<Art
   const urls: string[] = [];
   const seen = new Set<string>();
   const collect = (text: string) => {
-    DATA_IMAGE_RE.lastIndex = 0;
-    for (const match of text.matchAll(DATA_IMAGE_RE)) {
-      const url = match[0];
+    for (const url of dataImageUrlsInText(text)) {
       if (!seen.has(url)) {
         seen.add(url);
         urls.push(url);
       }
     }
-    DATA_IMAGE_RE.lastIndex = 0;
   };
   collect(normalizedArticle.content);
   for (const card of normalizedArticle.sourceCards ?? []) collect(card.segmentText);

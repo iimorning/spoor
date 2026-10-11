@@ -1,5 +1,6 @@
 import React from 'react';
 import type { AgentConfig, CanvasNode } from '../../db';
+import type { ProactiveStatus } from '../../hooks/useRoomProactiveChat';
 import { ThemeNode } from './ThemeNode';
 import { NoteNode } from './NoteNode';
 import { AiNode } from './AiNode';
@@ -19,6 +20,8 @@ interface NodeRendererProps {
   setEditingNodeId: (id: string | null) => void;
   agentConfigs: AgentConfig[];
   analyzingAgentNodeId: string | null;
+  /** 角色卡上的主动发言进度（按角色卡节点 id）。 */
+  proactiveStatusById?: Record<string, ProactiveStatus>;
   streamingAiNodeId?: string | null;
   streamingThought?: string;
   streamingAskNodeId?: string | null;
@@ -26,7 +29,12 @@ interface NodeRendererProps {
   webSearchSourcesCollapsed?: boolean;
   onToggleWebSearchSources?: (nodeId: string) => void;
   ttsHighlightSentence?: string | null;
-  onExtractBookSelectionToCard?: (quote: string, sourceLabel?: string, sourceNodeId?: string) => void;
+  onExtractBookSelectionToCard?: (
+    quote: string,
+    sourceLabel?: string,
+    sourceNodeId?: string,
+    note?: string,
+  ) => void;
   onAskAboutBookSelection?: (quote: string, sourceLabel?: string, sourceNodeId?: string) => void;
   onExpandBookSelection?: (quote: string, sourceLabel?: string) => void;
   expandingBookNodeId?: string | null;
@@ -99,6 +107,7 @@ export function NodeRenderer({
   canContinueDiscussion,
   isContinueDiscussionDisabled,
   generatingCoverAgentId,
+  proactiveStatusById,
 }: NodeRendererProps) {
   switch (node.type) {
     case 'theme':
@@ -143,6 +152,7 @@ export function NodeRenderer({
           askThreadReplyCount={askThreadReplyCount ?? 0}
           askThreadCollapsed={!!node.askThreadCollapsed}
           onToggleAskThread={onToggleAskThread ? () => onToggleAskThread(node.id) : undefined}
+          proactiveStatus={proactiveStatusById?.[node.id]}
         />
       );
     case 'ai':
@@ -200,9 +210,9 @@ export function NodeRenderer({
           node={node}
           editingNodeId={editingNodeId}
           setEditingNodeId={setEditingNodeId}
-          onExtractSelectionToCard={onExtractBookSelectionToCard}
           onAskAboutSelection={onAskAboutBookSelection}
           onExpandSelection={onExpandBookSelection}
+          onExtractSelectionToCard={onExtractBookSelectionToCard}
           isExpanding={expandingBookNodeId === node.id}
           onOpenFullscreen={onOpenBookFullscreen}
         />
@@ -236,6 +246,7 @@ export function NodeRenderer({
           isGeneratingCover={
             Boolean(node.agentConfigId) && generatingCoverAgentId === node.agentConfigId
           }
+          proactiveStatus={proactiveStatusById?.[node.id]}
         />
       );
     default:

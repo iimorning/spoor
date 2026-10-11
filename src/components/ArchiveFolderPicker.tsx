@@ -10,15 +10,29 @@ import {
 
 export interface ArchiveFolderPickerProps {
   onPick: (folderId: string | null) => void;
+  /** Highlights this folder instead of the last-used one. */
+  activeFolderId?: string | null;
+  /** Menu heading; defaults to the "store here" wording. */
+  title?: string;
+  /** Hide the inline "new folder" row when the menu is only for moving. */
+  showNewFolder?: boolean;
+  /** Position override, for menus that open above their trigger. */
+  className?: string;
 }
 
-export function ArchiveFolderPicker({ onPick }: ArchiveFolderPickerProps) {
+export function ArchiveFolderPicker({
+  onPick,
+  activeFolderId,
+  title,
+  showNewFolder = true,
+  className = 'absolute top-full left-1/2 -translate-x-1/2 mt-1.5',
+}: ArchiveFolderPickerProps) {
   const { t } = useTranslation();
   const [creating, setCreating] = useState(false);
   const [draft, setDraft] = useState('');
   const folders =
     useLiveQuery(() => db.archiveFolders.orderBy('sortOrder').toArray(), []) ?? [];
-  const lastId = readLastArchiveFolderId();
+  const activeId = activeFolderId !== undefined ? activeFolderId : readLastArchiveFolderId();
 
   const pick = (folderId: string | null) => {
     onPick(folderId);
@@ -41,17 +55,17 @@ export function ArchiveFolderPicker({ onPick }: ArchiveFolderPickerProps) {
   return (
     <div
       data-testid="archive-folder-picker"
-      className="absolute top-full left-1/2 -translate-x-1/2 mt-1.5 w-52 bg-white border border-[#E6E4DF] rounded-xl shadow-2xl p-1 z-50"
+      className={`${className} w-52 bg-white border border-[#E6E4DF] rounded-xl shadow-2xl p-1 z-50`}
       onPointerDown={(e) => e.stopPropagation()}
     >
       <div className="px-2.5 py-1.5 text-[10px] font-bold text-[#8c8a84] uppercase tracking-wider font-mono border-b border-[#F4F1ED] mb-1">
-        {t('archive.pick_folder')}
+        {title ?? t('archive.pick_folder')}
       </div>
       <div className="max-h-56 overflow-y-auto">
         <button
           type="button"
           data-testid="archive-folder-pick-unfiled"
-          className={rowClass(lastId === null)}
+          className={rowClass(activeId === null)}
           onPointerDown={(e) => {
             e.stopPropagation();
             e.preventDefault();
@@ -66,7 +80,7 @@ export function ArchiveFolderPicker({ onPick }: ArchiveFolderPickerProps) {
             key={folder.id}
             type="button"
             data-testid={`archive-folder-pick-${folder.id}`}
-            className={rowClass(lastId === folder.id)}
+            className={rowClass(activeId === folder.id)}
             onPointerDown={(e) => {
               e.stopPropagation();
               e.preventDefault();
@@ -78,6 +92,7 @@ export function ArchiveFolderPicker({ onPick }: ArchiveFolderPickerProps) {
           </button>
         ))}
       </div>
+      {showNewFolder ? (
       <div className="border-t border-[#F4F1ED] mt-1 pt-1">
         {creating ? (
           <form
@@ -119,6 +134,7 @@ export function ArchiveFolderPicker({ onPick }: ArchiveFolderPickerProps) {
           </button>
         )}
       </div>
+      ) : null}
     </div>
   );
 }

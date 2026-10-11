@@ -1,11 +1,12 @@
 import { useState, useEffect, useCallback } from 'react';
+import { readLocalStorage, writeLocalStorage } from '../utils/safeStorage';
 
 export type CanvasGridMode = 'on' | 'off';
 
 const STORAGE_KEY = 'canvas_grid';
 
 function readStoredMode(): CanvasGridMode {
-  return localStorage.getItem(STORAGE_KEY) === 'off' ? 'off' : 'on';
+  return readLocalStorage(STORAGE_KEY) === 'off' ? 'off' : 'on';
 }
 
 function applyCanvasGrid(mode: CanvasGridMode) {
@@ -22,7 +23,7 @@ export function useCanvasGrid() {
 
   useEffect(() => {
     const mode: CanvasGridMode = enabled ? 'on' : 'off';
-    localStorage.setItem(STORAGE_KEY, mode);
+    writeLocalStorage(STORAGE_KEY, mode);
     applyCanvasGrid(mode);
   }, [enabled]);
 

@@ -3,6 +3,7 @@ import { findOpenCanvasPosition } from './canvas';
 import {
   articleIdsFromEssayNodes,
   dedupeEssayNodesByArticle,
+  essayArticleHasCardTwin,
   placeEssayNode,
 } from './essayNodes';
 import { tryParseEssayContent } from './essayPayload';
@@ -70,6 +71,15 @@ async function runMigrateArticlesToEssayNodes(opts?: {
     }
 
     const canvasId = article.linkedCanvasIds?.[0] || fallbackCanvasId;
+
+    // 同一张画布上已经有一张卡指向"同一篇"了，就别再给这份副本补卡。
+    // 这正是同步分歧留下的局面：库里两行同内容的 article，其中一份没有卡；
+    // 只问"有没有卡"就会把它补出来，用户看到凭空多了一张一模一样的卡。
+    if (await essayArticleHasCardTwin(article, canvasId)) {
+      skipped += 1;
+      continue;
+    }
+
     const existingOnCanvas = await db.nodes
       .filter((n) => (n.canvasId ?? 'default') === canvasId)
       .toArray();

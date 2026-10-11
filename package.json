@@ -25,10 +25,12 @@
     "setup:mimo-key": "node scripts/setup-builtin-mimo.mjs",
     "setup:doubao-key": "node scripts/setup-builtin-doubao.mjs",
     "setup:note-hand-fonts": "node scripts/fetch-note-hand-fonts.mjs",
-    "dump:official": "tsx scripts/dump-official-payload.ts"
+    "dump:official": "tsx scripts/dump-official-payload.ts",
+    "build:ecdict-subset": "node scripts/build-ecdict-subset.mjs"
   },
   "dependencies": {
     "@google/genai": "^1.51.0",
+    "@paddleocr/paddleocr-js": "^0.4.2",
     "@tailwindcss/vite": "^4.1.14",
     "@tauri-apps/api": "^2.11.0",
     "@tauri-apps/cli": "^2.11.0",
@@ -51,6 +53,7 @@
     "lucide-react": "^0.546.0",
     "mammoth": "^1.12.0",
     "motion": "^12.23.24",
+    "onnxruntime-web": "1.30.0",
     "pdfjs-dist": "^5.6.205",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",

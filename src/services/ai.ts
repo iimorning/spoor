@@ -8,8 +8,13 @@ import {
 } from '../constants/doubao';
 import { DEEPSEEK_BASE_URL, DEEPSEEK_DEFAULT_MODEL } from '../constants/deepseek';
 import { MINIMAX_BASE_URL, MINIMAX_DEFAULT_MODEL } from '../constants/minimax';
-import { OPENROUTER_DEFAULT_VISION_MODEL } from '../constants/openrouter';
-import { resolveChatModelForImages, shouldRouteDeepSeekImagesToGlm } from '../utils/aiVisionConfig';
+import {
+  OPENROUTER_DEFAULT_VISION_MODEL,
+  isOpenRouterEndpoint,
+  reasoningRequestField,
+  resolveReasoningMode,
+} from '../constants/openrouter';
+import { resolveChatModelForImages, shouldRouteDeepSeekImagesToVisionModel } from '../utils/aiVisionConfig';
 import { isServerManaged, getFunctionsBase, resolveAccessToken, edgeFunctionHeaders } from '../lib/serverConfig';
 import i18n from '../i18n';
 import { AiHttpError, withAiTransientRetry } from '../utils/aiTransientRetry';
@@ -296,12 +301,18 @@ async function consumeOpenAiSseFromResponse(
 
   const decoder = new TextDecoder();
   let carry = '';
+  // 有些 OpenAI 兼容端点无视 stream:true，回一整包 JSON。这种响应里一行
+  // `data:` 都没有，上面的循环等于白读，最后只能报"空响应"——划词改流式之前
+  // 翻译不走这条路径，是能拿到结果的。所以整包留一份，只在兜底里用一次。
+  let rawAll = '';
   const acc = createLlmStreamAcc();
   let transcript = '';
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
-    carry += decoder.decode(value, { stream: true });
+    const decoded = decoder.decode(value, { stream: true });
+    rawAll += decoded;
+    carry += decoded;
     const lines = carry.split(/\r?\n/);
     carry = lines.pop() ?? '';
     for (const line of lines) {
@@ -325,6 +336,19 @@ async function consumeOpenAiSseFromResponse(
       } catch {
         /* ignore malformed chunk */
       }
+    }
+  }
+  // 一帧都没解析出来：多半是端点回了整包 JSON 而不是 SSE。用它兜一次底，
+  // 免得"改流式"把本来好用的直连端点变成一次都翻译不出来。
+  if (!transcript && rawAll.trim()) {
+    try {
+      const content = extractChatCompletionContent(JSON.parse(rawAll));
+      if (content) {
+        transcript = content;
+        onAccumulated(content);
+      }
+    } catch {
+      /* 确实不是 JSON：交给调用方的"空响应"错误，别在这里编内容 */
     }
   }
   return transcript;
@@ -421,6 +445,13 @@ export type CallAIFn = (params: {
   lockModel?: boolean;
   /** Sticky routing key for OpenRouter prompt cache (same Ask/agent/canvas thread). */
   sessionId?: string;
+  /**
+   * 上游瞬时失败、正在重试时叫一声。
+   *
+   * 拿来分开两种"慢"：一次往返很久，和三次重试在救场。从外面看是同一件事，
+   * 只有次数和每次的原因能分辨——不然就只能去翻 Network 面板。
+   */
+  onRetry?: (attempt: number, error: unknown, delayMs: number) => void;
 }) => Promise<string>;
 
 export type AiProviderConfig = {
@@ -430,6 +461,8 @@ export type AiProviderConfig = {
   model: string;
   localGgufPath?: string;
   localEnableThinking?: boolean;
+  /** 深度思考（仅 OpenRouter 生效）：见 constants/openrouter.ts 的 ReasoningMode。 */
+  reasoningMode?: string;
 };
 
 export type ChatMessage =
@@ -477,6 +510,7 @@ export async function callUniversalAI({
   onStreamChunk,
   lockModel = false,
   sessionId,
+  onRetry,
 }: {
   config: AiProviderConfig;
   /** Legacy single-turn user message. Ignored if `messages` is provided. */
@@ -497,6 +531,8 @@ export async function callUniversalAI({
   onStreamChunk?: (accumulatedText: string) => void;
   lockModel?: boolean;
   sessionId?: string;
+  /** 上游瞬时失败、正在重试时叫一声：一次往返很久 vs 三次重试在救场，从外面看是同一件事。 */
+  onRetry?: (attempt: number, error: unknown, delayMs: number) => void;
 }): Promise<string> {
   const apiKeyTrimmed = (config.apiKey ?? '').trim();
   const useUserConfig = Boolean(apiKeyTrimmed);
@@ -605,18 +641,21 @@ export async function callUniversalAI({
       config.provider === 'doubao'
         ? resolveDoubaoChatModel(config.model)
         : config.model || undefined;
-    const useGlmForImages =
+    const useVisionModelForImages =
       hasImages &&
       !lockModel &&
-      shouldRouteDeepSeekImagesToGlm(config.provider, requestedModel ?? '');
-    const hostedModel = useGlmForImages
+      shouldRouteDeepSeekImagesToVisionModel(config.provider, requestedModel ?? '');
+    const hostedModel = useVisionModelForImages
       ? OPENROUTER_DEFAULT_VISION_MODEL
       : requestedModel
         ? (hasImages && !lockModel
           ? resolveChatModelForImages(config.provider, requestedModel)
           : requestedModel)
         : undefined;
-    const hostedLockModel = lockModel || useGlmForImages;
+    const hostedLockModel = lockModel || useVisionModelForImages;
+    const hostedReasoning = reasoningRequestField(
+      resolveReasoningMode(config.reasoningMode),
+    );
     return withAiTransientRetry(async () => {
       let res: Response;
       try {
@@ -627,6 +666,8 @@ export async function callUniversalAI({
             provider: config.provider,
             model: hostedModel,
             baseUrl: config.baseUrl || undefined,
+            // 托管时由 Edge Function 转发；用户选"默认"时不带这个键（函数保持它原来的行为）。
+            ...(hostedReasoning ? { reasoning: hostedReasoning } : {}),
             systemInstruction: systemInstruction || undefined,
             // When the caller built a multi-turn history, forward it as-is. The
             // Edge Function (`ai-llm`) already accepts `messages?: ChatMessage[]`
@@ -731,7 +772,7 @@ export async function callUniversalAI({
         }
       }
       return transcript;
-    }, { label: 'ai-llm' });
+    }, { label: 'ai-llm', onRetry });
   }
 
   if (config.provider === 'gemini') {
@@ -884,11 +925,16 @@ export async function callUniversalAI({
         : baseMessages;
     const withImages = attachImagesToLastUser(finalMessages, images);
 
+    // 深度思考：只有 OpenRouter 认这个字段，而且用户选"默认"时一个字都不加。
+    const reasoning = isOpenRouterEndpoint(config.provider, config.baseUrl)
+      ? reasoningRequestField(resolveReasoningMode(config.reasoningMode))
+      : undefined;
     const body = {
       model,
       messages: withImages,
       temperature,
       top_p: topP,
+      ...(reasoning ? { reasoning } : {}),
     };
 
     const openAiKey =

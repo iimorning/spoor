@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
-import Image from '@tiptap/extension-image';
 import {
   EditorContent,
   ReactNodeViewRenderer,
@@ -21,9 +20,14 @@ import {
   X,
 } from 'lucide-react';
 import { isContentBlurPersistenceDisabled } from '../../config/persistence';
+import type { EssayFocusMark } from '../../db';
+import type { ArticleMedia } from '../../db';
+import { articleMediaUrl, createArticleMedia } from '../../utils/articleMedia';
+import { nextPastedMediaId, pastedImageDataUrls, shouldInterceptPaste } from '../../utils/essayPasteImages';
+import { droppedImageDataUrls } from '../../utils/essayDropImages';
 import {
   createEssayEditorExtensions,
-  ESSAY_IMAGE_HTML_CLASS,
+  createEssayImageExtension,
   normalizeEssayMarkdown,
 } from '../../utils/essayEditorMarkdown';
 import { ESSAY_BODY_PERSIST_MS } from '../../utils/persistEssayEditorBody';
@@ -32,6 +36,7 @@ import { EssayMediaUrlsContext } from './essayMediaUrlsContext';
 import { AiTransitionPopover } from './AiTransitionPopover';
 import { AiEssayEditView, settleAiEssayEdit } from './AiEssayEditView';
 import { AiEssayEditNode } from './AiEssayEditNode';
+import { EssayFocusNote } from './EssayFocusNote';
 import { applyEssayChatEdits, type EssayChatEdit } from '../../utils/essayChatEdits';
 import { collectMarkRanges } from './aiSuggestionRanges';
 import { resolveEssayEditorDrop, type EssayDropCaret } from '../../utils/essayEditorDrop';
@@ -50,8 +55,12 @@ export interface EssayBodyEditorHandle {
   ) => { applied: number; missed: string[] };
   /** Insert markdown at the caret, drop point, or after a short break. */
   insertExcerpt: (markdown: string, at?: { clientX: number; clientY: number }) => void;
+  /** 把拖进来的一批文件里的图片存成 media 引用，插在落点。 */
+  insertDroppedFiles: (data: DataTransfer, at?: { clientX: number; clientY: number }) => void;
   /** Show an insertion caret while dragging over the editor. */
   previewDropAt: (clientX: number, clientY: number) => boolean;
+  /** Open a mark's note, e.g. after picking it from the header list. */
+  openFocusMark: (markId: string) => boolean;
   clearDropPreview: () => void;
 }
 
@@ -63,6 +72,8 @@ export interface EssayBodyEditorProps {
   placeholder: string;
   mediaObjectUrls: Record<string, string>;
   onPersist: (markdown: string) => void;
+  /** Persist bytes for images pasted into the body. Base64 must never reach the markdown. */
+  onStoreMedia?: (media: ArticleMedia[]) => Promise<void> | void;
   /** Skip autosave while the article is still being generated. */
   disablePersist?: boolean;
   /** Called when the user adopts an AI-added transition (mark removed, text retained). */
@@ -75,6 +86,10 @@ export interface EssayBodyEditorProps {
   onDeletionRejected?: (text: string) => void;
   /** Live quote for the chat composer. Empty string when the caret collapses while the editor is focused. */
   onChatSelectionChange?: (text: string) => void;
+  /** AI 标出来的行。渲染成正文里的黄底；定位不到的那些自动不显示。 */
+  focusMarks?: EssayFocusMark[];
+  /** 某条标注被去掉。编辑器只管高亮和浮层，存库交给外面。 */
+  onFocusMarkDelete?: (markId: string) => void;
 }
 
 function collectEssayEditNodes(instance: Editor): { pos: number; size: number; original: string; proposed: string }[] {
@@ -157,12 +172,15 @@ export const EssayBodyEditor = React.forwardRef<EssayBodyEditorHandle, EssayBody
       placeholder,
       mediaObjectUrls,
       onPersist,
+      onStoreMedia,
       disablePersist = false,
       onTransitionAdopted,
       onTransitionRemoved,
       onDeletionAdopted,
       onDeletionRejected,
       onChatSelectionChange,
+      focusMarks,
+      onFocusMarkDelete,
     },
     ref,
   ) {
@@ -170,8 +188,10 @@ export const EssayBodyEditor = React.forwardRef<EssayBodyEditorHandle, EssayBody
   const skipPersistRef = useRef(true);
   const dirtyRef = useRef(false);
   const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const onPersistRef = useRef(onPersist);
-  onPersistRef.current = onPersist;
+const onPersistRef = useRef(onPersist);
+    onPersistRef.current = onPersist;
+    const onStoreMediaRef = useRef(onStoreMedia);
+    onStoreMediaRef.current = onStoreMedia;
   const onTransitionAdoptedRef = useRef(onTransitionAdopted);
   onTransitionAdoptedRef.current = onTransitionAdopted;
   const onTransitionRemovedRef = useRef(onTransitionRemoved);
@@ -182,6 +202,19 @@ export const EssayBodyEditor = React.forwardRef<EssayBodyEditorHandle, EssayBody
   onDeletionRejectedRef.current = onDeletionRejected;
   const onChatSelectionChangeRef = useRef(onChatSelectionChange);
   onChatSelectionChangeRef.current = onChatSelectionChange;
+  const onFocusMarkDeleteRef = useRef(onFocusMarkDelete);
+  onFocusMarkDeleteRef.current = onFocusMarkDelete;
+  // 哪条标注是开着的，由编辑器自己管：浮层的开合是纯界面状态，不该漏到外面去。
+  const [openFocusId, setOpenFocusId] = useState<string | null>(null);
+  // 标注列表每次存库都换新数组，而 Decoration 在每个 transaction 上重算。内容
+  // 没变就别推新数组进去，否则用户每敲一个字都会重跑一遍全文定位。
+  // 键里带上引文和说明：同一条标注改了想法，id 没变，但装饰要重画。
+  const focusMarksKey = useMemo(
+    () => (focusMarks ?? []).map((m) => `${m.id}:${m.quote}:${m.note}`).join('|'),
+    [focusMarks],
+  );
+  const focusMarksRef = useRef<EssayFocusMark[]>(focusMarks ?? []);
+  focusMarksRef.current = focusMarks ?? [];
   const markdownRef = useRef(markdown);
   markdownRef.current = markdown;
   const editorRef = useRef<Editor | null>(null);
@@ -196,6 +229,7 @@ export const EssayBodyEditor = React.forwardRef<EssayBodyEditorHandle, EssayBody
   );
   const [dropCaret, setDropCaret] = useState<EssayDropCaret | null>(null);
   const dropPosRef = useRef<number | null>(null);
+const clearDropPreviewRef = useRef<() => void>(() => {});
 
   const refreshSelectionToolbar = useCallback((instance: Editor) => {
     if (floatingToolbarArmedRef.current || floatingToolbarRef.current?.matches(':hover')) {
@@ -211,65 +245,7 @@ export const EssayBodyEditor = React.forwardRef<EssayBodyEditorHandle, EssayBody
 
   const imageExtension = useMemo(
     () =>
-      Image.extend({
-        addAttributes() {
-          return {
-            ...this.parent?.(),
-            width: {
-              default: null,
-              parseHTML: (element) => {
-                const raw =
-                  element.getAttribute('width') ||
-                  (element as HTMLElement).style.width;
-                if (!raw) return null;
-                const parsed = parseInt(String(raw).replace(/px$/i, ''), 10);
-                return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
-              },
-              renderHTML: (attributes) =>
-                attributes.width ? { width: attributes.width } : {},
-            },
-            height: {
-              default: null,
-              parseHTML: (element) => {
-                const raw =
-                  element.getAttribute('height') ||
-                  (element as HTMLElement).style.height;
-                if (!raw) return null;
-                const parsed = parseInt(String(raw).replace(/px$/i, ''), 10);
-                return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
-              },
-              renderHTML: (attributes) =>
-                attributes.height ? { height: attributes.height } : {},
-            },
-          };
-        },
-        renderMarkdown(node) {
-          const attrs = node.attrs ?? {};
-          const src = String(attrs.src ?? '');
-          const alt = String(attrs.alt ?? '');
-          const title = String(attrs.title ?? '');
-          const width = attrs.width;
-          const height = attrs.height;
-          if (width || height) {
-            const parts = [
-              `src="${src}"`,
-              alt ? `alt="${alt}"` : '',
-              width ? `width="${width}"` : '',
-              height ? `height="${height}"` : '',
-              'class="rounded-md my-4"',
-            ].filter(Boolean);
-            return `<img ${parts.join(' ')} />`;
-          }
-          return title ? `![${alt}](${src} "${title}")` : `![${alt}](${src})`;
-        },
-        addNodeView() {
-          return ReactNodeViewRenderer(EssayImageView);
-        },
-      }).configure({
-        inline: false,
-        allowBase64: true,
-        HTMLAttributes: { class: ESSAY_IMAGE_HTML_CLASS },
-      }),
+      createEssayImageExtension(ReactNodeViewRenderer(EssayImageView)),
     [],
   );
 
@@ -289,6 +265,7 @@ export const EssayBodyEditor = React.forwardRef<EssayBodyEditorHandle, EssayBody
         placeholder,
         imageExtension,
         aiEssayEditExtension: essayEditExtension,
+        essayFocus: true,
       }),
     [placeholder, imageExtension, essayEditExtension],
   );
@@ -304,6 +281,48 @@ export const EssayBodyEditor = React.forwardRef<EssayBodyEditorHandle, EssayBody
     onPersistRef.current(normalizeEssayMarkdown(editorMarkdown));
   };
 
+  /**
+   * 存完字节再插引用。位置在粘贴那一刻就按住：存盘是异步的，等回来时用户可能已经
+   * 继续打字或换段落，跟着当时的 selection 插会把图落到别的地方去。
+   */
+  const insertStoredImages = async (pos: number, dataUrls: string[]) => {
+    const stored: ArticleMedia[] = [];
+    for (const dataUrl of dataUrls) {
+      try {
+        stored.push(await createArticleMedia(nextPastedMediaId(), dataUrl));
+      } catch (error) {
+        console.error('[Spoor] pasted image could not be stored', error);
+      }
+    }
+    if (stored.length === 0) return;
+
+    try {
+      await onStoreMediaRef.current?.(stored);
+    } catch (error) {
+      console.error('[Spoor] pasted image persistence failed', error);
+    }
+
+    const live = editorRef.current;
+    if (!live) return;
+    // 存盘期间正文可能被改短，位置要夹一下再插。
+    const at = Math.max(1, Math.min(pos, live.state.doc.content.size));
+    skipPersistRef.current = true;
+    try {
+      const chain = live.chain().setTextSelection(at);
+      for (const media of stored) {
+        chain.insertContent({ type: 'image', attrs: { src: articleMediaUrl(media.id), alt: '' } });
+      }
+      chain.run();
+    } finally {
+      // 漏掉这一行的话，run() 一抛 skipPersistRef 就永远停在 true：这个会话剩下的
+      // 编辑（含这张图自己）一个字都不会再存盘，而界面上看不出任何异样。
+      skipPersistRef.current = false;
+    }
+    dirtyRef.current = true;
+    clearDropPreviewRef.current();
+    flushPersist(live.getMarkdown());
+  };
+
   const editor = useEditor(
     {
       immediatelyRender: true,
@@ -317,6 +336,21 @@ export const EssayBodyEditor = React.forwardRef<EssayBodyEditorHandle, EssayBody
           class: 'markdown-body essay-body-editor-prose min-h-[8rem] focus:outline-none',
           'data-testid': 'essay-body-editor-prose',
         },
+        // 只拦「光秃秃一张图」的粘贴，交给 insertStoredImages 存成 media 引用。判定必须
+        // 同步：handlePaste 返回 false 就等于把事件还给 ProseMirror，而读文件是异步的。
+        // 带文字的富文本一律放行——我们只插图，插不了那段字，放行才不会把人复制来的
+        // 正文吃掉。
+        handlePaste: (view, event) => {
+          if (!shouldInterceptPaste(event)) return false;
+          const pos = view.state.selection.from;
+          void pastedImageDataUrls(event)
+            .then((dataUrls) => {
+              if (dataUrls.length === 0) return;
+              void insertStoredImages(pos, dataUrls);
+            })
+            .catch((error) => console.error('[Spoor] pasted image read failed', error));
+          return true;
+        },
       },
       onCreate: ({ editor: instance }) => {
         skipPersistRef.current = false;
@@ -329,6 +363,8 @@ export const EssayBodyEditor = React.forwardRef<EssayBodyEditorHandle, EssayBody
           onDeleteReject: (text: string) => onDeletionRejectedRef.current?.(text),
         };
         instance.view.dispatch(instance.state.tr.setMeta('aiSuggestionActions', true));
+        // 标注存在 storage 上，Decoration 插件每次重算都从这儿读。
+        instance.storage.essayFocusMarks = { marks: focusMarksRef.current };
       },
       onSelectionUpdate: ({ editor: instance }) => {
         const { from, to } = instance.state.selection;
@@ -400,6 +436,7 @@ export const EssayBodyEditor = React.forwardRef<EssayBodyEditorHandle, EssayBody
     dropPosRef.current = null;
     setDropCaret(null);
   }, []);
+  clearDropPreviewRef.current = clearDropPreview;
 
   useEffect(() => {
     if (!dropCaret || dropPosRef.current == null) return;
@@ -463,6 +500,11 @@ export const EssayBodyEditor = React.forwardRef<EssayBodyEditorHandle, EssayBody
       return true;
     },
     clearDropPreview,
+    openFocusMark: (markId: string) => {
+      if (!focusMarksRef.current.some((m) => m.id === markId)) return false;
+      setOpenFocusId(markId);
+      return true;
+    },
     insertExcerpt: (markdown, at) => {
       const chunk = (markdown ?? '').trim();
       if (!chunk) return;
@@ -493,6 +535,20 @@ export const EssayBodyEditor = React.forwardRef<EssayBodyEditorHandle, EssayBody
       clearDropPreview();
       flushPersist(instance.getMarkdown());
     },
+    insertDroppedFiles: (data, at) => {
+      const instance = editorRef.current;
+      if (!instance) return;
+      // 落点先按住再读文件：读盘是异步的，等回来时用户可能已经继续打字了。
+      const resolved = at ? resolveEssayEditorDrop(instance, at.clientX, at.clientY) : null;
+      const pos = resolved?.pos ?? dropPosRef.current ?? instance.state.selection.from;
+      clearDropPreview();
+      void droppedImageDataUrls(data)
+        .then((dataUrls) => {
+          if (dataUrls.length === 0) return;
+          return insertStoredImages(pos, dataUrls);
+        })
+        .catch((error) => console.error('[Spoor] dropped image read failed', error));
+    },
   }));
 
   useEffect(() => {
@@ -516,6 +572,19 @@ export const EssayBodyEditor = React.forwardRef<EssayBodyEditorHandle, EssayBody
     editor.commands.setContent(markdownRef.current, { contentType: 'markdown' });
     skipPersistRef.current = false;
   }, [articleId, syncKey, editor]);
+
+  // 标注增删之后把新列表递进 storage，再让编辑器重画一遍 Decoration。
+  //
+  // 依赖里**只有** focusMarksKey，不挂 focusMarks 本身：正文每存一次库，article 的
+  // 身份就变一次，memo 出来的数组也换一个新引用——挂上它等于用户每敲一个字就把
+  // 全文引文定位重跑一遍。键变了才重算，列表从 ref 里读。
+  useEffect(() => {
+    if (!editor) return;
+    const store = editor.storage.essayFocusMarks;
+    if (!store) return;
+    store.marks = focusMarksRef.current;
+    editor.view.dispatch(editor.state.tr.setMeta('essayFocusMarks', true));
+  }, [editor, focusMarksKey]);
 
   const toolbar = useEditorState({
     editor,
@@ -609,6 +678,21 @@ export const EssayBodyEditor = React.forwardRef<EssayBodyEditorHandle, EssayBody
   const handleEditorLeave = () => {
     lastHoverMarkRef.current = null;
     setActiveSuggestion(null);
+  };
+
+  /**
+   * 点标注开它的想法。
+   *
+   * 收在编辑器容器上而不是 ProseMirror 的 `handleClick`：后者要先用 `posAtCoords`
+   * 把鼠标位置换算成文档位置，那套换算依赖布局信息，容器上直接 `closest` 反而更稳，
+   * 而且不必在两个地方各写一遍"点到的是不是标注"。
+   */
+  const handleEditorClick = (event: React.MouseEvent<HTMLDivElement>) => {
+    const target = event.target as HTMLElement | null;
+    const el = target?.closest?.('[data-essay-focus-id]') as HTMLElement | null;
+    const id = el?.getAttribute('data-essay-focus-id');
+    if (!id) return;
+    setOpenFocusId((prev) => (prev === id ? null : id));
   };
 
   const handleEditorFocusIn = (event: React.FocusEvent<HTMLDivElement>) => {
@@ -777,12 +861,30 @@ export const EssayBodyEditor = React.forwardRef<EssayBodyEditorHandle, EssayBody
         <div
           onMouseMove={handleEditorHover}
           onMouseLeave={handleEditorLeave}
+          onClick={handleEditorClick}
           onFocus={handleEditorFocusIn}
           onBlur={handleEditorFocusOut}
           className="rounded-md"
         >
           <EditorContent editor={editor} />
         </div>
+        {editor && openFocusId
+          ? (() => {
+              const mark = (focusMarksRef.current ?? []).find((m) => m.id === openFocusId);
+              if (!mark) return null;
+              return (
+                <EssayFocusNote
+                  editor={editor}
+                  mark={mark}
+                  onClose={() => setOpenFocusId(null)}
+                  onDelete={(id) => {
+                    setOpenFocusId(null);
+                    onFocusMarkDeleteRef.current?.(id);
+                  }}
+                />
+              );
+            })()
+          : null}
         {editor && activeSuggestion && (
           <AiTransitionPopover
             editor={editor}

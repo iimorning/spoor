@@ -106,6 +106,8 @@ export interface DraggableNodeProps {
   isAskAiAnalysisDisabled?: boolean;
   /** When true, hide archive/link/delete/resize/rotate chrome (fixture widgets). */
   fixture?: boolean;
+  /** When true, the link (+) button is not rendered at all. */
+  hideLinkChrome?: boolean;
   /** V2: tap persona anchor (Ask / agent) to open side-panel chat. */
   onPersonaChatOpen?: () => void;
   /** Extra chrome stacked above link / Ask AI on the right edge. */
@@ -349,13 +351,12 @@ export const DraggableNode: React.FC<DraggableNodeProps> = ({
     return () => document.removeEventListener('pointerdown', onDoc);
   }, [showPalette]);
 
-  // Agent cards expose a "Run / Ask" wand as their primary interaction, so
-// keep the right-side chrome visible without requiring a hover. Lets the
-// canvas onboarding tour point at the wand without first forcing a hover.
-  const forceChromeVisible = Boolean(onAskAiRunAnalysis);
+  // 卡片上的控件（外链、问 AI、缩放/旋转把手）只在选中或悬停时出现。
+  // 曾经对角色卡恒常显示右侧控件，理由是"让引导能指着那个魔法棒"——那条引导
+  // 现在只高亮工作区和拖拽把手（见 onboarding/tourSteps.ts），所以这个特例没了。
   const chromeVisible = hideChrome && !askComposerOpen && !askMenuOpen && !thinkingOpen
     ? '!opacity-0 pointer-events-none'
-    : isSelected || askComposerOpen || askMenuOpen || folderPickerOpen || thinkingOpen || forceChromeVisible
+    : isSelected || askComposerOpen || askMenuOpen || folderPickerOpen || thinkingOpen
       ? 'opacity-100'
       : 'opacity-0 group-hover:opacity-100';
   const paletteColorChoices = glassSurface ? colorPresets.slice(3) : colorPresets;
@@ -383,6 +384,12 @@ export const DraggableNode: React.FC<DraggableNodeProps> = ({
             : undefined
       }
       data-glass-surface={glassSurface ? '' : undefined}
+      /**
+       * 标记「这一整块是画布节点」。节点自带一套纸面色板，暗色主题的外壳规则
+       * 不该改写它们——ThemeNode 的深色卡（bg-[#1a1a1a] + 白字）就是靠这个
+       * 躲开重映射、保持深色的。
+       */
+      data-canvas-node={id}
       data-node-tone={
         styleOverrides.bg
           ? isDarkNodeBackground(styleOverrides.bg)
@@ -698,6 +705,7 @@ export const DraggableNode: React.FC<DraggableNodeProps> = ({
             onPointerDown={(e) => {
               e.stopPropagation();
               e.preventDefault();
+              playUiSfx('paperSwish');
               onDelete();
             }}
             className={`${

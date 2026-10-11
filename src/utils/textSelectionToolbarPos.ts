@@ -57,7 +57,12 @@ export function computeEssayEditorToolbarPos(
       selection: { empty: boolean; from: number; to: number };
       doc: { textBetween: (from: number, to: number, block?: string) => string };
     };
-    view: { coordsAtPos: (pos: number, side?: number) => CoordsRect; dom: HTMLElement };
+    view: {
+      coordsAtPos: (pos: number, side?: number) => CoordsRect;
+      /** pmSelectionViewportBox 要用；TipTap 的 EditorView 一直都有。 */
+      domAtPos: (pos: number) => { node: Node; offset: number };
+      dom: HTMLElement;
+    };
   },
   toolbarWidth: number,
   toolbarHeight: number,

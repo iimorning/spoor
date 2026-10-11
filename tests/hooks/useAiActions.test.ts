@@ -18,11 +18,35 @@ const publishJsonResponse = vi.hoisted(() =>
   }),
 );
 
+// 参数是**一个对象**（真函数是解构入参），用例断言的就是 mock 收到了这个对象，
+// 所以必须原样透传；写成两个位置参数会把断言打翻。
+const attachSuggestedFollowUpsMock = vi.hoisted(() =>
+  vi.fn(async (_args: {
+    threadId: string;
+    messageId: string;
+    config: unknown;
+    userQuestion: string;
+    t: unknown;
+    sessionId?: string;
+  }) => {}),
+);
+
 vi.mock('../../src/services/ai', () => ({
   callUniversalAI: vi.fn().mockResolvedValue(publishJsonResponse),
   formatAiError: (e: unknown) => (e instanceof Error ? e.message : String(e)),
   maskApiKeyForLog: (k: string) => (k ? `${k.slice(0, 2)}…` : ''),
 }));
+
+vi.mock('../../src/utils/suggestedFollowUps', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/utils/suggestedFollowUps')>();
+  return {
+    ...actual,
+    // 具名转发单个对象；`(...args: unknown[])` 展开进 mock 会报 TS2556。
+    attachSuggestedFollowUpsToThreadMessage: ((
+      arg: Parameters<typeof attachSuggestedFollowUpsMock>[0],
+    ) => attachSuggestedFollowUpsMock(arg)) as typeof actual.attachSuggestedFollowUpsToThreadMessage,
+  };
+});
 
 vi.mock('../../src/services/search', () => ({
   metasoSearch: vi.fn().mockResolvedValue({
@@ -114,6 +138,12 @@ async function personaThread(personaId: string) {
   return db.canvasPersonaThreads.get(`default:${personaId}`);
 }
 
+/** 抓一次 callUniversalAI 的入参：房间相关的断言都看 system 和 messages。 */
+type CapturedCall = {
+  systemInstruction?: string;
+  messages?: Array<{ role: string; content: unknown }>;
+};
+
 describe('useAiActions', () => {
   beforeEach(async () => {
     localStorage.clear();
@@ -126,6 +156,8 @@ describe('useAiActions', () => {
     await i18n.changeLanguage('en');
     vi.mocked(callUniversalAI).mockClear();
     mockCallUniversalAIWithStream('AI generated text');
+    attachSuggestedFollowUpsMock.mockClear();
+    attachSuggestedFollowUpsMock.mockResolvedValue(undefined);
     vi.mocked(metasoSearch).mockClear();
     vi.mocked(metasoSearch).mockResolvedValue({
       credits: 0,
@@ -1054,6 +1086,45 @@ describe('useAiActions', () => {
       expect((await db.nodes.toArray()).filter((n) => n.type === 'ai')).toHaveLength(0);
     });
 
+    it('语音朗读拿不到汤底：念的和写下来的是同一份', async () => {
+      const host: CanvasNode = {
+        id: 'host1',
+        canvasId: 'default',
+        type: 'agent',
+        agentConfigId: 'turtle_soup_host',
+        x: 0,
+        y: 0,
+      };
+      const persona: AgentConfig = {
+        id: 'turtle_soup_host',
+        name: '海龟汤主持人',
+        role: '情境推理主持',
+        prompt: personaPrompt,
+      };
+      mockCallUniversalAIWithStream(JSON.stringify({
+        language: 'zh',
+        title: '两套餐具',
+        surface: '桌上摆了两套餐具。',
+        secret_solution: '他在等一个不会来的人。',
+        key_facts: ['他只点了一人份'],
+      }));
+      const chunks: string[] = [];
+      const { result } = renderHook(() =>
+        useTestAiActions({ dynamicNodes: [host], agentConfigs: [persona] }),
+      );
+      await act(async () => {
+        await result.current.runAskCardGeneration('host1', '开局', {
+          onSpeakerStream: (chunk) => chunks.push(chunk.accumulated),
+        });
+      });
+      // 汤底只留在会话里：念出来的这一路也不能漏
+      const spoken = chunks.join('');
+      expect(chunks.length).toBeGreaterThan(0);
+      expect(spoken).toMatch(/桌上摆了两套餐具/);
+      expect(spoken).not.toMatch(/不会来的人/);
+      expect(spoken).not.toMatch(/secret_solution/);
+    });
+
     it('海龟汤追问走裁判包，侧栏不展示汤底', async () => {
       const host: CanvasNode = {
         id: 'host1',
@@ -1445,6 +1516,23 @@ describe('useAiActions', () => {
     });
   });
 
+  describe('suggested follow-ups', () => {
+    it('asks for related questions after a canvas AI reply', async () => {
+      const ask: CanvasNode = { id: 'ask1', canvasId: 'default', type: 'ask', x: 0, y: 0 };
+      const { result } = renderHook(() => useTestAiActions({ dynamicNodes: [ask] }));
+      await act(async () => {
+        await result.current.sendPersonaMessage('ask1', '为什么少即是多');
+      });
+      expect(attachSuggestedFollowUpsMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userQuestion: '为什么少即是多',
+          messageId: expect.any(String),
+          threadId: 'default:ask1',
+        }),
+      );
+    });
+  });
+
   describe('parallel persona chat', () => {
     const cfgA: AgentConfig = {
       id: 'cfg-a',
@@ -1561,6 +1649,891 @@ describe('useAiActions', () => {
       });
       const thread = await personaThread('agent-a');
       expect(thread?.messages.filter((m) => m.role === 'user')).toHaveLength(1);
+    });
+  });
+
+  // --- 侧栏多角色房间 ---
+  describe('multi-persona room', () => {
+    const cfgA: AgentConfig = { id: 'cfg-a', name: 'Mirror', role: 'Ra', prompt: 'You are the mirror.' };
+    const cfgB: AgentConfig = { id: 'cfg-b', name: 'Turtle', role: 'Rb', prompt: 'You are the turtle.' };
+    const nodeA: CanvasNode = {
+      id: 'agent-a', canvasId: 'default', type: 'agent', agentConfigId: 'cfg-a', x: 0, y: 0,
+    };
+    const nodeB: CanvasNode = {
+      id: 'agent-b', canvasId: 'default', type: 'agent', agentConfigId: 'cfg-b', x: 80, y: 0,
+    };
+    const noteHost: CanvasNode = {
+      id: 'note-a', canvasId: 'default', type: 'text', content: 'HOST MATERIAL',
+      contextScopeAgentId: 'agent-a', x: 0, y: 300,
+    };
+    const notePeer: CanvasNode = {
+      id: 'note-b', canvasId: 'default', type: 'text', content: 'PEER MATERIAL',
+      contextScopeAgentId: 'agent-b', x: 320, y: 300,
+    };
+
+    async function seedRoom(participantNodeIds: string[], mutedNodeIds: string[] = []) {
+      await db.canvasPersonaThreads.put({
+        id: 'default:agent-a',
+        canvasId: 'default',
+        agentNodeId: 'agent-a',
+        messages: [],
+        participantNodeIds,
+        mutedNodeIds,
+        updatedAt: Date.now(),
+      });
+    }
+
+    function replyWith(label: (n: number) => string) {
+      let n = 0;
+      vi.mocked(callUniversalAI).mockImplementation(async (opts) => {
+        n += 1;
+        const text = label(n);
+        opts.onStreamChunk?.(text);
+        return text;
+      });
+    }
+
+    type CapturedCall = {
+      systemInstruction?: string;
+      messages?: Array<{ role: string; content: unknown }>;
+    };
+
+    it('has everyone in the room read the same material, host first then unmuted participants', async () => {
+      await seedRoom(['agent-b']);
+      replyWith((n) => `reply-${n}`);
+
+      const { result } = renderHook(() =>
+        useTestAiActions({
+          dynamicNodes: [nodeA, nodeB, noteHost, notePeer],
+          agentConfigs: [cfgA, cfgB],
+        }),
+      );
+
+      await act(async () => {
+        await result.current.sendPersonaMessage('agent-a', 'what do you two think?');
+      });
+
+      expect(callUniversalAI).toHaveBeenCalledTimes(2);
+      const hostCall = vi.mocked(callUniversalAI).mock.calls[0]![0] as CapturedCall;
+      const peerCall = vi.mocked(callUniversalAI).mock.calls[1]![0] as CapturedCall;
+
+      // 房间是主 Agent 的房间：在场的人读同一份材料
+      expect(hostCall.systemInstruction).toMatch(/HOST MATERIAL/);
+      expect(peerCall.systemInstruction).toMatch(/HOST MATERIAL/);
+      // 参与者自己房间里有什么，与这场讨论无关
+      expect(hostCall.systemInstruction).not.toMatch(/PEER MATERIAL/);
+      expect(peerCall.systemInstruction).not.toMatch(/PEER MATERIAL/);
+      // 参与者知道房间里还有谁在说话
+      expect(peerCall.systemInstruction).toMatch(/Mirror/);
+      // 而且被明确告知：用户的话不是它说的（否则会出现"我打「你们」真是没多想"这种人称串位）
+      expect(peerCall.systemInstruction).toContain("never speak in the user's first person");
+      // 参与者拿到的是"参与者版"规则：不是在回答用户的新问题，而是回应其他角色
+      expect(peerCall.systemInstruction).toContain('NOT answering a fresh question from the user');
+      // 主人拿到的必须是"主人版"：先答用户的问题。以前给主人也发参与者版，
+      // 一边说"你不是在回答用户"，一边 cue 说"针对用户的问题给出判断"，自相矛盾。
+      expect(hostCall.systemInstruction).toContain('You are the host of this room');
+      expect(hostCall.systemInstruction).not.toContain('NOT answering a fresh question from the user');
+
+      const thread = await personaThread('agent-a');
+      expect(
+        thread!.messages
+          .filter((m) => m.role === 'assistant')
+          .map((m) => [m.speakerNodeId, m.speakerName, m.text]),
+      ).toEqual([
+        ['agent-a', 'Mirror', 'reply-1'],
+        ['agent-b', 'Turtle', 'reply-2'],
+      ]);
+      // 后来的人看到别人说过的话带署名，自己说过的保持裸文本。
+      const peerHistory = (peerCall.messages ?? []).map((m) => String(m.content));
+      expect(peerHistory.some((c) => c.includes('Mirror: reply-1'))).toBe(true);
+      expect(peerHistory.some((c) => c.includes('what do you two think?'))).toBe(true);
+    });
+
+    it('skips a muted participant', async () => {
+      await seedRoom(['agent-b'], ['agent-b']);
+      replyWith(() => 'host only');
+
+      const { result } = renderHook(() =>
+        useTestAiActions({
+          dynamicNodes: [nodeA, nodeB, noteHost, notePeer],
+          agentConfigs: [cfgA, cfgB],
+        }),
+      );
+
+      await act(async () => {
+        await result.current.sendPersonaMessage('agent-a', 'anyone there?');
+      });
+
+      expect(callUniversalAI).toHaveBeenCalledTimes(1);
+      const thread = await personaThread('agent-a');
+      const replies = thread!.messages.filter((m) => m.role === 'assistant');
+      expect(replies).toHaveLength(1);
+      // 不是"房间功能整体没生效"，而是房间生效了、只是这个人被禁言
+      expect(replies[0]!.speakerNodeId).toBe('agent-a');
+      expect(thread!.messages.every((m) => m.speakerNodeId !== 'agent-b')).toBe(true);
+      const hostCall = vi.mocked(callUniversalAI).mock.calls[0]![0] as CapturedCall;
+      expect(hostCall.systemInstruction).toMatch(/Not speaking this round: Turtle/);
+    });
+
+    it('ends a participant request with a user turn', async () => {
+      await seedRoom(['agent-b']);
+      replyWith((n) => `reply-${n}`);
+
+      const { result } = renderHook(() =>
+        useTestAiActions({
+          dynamicNodes: [nodeA, nodeB, noteHost, notePeer],
+          agentConfigs: [cfgA, cfgB],
+        }),
+      );
+
+      await act(async () => {
+        await result.current.sendPersonaMessage('agent-a', 'go');
+      });
+
+      const peerMessages = (vi.mocked(callUniversalAI).mock.calls[1]![0] as CapturedCall)
+        .messages!;
+      expect(peerMessages.length).toBeGreaterThan(0);
+      expect(peerMessages[peerMessages.length - 1]!.role).toBe('user');
+      // 主 Agent 那一路本来就已经以用户轮结尾，没被这次改动带偏
+      const hostMessages = (vi.mocked(callUniversalAI).mock.calls[0]![0] as CapturedCall)
+        .messages!;
+      expect(hostMessages[hostMessages.length - 1]!.role).toBe('user');
+    });
+
+    it('stops the round and records the failure when a participant turn throws', async () => {
+      const cfgC: AgentConfig = { id: 'cfg-c', name: 'Owl', role: 'Rc', prompt: 'You are the owl.' };
+      const nodeC: CanvasNode = {
+        id: 'agent-c', canvasId: 'default', type: 'agent', agentConfigId: 'cfg-c', x: 160, y: 0,
+      };
+      await seedRoom(['agent-b', 'agent-c']);
+      let n = 0;
+      vi.mocked(callUniversalAI).mockImplementation(async (opts) => {
+        n += 1;
+        if (n === 1) {
+          opts.onStreamChunk?.('host reply');
+          return 'host reply';
+        }
+        throw new Error('provider exploded');
+      });
+
+      const { result } = renderHook(() =>
+        useTestAiActions({
+          dynamicNodes: [nodeA, nodeB, nodeC, noteHost, notePeer],
+          agentConfigs: [cfgA, cfgB, cfgC],
+        }),
+      );
+
+      await act(async () => {
+        await result.current.sendPersonaMessage('agent-a', 'go');
+      });
+
+      // 主 Agent + 第一个参与者，之后就止损了
+      expect(callUniversalAI).toHaveBeenCalledTimes(2);
+      const thread = await personaThread('agent-a');
+      const replies = thread!.messages.filter((m) => m.role === 'assistant');
+      expect(replies.map((m) => m.speakerNodeId)).toEqual(['agent-a', 'agent-b']);
+      expect(replies[0]!.text).toBe('host reply');
+      expect((replies[1]!.text ?? '').trim().length).toBeGreaterThan(0);
+      expect(thread!.messages.some((m) => m.speakerNodeId === 'agent-c')).toBe(false);
+      // 流式槽位全部释放，下一轮还能发出去
+      expect(result.current.personaStreams['agent-a']).toBeUndefined();
+      expect(result.current.personaStreams['agent-b']).toBeUndefined();
+      expect(result.current.personaStreams['agent-c']).toBeUndefined();
+    });
+
+    it('hands each speaker’s stream to the voice layer, labelled with whose reply it is', async () => {
+      await seedRoom(['agent-b']);
+      replyWith((n) => `reply-${n}`);
+      const chunks: Array<{ messageId: string; speakerNodeId: string; accumulated: string }> = [];
+
+      const { result } = renderHook(() =>
+        useTestAiActions({
+          dynamicNodes: [nodeA, nodeB, noteHost, notePeer],
+          agentConfigs: [cfgA, cfgB],
+        }),
+      );
+
+      await act(async () => {
+        await result.current.sendPersonaMessage('agent-a', 'go', {
+          onSpeakerStream: (chunk) => chunks.push(chunk),
+        });
+      });
+
+      const thread = await personaThread('agent-a');
+      const replies = thread!.messages.filter((m) => m.role === 'assistant');
+      // 说话顺序 = 回调顺序；消息 id 是这条回复自己的，语音层据此按人分音色。
+      expect(chunks.map((c) => [c.speakerNodeId, c.accumulated])).toEqual([
+        ['agent-a', 'reply-1'],
+        ['agent-b', 'reply-2'],
+      ]);
+      expect(chunks.map((c) => c.messageId)).toEqual([replies[0]!.id, replies[1]!.id]);
+    });
+
+    it('keeps a single-persona thread unsigned and single-call', async () => {
+      replyWith(() => 'solo reply');
+
+      const { result } = renderHook(() =>
+        useTestAiActions({
+          dynamicNodes: [nodeA, noteHost],
+          agentConfigs: [cfgA],
+        }),
+      );
+
+      await act(async () => {
+        await result.current.sendPersonaMessage('agent-a', 'just you');
+      });
+
+      expect(callUniversalAI).toHaveBeenCalledTimes(1);
+      const thread = await personaThread('agent-a');
+      const reply = thread!.messages.find((m) => m.role === 'assistant')!;
+      expect(reply.text).toBe('solo reply');
+      expect(reply.speakerNodeId).toBeUndefined();
+      expect(reply.speakerName).toBeUndefined();
+    });
+
+    it('drops a participant whose card was deleted instead of failing the turn', async () => {
+      await seedRoom(['agent-b', 'agent-gone']);
+      replyWith(() => 'ok');
+
+      const { result } = renderHook(() =>
+        useTestAiActions({
+          dynamicNodes: [nodeA, noteHost],
+          agentConfigs: [cfgA],
+        }),
+      );
+
+      await act(async () => {
+        await result.current.sendPersonaMessage('agent-a', 'still fine?');
+      });
+
+      expect(callUniversalAI).toHaveBeenCalledTimes(1);
+      const thread = await personaThread('agent-a');
+      expect(thread!.messages.some((m) => m.text === 'ok')).toBe(true);
+    });
+
+    it('shows the host who said what in a room, but not its own words', async () => {
+      await seedRoom(['agent-b']);
+      await db.canvasPersonaThreads.put({
+        id: 'default:agent-a',
+        canvasId: 'default',
+        agentNodeId: 'agent-a',
+        messages: [
+          { id: 'u0', role: 'user', text: '开场白', createdAt: 1 },
+          { id: 'a0', role: 'assistant', text: 'host said this', createdAt: 2, speakerNodeId: 'agent-a', speakerName: 'Mirror' },
+          { id: 'a1', role: 'assistant', text: 'peer said this', createdAt: 3, speakerNodeId: 'agent-b', speakerName: 'Turtle' },
+        ],
+        participantNodeIds: ['agent-b'],
+        mutedNodeIds: [],
+        updatedAt: Date.now(),
+      });
+      replyWith(() => 'next');
+
+      const { result } = renderHook(() =>
+        useTestAiActions({
+          dynamicNodes: [nodeA, nodeB, noteHost, notePeer],
+          agentConfigs: [cfgA, cfgB],
+        }),
+      );
+
+      await act(async () => {
+        await result.current.sendPersonaMessage('agent-a', '接着聊');
+      });
+
+      const hostHistory = (vi.mocked(callUniversalAI).mock.calls[0]![0] as CapturedCall)
+        .messages!.map((m) => String(m.content));
+      expect(hostHistory.some((c) => c.includes('Turtle: peer said this'))).toBe(true);
+      expect(hostHistory.some((c) => c.includes('host said this'))).toBe(true);
+      expect(hostHistory.some((c) => c.includes('Mirror: host said this'))).toBe(false);
+    });
+
+    it('tells a peer that unsigned old replies came from the host', async () => {
+      await seedRoom(['agent-b']);
+      await db.canvasPersonaThreads.put({
+        id: 'default:agent-a',
+        canvasId: 'default',
+        agentNodeId: 'agent-a',
+        messages: [
+          { id: 'u0', role: 'user', text: '开场白', createdAt: 1 },
+          // 加进讨论之前的老回复：没有发言人标记
+          { id: 'a0', role: 'assistant', text: 'before the room', createdAt: 2 },
+        ],
+        participantNodeIds: ['agent-b'],
+        mutedNodeIds: [],
+        updatedAt: Date.now(),
+      });
+      replyWith(() => 'hello');
+
+      const { result } = renderHook(() =>
+        useTestAiActions({
+          dynamicNodes: [nodeA, nodeB, noteHost, notePeer],
+          agentConfigs: [cfgA, cfgB],
+        }),
+      );
+
+      await act(async () => {
+        await result.current.sendPersonaMessage('agent-a', '你来了');
+      });
+
+      const peerHistory = (vi.mocked(callUniversalAI).mock.calls[1]![0] as CapturedCall)
+        .messages!.map((m) => String(m.content));
+      expect(peerHistory.some((c) => c.includes('Mirror: before the room'))).toBe(true);
+    });
+
+    it('lets a muted host stay silent and has the participants answer alone', async () => {
+      await seedRoom(['agent-b'], ['agent-a']);
+      replyWith((n) => `peer-${n}`);
+
+      const { result } = renderHook(() =>
+        useTestAiActions({
+          dynamicNodes: [nodeA, nodeB, noteHost, notePeer],
+          agentConfigs: [cfgA, cfgB],
+        }),
+      );
+
+      await act(async () => {
+        await result.current.sendPersonaMessage('agent-a', 'only you, Turtle');
+      });
+
+      // 只有参与者那一次调用
+      expect(callUniversalAI).toHaveBeenCalledTimes(1);
+      const thread = await personaThread('agent-a');
+      expect(
+        thread!.messages
+          .filter((m) => m.role === 'assistant')
+          .map((m) => [m.speakerNodeId, m.text]),
+      ).toEqual([['agent-b', 'peer-1']]);
+      // 用户消息仍然写进了 thread，只是没有被禁言的人回它
+      expect(thread!.messages.some((m) => m.role === 'user' && m.text.includes('Turtle'))).toBe(true);
+      // 参与者仍然拿到房间材料
+      const peerCall = vi.mocked(callUniversalAI).mock.calls[0]![0] as CapturedCall;
+      expect(peerCall.systemInstruction).toMatch(/HOST MATERIAL/);
+      expect(peerCall.systemInstruction).toMatch(/Not speaking this round: Mirror/);
+    });
+
+    it('refuses to send when every voice is muted', async () => {      await seedRoom(['agent-b'], ['agent-a', 'agent-b']);
+      replyWith(() => 'nobody');
+
+      const { result } = renderHook(() =>
+        useTestAiActions({
+          dynamicNodes: [nodeA, nodeB, noteHost, notePeer],
+          agentConfigs: [cfgA, cfgB],
+        }),
+      );
+
+      await act(async () => {
+        await result.current.sendPersonaMessage('agent-a', 'hello?');
+      });
+
+      expect(callUniversalAI).not.toHaveBeenCalled();
+      const thread = await personaThread('agent-a');
+      // 没有人在发言就不该留下一条永远没人回的用户消息
+      expect(thread?.messages ?? []).toHaveLength(0);
+      expect(result.current.personaStreams['agent-a']).toBeUndefined();
+    });
+  });
+
+  // --- 房间自动讨论（角色之间自己聊） ---
+  describe('room auto discussion', () => {
+    const cfgA: AgentConfig = { id: 'cfg-a', name: 'Mirror', role: 'Ra', prompt: 'You are the mirror.' };
+    const cfgB: AgentConfig = { id: 'cfg-b', name: 'Turtle', role: 'Rb', prompt: 'You are the turtle.' };
+    const nodeA: CanvasNode = {
+      id: 'agent-a', canvasId: 'default', type: 'agent', agentConfigId: 'cfg-a', x: 0, y: 0,
+    };
+    const nodeB: CanvasNode = {
+      id: 'agent-b', canvasId: 'default', type: 'agent', agentConfigId: 'cfg-b', x: 80, y: 0,
+    };
+    const noteHost: CanvasNode = {
+      id: 'note-a', canvasId: 'default', type: 'text', content: 'ROOM MATERIAL',
+      contextScopeAgentId: 'agent-a', x: 0, y: 300,
+    };
+
+    async function seedRoom(participantNodeIds: string[], mutedNodeIds: string[] = []) {
+      await db.canvasPersonaThreads.put({
+        id: 'default:agent-a',
+        canvasId: 'default',
+        agentNodeId: 'agent-a',
+        messages: [],
+        participantNodeIds,
+        mutedNodeIds,
+        updatedAt: Date.now(),
+      });
+    }
+
+    /** 每条回复按顺序标号，便于断言"谁说了第几句"。 */
+    function replyWith(label: (n: number) => string) {
+      let n = 0;
+      vi.mocked(callUniversalAI).mockImplementation(async (opts) => {
+        n += 1;
+        const text = label(n);
+        opts.onStreamChunk?.(text);
+        return text;
+      });
+    }
+
+    async function speakersInThread() {
+      const thread = await personaThread('agent-a');
+      return (thread?.messages ?? [])
+        .filter((m) => m.role === 'assistant')
+        .map((m) => m.speakerNodeId);
+    }
+
+    it('runs whole rounds without any user message: everyone speaks once per round', async () => {
+      await seedRoom(['agent-b']);
+      replyWith((n) => `turn-${n}`);
+
+      const { result } = renderHook(() =>
+        useTestAiActions({ dynamicNodes: [nodeA, nodeB, noteHost], agentConfigs: [cfgA, cfgB] }),
+      );
+
+      await act(async () => {
+        await result.current.advanceRoomDiscussion('agent-a');
+      });
+
+      // 默认两轮，每个声音每轮各说一次 —— 不是两句话
+      expect(callUniversalAI).toHaveBeenCalledTimes(4);
+      expect(await speakersInThread()).toEqual(['agent-a', 'agent-b', 'agent-a', 'agent-b']);
+      // 没有用户消息 —— 这是角色自己聊，不是回答谁
+      const thread = await personaThread('agent-a');
+      expect(thread?.messages.some((m) => m.role === 'user')).toBe(false);
+      // 每个人都读到房间的材料
+      for (const call of vi.mocked(callUniversalAI).mock.calls) {
+        expect((call[0] as { systemInstruction?: string }).systemInstruction).toMatch(/ROOM MATERIAL/);
+      }
+      // 跑完就释放，不要卡住界面
+      expect(result.current.roomDiscussion).toBeNull();
+    });
+
+    it('honours a single requested round', async () => {
+      await seedRoom(['agent-b']);
+      replyWith((n) => `turn-${n}`);
+
+      const { result } = renderHook(() =>
+        useTestAiActions({ dynamicNodes: [nodeA, nodeB, noteHost], agentConfigs: [cfgA, cfgB] }),
+      );
+
+      await act(async () => {
+        await result.current.advanceRoomDiscussion('agent-a', 1);
+      });
+
+      expect(callUniversalAI).toHaveBeenCalledTimes(2);
+      expect(await speakersInThread()).toEqual(['agent-a', 'agent-b']);
+    });
+
+    it('never gives the mic to a muted voice', async () => {
+      await seedRoom(['agent-b'], ['agent-b']);
+      replyWith((n) => `turn-${n}`);
+
+      const { result } = renderHook(() =>
+        useTestAiActions({ dynamicNodes: [nodeA, nodeB, noteHost], agentConfigs: [cfgA, cfgB] }),
+      );
+
+      await act(async () => {
+        await result.current.advanceRoomDiscussion('agent-a');
+      });
+
+      // 只剩主人一个声音，于是两轮都是他说 —— 关键是被禁言的那位一句都没有
+      expect(callUniversalAI).toHaveBeenCalledTimes(2);
+      expect(await speakersInThread()).toEqual(['agent-a', 'agent-a']);
+    });
+
+    it('refuses to start when every voice is muted', async () => {
+      await seedRoom(['agent-b'], ['agent-a', 'agent-b']);
+      replyWith(() => 'nobody');
+
+      const { result } = renderHook(() =>
+        useTestAiActions({ dynamicNodes: [nodeA, nodeB, noteHost], agentConfigs: [cfgA, cfgB] }),
+      );
+
+      await act(async () => {
+        await result.current.advanceRoomDiscussion('agent-a');
+      });
+
+      expect(callUniversalAI).not.toHaveBeenCalled();
+      expect(await speakersInThread()).toEqual([]);
+    });
+
+    it('stops at the next turn boundary when asked, and waits for the turn in flight', async () => {
+      await seedRoom(['agent-b']);
+      let release!: (text: string) => void;
+      const hanging = new Promise<string>((resolve) => {
+        release = resolve;
+      });
+      let n = 0;
+      vi.mocked(callUniversalAI).mockImplementation(async (opts) => {
+        n += 1;
+        if (n === 1) return hanging;
+        opts.onStreamChunk?.(`turn-${n}`);
+        return `turn-${n}`;
+      });
+
+      const { result } = renderHook(() =>
+        useTestAiActions({ dynamicNodes: [nodeA, nodeB, noteHost], agentConfigs: [cfgA, cfgB] }),
+      );
+
+      let batch!: Promise<void>;
+      // 不套 act：这一批要一直挂到我们 release 为止，套 act 会互相等死
+      batch = result.current.advanceRoomDiscussion('agent-a');
+      await vi.waitFor(() => expect(callUniversalAI).toHaveBeenCalledTimes(1));
+      expect(result.current.roomDiscussion?.hostNodeId).toBe('agent-a');
+
+      // 停止：应该等正在说的那一轮收尾，然后不再开新一轮
+      let stopped = false;
+      let stopPromise!: Promise<void>;
+      await act(async () => {
+        stopPromise = result.current.stopRoomDiscussion().then(() => {
+          stopped = true;
+        });
+      });
+      expect(stopped).toBe(false); // 还在等第一轮
+      await act(async () => {
+        release('turn-1');
+        await batch;
+        await stopPromise;
+      });
+
+      expect(stopped).toBe(true);
+      expect(callUniversalAI).toHaveBeenCalledTimes(1);
+      expect(await speakersInThread()).toEqual(['agent-a']);
+      expect(result.current.roomDiscussion).toBeNull();
+    });
+
+    it('drops a participant whose card was deleted mid-batch', async () => {
+      await seedRoom(['agent-b', 'agent-gone']);
+      replyWith((n) => `turn-${n}`);
+
+      const { result } = renderHook(() =>
+        // agent-gone 的卡不在画布上
+        useTestAiActions({ dynamicNodes: [nodeA, nodeB, noteHost], agentConfigs: [cfgA, cfgB] }),
+      );
+
+      await act(async () => {
+        await result.current.advanceRoomDiscussion('agent-a', 2);
+      });
+
+      // 两轮 × 两个真实在场的声音；不在场的那位从头到尾没有发言
+      expect(callUniversalAI).toHaveBeenCalledTimes(4);
+      expect(await speakersInThread()).toEqual(['agent-a', 'agent-b', 'agent-a', 'agent-b']);
+    });
+
+    it('tells each speaker who they are answering, following the real transcript', async () => {
+      const cfgC: AgentConfig = { id: 'cfg-c', name: 'Owl', role: 'Rc', prompt: 'You are the owl.' };
+      const nodeC: CanvasNode = {
+        id: 'agent-c', canvasId: 'default', type: 'agent', agentConfigId: 'cfg-c', x: 160, y: 0,
+      };
+      await seedRoom(['agent-b', 'agent-c']);
+      replyWith((n) => `reply-${n}`);
+
+      const { result } = renderHook(() =>
+        useTestAiActions({
+          dynamicNodes: [nodeA, nodeB, nodeC, noteHost],
+          agentConfigs: [cfgA, cfgB, cfgC],
+        }),
+      );
+
+      await act(async () => {
+        await result.current.sendPersonaMessage('agent-a', 'what do you two think?');
+      });
+
+      // 每个参与者的 cue 都是"上一位是谁"，且第一位是主人、第二位是第一个参与者
+      const lastTurn = (i: number) => {
+        const messages = (vi.mocked(callUniversalAI).mock.calls[i]![0] as CapturedCall).messages!;
+        expect(messages[messages.length - 1]!.role).toBe('user');
+        return String(messages[messages.length - 1]!.content);
+      };
+      expect(lastTurn(1)).toContain('Previous speaker: Mirror');
+      expect(lastTurn(1)).toContain('reply-1');
+      expect(lastTurn(2)).toContain('Previous speaker: Turtle');
+      expect(lastTurn(2)).toContain('reply-2');
+    });
+
+    it('honours a mute that lands mid-round instead of waiting for the next round', async () => {
+      await seedRoom(['agent-b']);
+      let release!: (text: string) => void;
+      const hanging = new Promise<string>((resolve) => {
+        release = resolve;
+      });
+      let n = 0;
+      vi.mocked(callUniversalAI).mockImplementation(async (opts) => {
+        n += 1;
+        if (n === 1) return hanging;
+        opts.onStreamChunk?.(`turn-${n}`);
+        return `turn-${n}`;
+      });
+
+      const { result } = renderHook(() =>
+        useTestAiActions({ dynamicNodes: [nodeA, nodeB, noteHost], agentConfigs: [cfgA, cfgB] }),
+      );
+
+      const batch = result.current.advanceRoomDiscussion('agent-a', 1);
+      await vi.waitFor(() => expect(callUniversalAI).toHaveBeenCalledTimes(1));
+
+      // 主人还在说的时候把参与者禁言：它这一轮就不该再拿到麦克风
+      const row = await db.canvasPersonaThreads.get('default:agent-a');
+      await db.canvasPersonaThreads.put({ ...row!, mutedNodeIds: ['agent-b'] });
+
+      await act(async () => {
+        release('turn-1');
+        await batch;
+      });
+
+      expect(callUniversalAI).toHaveBeenCalledTimes(1);
+      expect(await speakersInThread()).toEqual(['agent-a']);
+    });
+
+    it('stops a batch when one of its turns fails', async () => {
+      await seedRoom(['agent-b']);
+      let n = 0;
+      vi.mocked(callUniversalAI).mockImplementation(async (opts) => {
+        n += 1;
+        if (n === 2) throw new Error('provider exploded');
+        opts.onStreamChunk?.(`turn-${n}`);
+        return `turn-${n}`;
+      });
+
+      const { result } = renderHook(() =>
+        useTestAiActions({ dynamicNodes: [nodeA, nodeB, noteHost], agentConfigs: [cfgA, cfgB] }),
+      );
+
+      await act(async () => {
+        // 三整轮本应 6 次调用；第二句就炸了，之后不该再打请求
+        await result.current.advanceRoomDiscussion('agent-a', 3);
+      });
+
+      expect(callUniversalAI).toHaveBeenCalledTimes(2);
+      expect(result.current.roomDiscussion).toBeNull();
+    });
+
+    it('refuses to start a second room while one is discussing, and leaves the first running', async () => {
+      await seedRoom(['agent-b']);
+      // 另一个房间：以 agent-b 为主人，agent-a 是它的客人
+      await db.canvasPersonaThreads.put({
+        id: 'default:agent-b',
+        canvasId: 'default',
+        agentNodeId: 'agent-b',
+        messages: [],
+        participantNodeIds: ['agent-a'],
+        mutedNodeIds: [],
+        updatedAt: Date.now(),
+      });
+      let release!: (text: string) => void;
+      const hanging = new Promise<string>((resolve) => {
+        release = resolve;
+      });
+      let n = 0;
+      vi.mocked(callUniversalAI).mockImplementation(async (opts) => {
+        n += 1;
+        if (n === 1) return hanging;
+        opts.onStreamChunk?.(`turn-${n}`);
+        return `turn-${n}`;
+      });
+
+      const { result } = renderHook(() =>
+        useTestAiActions({ dynamicNodes: [nodeA, nodeB, noteHost], agentConfigs: [cfgA, cfgB] }),
+      );
+
+      const batch = result.current.advanceRoomDiscussion('agent-a', 1);
+      await vi.waitFor(() => expect(callUniversalAI).toHaveBeenCalledTimes(1));
+
+      // 另一个房间申请开始：应当被挡下，且不能把第一场讨论弄停
+      await act(async () => {
+        await result.current.advanceRoomDiscussion('agent-b', 1);
+      });
+      expect(callUniversalAI).toHaveBeenCalledTimes(1);
+      expect(result.current.roomDiscussion?.hostNodeId).toBe('agent-a');
+
+      await act(async () => {
+        release('turn-1');
+        await batch;
+      });
+
+      // 第一场照常跑完两轮里的两句；第二场从头到尾没开始
+      expect(callUniversalAI).toHaveBeenCalledTimes(2);
+      const second = await db.canvasPersonaThreads.get('default:agent-b');
+      expect((second?.messages ?? []).filter((m) => m.role === 'assistant')).toHaveLength(0);
+    });
+
+    it('persists the round count on the room and clamps it', async () => {
+      await seedRoom(['agent-b']);
+      const { result } = renderHook(() =>
+        useTestAiActions({ dynamicNodes: [nodeA, nodeB, noteHost], agentConfigs: [cfgA, cfgB] }),
+      );
+
+      await act(async () => {
+        await result.current.setRoomDiscussionRounds('agent-a', 4);
+      });
+      expect((await personaThread('agent-a'))?.roomDiscussionRounds).toBe(4);
+
+      await act(async () => {
+        await result.current.setRoomDiscussionRounds('agent-a', 99);
+      });
+      // 上限收口，且没有把房间的其它设置（名单）写丢
+      const row = await personaThread('agent-a');
+      expect(row?.roomDiscussionRounds).toBe(5);
+      expect(row?.participantNodeIds).toEqual(['agent-b']);
+    });
+
+    it('refuses to run for a turtle-soup host', async () => {
+      const turtleNode: CanvasNode = {
+        id: 'agent-a', canvasId: 'default', type: 'agent',
+        agentConfigId: 'turtle_soup_host', x: 0, y: 0,
+      };
+      const turtle: AgentConfig = {
+        id: 'turtle_soup_host', name: '主持人', role: 'R', prompt: '主持海龟汤游戏。',
+      };
+      await seedRoom(['agent-b']);
+      replyWith(() => 'nope');
+
+      const { result } = renderHook(() =>
+        useTestAiActions({ dynamicNodes: [turtleNode, nodeB, noteHost], agentConfigs: [turtle, cfgB] }),
+      );
+
+      await act(async () => {
+        await result.current.advanceRoomDiscussion('agent-a');
+      });
+
+      expect(callUniversalAI).not.toHaveBeenCalled();
+      expect(await speakersInThread()).toEqual([]);
+    });
+
+    it('keeps the running discussion when the same room is started twice in one tick', async () => {
+      await seedRoom(['agent-b']);
+      let release!: (text: string) => void;
+      const hanging = new Promise<string>((resolve) => {
+        release = resolve;
+      });
+      let n = 0;
+      vi.mocked(callUniversalAI).mockImplementation(async (opts) => {
+        n += 1;
+        if (n === 1) return hanging;
+        opts.onStreamChunk?.(`turn-${n}`);
+        return `turn-${n}`;
+      });
+
+      const { result } = renderHook(() =>
+        useTestAiActions({ dynamicNodes: [nodeA, nodeB, noteHost], agentConfigs: [cfgA, cfgB] }),
+      );
+
+      let first!: Promise<void>;
+      await act(async () => {
+        first = result.current.advanceRoomDiscussion('agent-a', 1);
+        // 同一个 tick 里再点一次（双击/手快）：第二次必须被挡下 ——
+        // 否则后一批会把前一批顶掉，再清掉它的进度，侧栏只剩"开始讨论"，停不下来。
+        await result.current.advanceRoomDiscussion('agent-a', 1);
+      });
+
+      await vi.waitFor(() => expect(callUniversalAI).toHaveBeenCalledTimes(1));
+      // 第一场还在说（它的第一次调用挂着）：给被顶替的批次一点时间露头
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+      });
+      expect(callUniversalAI).toHaveBeenCalledTimes(1);
+      expect(result.current.roomDiscussion?.hostNodeId).toBe('agent-a');
+
+      await act(async () => {
+        release('turn-1');
+        await first;
+      });
+      expect(callUniversalAI).toHaveBeenCalledTimes(2);
+      expect(await speakersInThread()).toEqual(['agent-a', 'agent-b']);
+      expect(result.current.roomDiscussion).toBeNull();
+    });
+
+    it('refuses to start while the host is still answering', async () => {
+      await seedRoom(['agent-b']);
+      let release!: (text: string) => void;
+      const hanging = new Promise<string>((resolve) => {
+        release = resolve;
+      });
+      vi.mocked(callUniversalAI).mockImplementation(async () => hanging);
+
+      const { result } = renderHook(() =>
+        useTestAiActions({ dynamicNodes: [nodeA, nodeB, noteHost], agentConfigs: [cfgA, cfgB] }),
+      );
+
+      const send = result.current.sendPersonaMessage('agent-a', 'what do you think?');
+      await vi.waitFor(() => expect(callUniversalAI).toHaveBeenCalledTimes(1));
+
+      // 主人这一轮还在说：讨论不能另起一条流去写同一条 thread
+      await act(async () => {
+        await result.current.advanceRoomDiscussion('agent-a', 1);
+      });
+      expect(callUniversalAI).toHaveBeenCalledTimes(1);
+      expect(result.current.roomDiscussion).toBeNull();
+
+      await act(async () => {
+        release('answer');
+        await send;
+      });
+    });
+  });
+
+  // 摘抄放上画布：卡片正文里必须同时有摘抄和用户写的想法，
+  // 而且标签走 i18n——中文界面上卡片里不能冒出一行英文 "My note"。
+  describe('extractBookSelectionToCard', () => {
+    const bookNode: CanvasNode = {
+      id: 'book1',
+      canvasId: 'default',
+      type: 'book',
+      x: 0,
+      y: 0,
+      description: 'demo.epub',
+    };
+
+    async function extract(quote: string, note?: string) {
+      const { result } = renderHook(() => useTestAiActions({ dynamicNodes: [bookNode] }));
+      await act(async () => {
+        await result.current.extractBookSelectionToCard('book1', quote, 'Ch1', note);
+      });
+      const nodes = await db.nodes.toArray();
+      const card = nodes.find((node) => node.id !== 'book1');
+      return { card: card ?? null, edges: await db.edges.toArray() };
+    }
+
+    it('把摘抄和想法一起放进卡片正文', async () => {
+      const { card, edges } = await extract('摘抄正文', '这跟我手上的项目对得上');
+      expect(card?.type).toBe('text');
+      expect(card?.content).toBe('摘抄正文\n\nMy note\n这跟我手上的项目对得上');
+      // 想法不是另一个字段：卡片只有一份正文，AI 读到的和用户看到的是同一段。
+      expect(Object.keys(card ?? {})).not.toContain('note');
+      expect(edges).toHaveLength(1);
+      expect(edges[0]).toMatchObject({ from: 'book1', to: card?.id });
+    });
+
+    it('没写想法时卡片正文和以前一模一样', async () => {
+      const { card } = await extract('摘抄正文');
+      expect(card?.content).toBe('摘抄正文');
+    });
+
+    it('标签跟着界面语言走', async () => {
+      await i18n.changeLanguage('zh');
+      try {
+        const { card } = await extract('摘抄正文', '这跟项目对得上');
+        expect(card?.content).toBe('摘抄正文\n\n我的想法\n这跟项目对得上');
+      } finally {
+        await i18n.changeLanguage('en');
+      }
+    });
+
+    it('正文为空时不建卡，哪怕想法有内容', async () => {
+      const { card } = await extract('   ', '只有想法');
+      expect(card).toBeNull();
+    });
+
+    it('来源不是书籍或 AI 卡时什么都不建', async () => {
+      const noteHost: CanvasNode = {
+        id: 'note1',
+        canvasId: 'default',
+        type: 'note',
+        x: 0,
+        y: 0,
+        content: '随便一张卡',
+      };
+      const { result } = renderHook(() => useTestAiActions({ dynamicNodes: [noteHost] }));
+      await act(async () => {
+        await result.current.extractBookSelectionToCard('note1', '摘抄正文', 'Ch1', '想法');
+      });
+      expect(await db.nodes.toArray()).toEqual([]);
+      expect(await db.edges.toArray()).toEqual([]);
     });
   });
 });

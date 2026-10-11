@@ -21,6 +21,17 @@ export type AiSuggestionActionHandlers = {
   onDeleteReject?: (text: string) => void;
 };
 
+/**
+ * 这个扩展把自己的处理器挂在 `editor.storage` 上（见下面的 `addStorage`），
+ * 所以要把这一格声明出来——Tiptap 的 `Storage` 是空的，靠使用方 augment。
+ * 不写这段，读写 `editor.storage.aiSuggestionActions` 的地方全是 TS2339。
+ */
+declare module '@tiptap/core' {
+  interface Storage {
+    aiSuggestionActions: AiSuggestionActionHandlers;
+  }
+}
+
 function labels(editor: Editor): { apply: string; reject: string } {
   const stored = editor.storage.aiSuggestionActions as AiSuggestionActionHandlers | undefined;
   const fallback = essayEditorActionLabels();

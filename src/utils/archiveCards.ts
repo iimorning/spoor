@@ -7,7 +7,7 @@ import { getAmbienceScene } from '../data/ambienceCatalog';
 import i18n from '../i18n';
 import { stampNewCard } from './stampNewCard';
 import { essayBodyMarkdown } from './essayWordCount';
-import { pocketNotePreview, pocketNoteTitle } from './pocketNotes';
+import { isPocketImageNode, pocketItemPreview, pocketNoteTitle } from './pocketNotes';
 
 /** Card types that expose the archive chrome control. */
 export const ARCHIVABLE_NODE_TYPES = new Set([
@@ -32,7 +32,7 @@ export interface ArchiveListItem {
   /** Locale-formatted card date (from node.createdAt or archivedAt). */
   dateLabel: string;
   title: string;
-  /** Full readable body for archive browsing (not a truncated preview). */
+  /** Preview body, cut to roughly what the card can actually show. */
   body: string;
   type: string;
   /** Image data URL when type is image; otherwise null. */
@@ -54,6 +54,19 @@ function firstLineTitle(text: string, maxLen = 72): string {
   const line = text.replace(/\s+/g, ' ').trim();
   if (!line) return '';
   return line.length > maxLen ? `${line.slice(0, maxLen - 1)}…` : line;
+}
+
+/**
+ * 卡片可视区只有 166px 高，几百字以外的内容一律被 overflow 裁掉。
+ * 一本书的 units 拼起来能到几万字，全量交给 react-markdown 纯属白费力气。
+ * 这里只留够铺满卡片的部分；搜索另有 searchText 走全文，不受影响。
+ */
+export const ARCHIVE_PREVIEW_CHARS = 900;
+
+function previewBody(text: string, limit = ARCHIVE_PREVIEW_CHARS): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= limit) return trimmed;
+  return `${trimmed.slice(0, limit).trimEnd()}…`;
 }
 
 function formatArchiveCardDate(ms: number): string {
@@ -79,7 +92,17 @@ export function buildArchiveListItem(entry: ArchivedCard): ArchiveListItem {
   } else if (node.type === 'book') {
     const book = tryParseBookContent(node.content);
     title = book?.title?.trim() || node.description?.trim() || '';
-    body = (book?.units ?? []).map((u) => u.text?.trim() ?? '').filter(Boolean).join('\n\n');
+    // 逐章累加到够铺满卡片就停：一本书几十个 unit，全拼出来只是白费解析力气。
+    const parts: string[] = [];
+    let total = 0;
+    for (const unit of book?.units ?? []) {
+      const text = unit.text?.trim() ?? '';
+      if (!text) continue;
+      parts.push(text);
+      total += text.length;
+      if (total >= ARCHIVE_PREVIEW_CHARS) break;
+    }
+    body = parts.join('\n\n');
   } else if (node.type === 'image') {
     title = node.description?.trim() || '';
     const c = node.content?.trim() ?? '';
@@ -109,9 +132,9 @@ export function buildArchiveListItem(entry: ArchivedCard): ArchiveListItem {
 
   if (!title) title = node.type;
 
+  // 搜索走全文，与卡片上显示多少字无关。
   const searchParts = [
     title,
-    body,
     node.type,
     entry.sourceCanvasName ?? '',
     entry.article ? getCanvasNodeSearchText({ ...node, description: entry.article.title }) : getCanvasNodeSearchText(node),
@@ -124,7 +147,7 @@ export function buildArchiveListItem(entry: ArchivedCard): ArchiveListItem {
     archivedAt: entry.archivedAt,
     dateLabel,
     title,
-    body,
+    body: previewBody(body),
     type: node.type,
     thumbnailUrl,
     searchText: searchParts.join('\n').toLowerCase(),
@@ -153,8 +176,10 @@ export function pocketNodeIdFromArchiveItem(id: string): string {
 }
 
 export function buildPocketArchiveListItem(node: CanvasNode): ArchiveListItem {
-  const body = pocketNotePreview(node.content);
-  const title = pocketNoteTitle(node.content) || i18n.t('pocket.untitled');
+  const photo = isPocketImageNode(node);
+  // 照片没识别出东西时 body 为空，档案库会退回到"无摘要"占位，不会显示半张 base64。
+  const body = pocketItemPreview(node);
+  const title = photo ? i18n.t('pocket.photo') : pocketNoteTitle(node.content) || i18n.t('pocket.untitled');
   const createdAt = node.createdAt ?? 0;
   return {
     id: `${POCKET_ARCHIVE_ID_PREFIX}${node.id}`,
@@ -163,8 +188,11 @@ export function buildPocketArchiveListItem(node: CanvasNode): ArchiveListItem {
     title,
     body,
     type: node.type || 'note',
-    thumbnailUrl: null,
-    searchText: [title, body].join('\n').toLowerCase(),
+    // 照片条目的 data URL 直接当缩略图用：档案库本来就渲染 thumbnailUrl。
+    thumbnailUrl: photo ? node.content ?? null : null,
+    // 识别文本进 searchText，桌面端才能按内容搜到这张照片。
+    // 截一刀：一整页 OCR 可能好几 KB，而它只用于内存里的 includes 比对。
+    searchText: [title, body].join('\n').toLowerCase().slice(0, 2000),
     origin: 'pocket',
   };
 }

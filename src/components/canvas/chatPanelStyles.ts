@@ -10,7 +10,7 @@ export const CHAT_COMPOSER_INPUT_CLASS =
   'w-full cursor-text resize-none bg-transparent px-0.5 font-sans text-[15px] leading-7 tracking-[0.02em] text-[#2c2c28] placeholder:text-[#aaa] focus:outline-none disabled:opacity-50';
 
 /** Match canvas ComposerInlineInput initial height; grows when typing. */
-export const CHAT_COMPOSER_TEXTAREA_CLASS = `${CHAT_COMPOSER_INPUT_CLASS} min-h-[2.75rem] max-h-40 overflow-y-auto`;
+export const CHAT_COMPOSER_TEXTAREA_CLASS = `${CHAT_COMPOSER_INPUT_CLASS} min-h-[2.75rem] max-h-40 overflow-y-auto whitespace-pre-wrap`;
 
 /** Hover-only drag handle outside the bubble; red when visible. */
 export const CHAT_REPLY_DRAG_HANDLE_CLASS =

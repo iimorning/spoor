@@ -3,7 +3,7 @@ import i18n from '../i18n';
 import { db } from '../db';
 import type { AgentConfig } from '../db';
 import { LEGACY_AGENT_PROMPTS, OPTIONAL_SYSTEM_AGENT_IDS, SEEDED_AGENT_IDS, SYSTEM_AGENT_IDS, SYSTEM_AGENT_TUNING, type SystemAgentId } from '../constants/defaultAgents';
-import { cosmosNarrativeKnowledgeFile } from '../constants/agentKnowledge/cosmosNarrativeGrammar';
+import { buildSystemAgentRowForLang } from '../utils/seedAgentRows';
 import { pruneRetiredCosmosThemeCards } from '../services/spawnCosmosCanvasTemplate';
 import { migrateArticlesToEssayNodes } from '../utils/migrateArticlesToEssayNodes';
 import { stampNewCards } from '../utils/stampNewCard';
@@ -27,8 +27,6 @@ import { ensureAmbienceNodeForCanvas } from '../utils/ensureAmbienceNode';
 import { ensureDefaultAskWorkZone } from '../utils/seedDefaultAskWorkZone';
 import { applyOnboardingWorkroomLayout } from '../utils/onboardingWorkroomLayout';
 import { withoutSyncHooks } from '../utils/syncHookGuard';
-
-const COSMOS_AGENT_IDS = new Set<SystemAgentId>(['cosmos_weaver', 'character_atelier']);
 
 /** 仍在使用旧版种子文案时，写入当前语言的默认提示词（不覆盖用户自定义）。 */
 async function migrateLegacyAgentPrompts() {
@@ -56,19 +54,9 @@ async function retireUnusedOptionalSystemAgents(): Promise<void> {
   }
 }
 
-function buildSystemAgentRow(id: SystemAgentId): AgentConfig {
-  const row: AgentConfig = {
-    id,
-    name: i18n.t(`agents.defaults.${id}.name`),
-    role: i18n.t(`agents.defaults.${id}.role`),
-    prompt: i18n.t(`agents.defaults.${id}.prompt`),
-    ...SYSTEM_AGENT_TUNING[id],
-  };
-  if (COSMOS_AGENT_IDS.has(id)) {
-    row.knowledgeMarkdownFiles = [cosmosNarrativeKnowledgeFile(i18n.language)];
-  }
-  return row;
-}
+// 构造逻辑挪到 utils/seedAgentRows：登录合并时要按语言重建种子来判定"还是不是出厂的"，
+// 两边共用一份，才不会各自漂移。
+const buildSystemAgentRow = (id: SystemAgentId): AgentConfig => buildSystemAgentRowForLang(id, i18n.language);
 
 function isOfficialDefaultStarterNode(node: {
   id: string;

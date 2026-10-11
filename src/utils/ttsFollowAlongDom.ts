@@ -21,14 +21,21 @@ export function compactTtsText(s: string): string {
 
 type CompactHit = { node: Text; offset: number };
 
-function collectTextNodeCompactMap(root: Node): { compact: string; map: CompactHit[] } {
+/**
+ * 把子树里的文本拼成「去掉空白与 markdown 符号」的形式，并记住每个字符来自哪个
+ * 文本节点的哪个偏移。用于把一段规范化过的文本（TTS 句子、书籍摘抄）映射回 DOM。
+ *
+ * `script` / `style` 之外还排除了 `[data-book-annotation]`：那是 AI 伴读挂在句子
+ * 末尾的脚注，属于界面而不是书里的字，混进来会把「跳回原文」的定位顶偏。
+ */
+export function collectTextNodeCompactMap(root: Node): { compact: string; map: CompactHit[] } {
   const map: CompactHit[] = [];
   let compact = '';
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   let current: Node | null;
   while ((current = walker.nextNode())) {
     const text = current as Text;
-    if (text.parentElement?.closest('script, style')) continue;
+    if (text.parentElement?.closest('script, style, [data-book-annotation]')) continue;
     const value = text.data;
     for (let i = 0; i < value.length; i++) {
       const ch = value[i]!;

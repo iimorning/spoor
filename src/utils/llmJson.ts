@@ -94,6 +94,61 @@ function stripCodeFences(raw: string): string {
 }
 
 /**
+ * 把 JSON 字符串字面量内部的裸控制字符转义掉。
+ *
+ * 模型经常把段落分隔写成真换行，而不是 `\n` 两个字符：
+ *   {"reply":"第一段。
+ *
+ * 第二段。"}
+ * 这在 JSON 规范里是非法的，`JSON.parse` 会直接抛错，调用方只能把整段原文
+ * 当成回复吐回给用户——气泡里就会显示一串带引号的 JSON。
+ *
+ * 已经写成 `\n` 的保持原样（反斜杠本身不属于控制字符，不动它）。
+ */
+function escapeControlCharsInsideStrings(raw: string): string {
+  let out = '';
+  let inString = false;
+  let escape = false;
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i];
+    if (escape) {
+      out += c;
+      escape = false;
+      continue;
+    }
+    if (inString) {
+      if (c === '\\') {
+        out += c;
+        escape = true;
+        continue;
+      }
+      if (c === '"') {
+        inString = false;
+        out += c;
+        continue;
+      }
+      if (c === '\n') {
+        out += '\\n';
+        continue;
+      }
+      if (c === '\r') {
+        out += '\\r';
+        continue;
+      }
+      if (c === '\t') {
+        out += '\\t';
+        continue;
+      }
+      out += c;
+      continue;
+    }
+    if (c === '"') inString = true;
+    out += c;
+  }
+  return out;
+}
+
+/**
  * Parse JSON from an LLM response; throws SyntaxError if nothing worked.
  */
 export function parseLenientLlmJson(text: string): unknown {
@@ -103,7 +158,8 @@ export function parseLenientLlmJson(text: string): unknown {
   if (frag && frag !== stripped) attempts.push(frag);
 
   for (const base of attempts) {
-    const variants = [base, removeTrailingCommas(base)];
+    // 裸换行先修掉再试；修过的版本放在最后，避免掩盖本来就能过的正常 JSON。
+    const variants = [base, removeTrailingCommas(base), escapeControlCharsInsideStrings(base)];
     for (const v of variants) {
       try {
         return JSON.parse(v);

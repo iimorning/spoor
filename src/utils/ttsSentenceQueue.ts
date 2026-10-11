@@ -9,6 +9,8 @@ export type TtsQueueConfig = {
   model?: string;
   voiceId?: string;
   language?: string;
+  /** 顺带把合成出来的音频留一份（试听缓存用），见 {@link MinimaxTtsStream.takeRecordedWavBytes}。 */
+  recordAudio?: boolean;
   onSpeakingChange?: (speaking: boolean) => void;
   /** Current sentence whose audio is playing; `null` when idle. */
   onActiveSentenceChange?: (sentence: string | null) => void;
@@ -98,6 +100,7 @@ export function createTtsSentenceQueue(config: TtsQueueConfig) {
       model: config.model,
       voiceId: config.voiceId,
       language: config.language,
+      recordAudio: config.recordAudio,
       onSpeakingChange: setSpeaking,
       onActiveTextChange: config.onActiveSentenceChange,
       onError: config.onError,
@@ -185,5 +188,44 @@ export function createTtsSentenceQueue(config: TtsQueueConfig) {
       setSpeaking(false);
       config.onActiveSentenceChange?.(null);
     },
+    /** 开了 recordAudio 才有内容（WAV 字节）；取走后不重复给（缓存写一次就够）。 */
+    takeRecordedWavBytes(): Uint8Array | null {
+      if (!stream) return null;
+      try {
+        return stream.takeRecordedWavBytes?.() ?? null;
+      } catch {
+        return null;
+      }
+    },
   };
+}
+
+type WholeTextQueue = Pick<
+  ReturnType<typeof createTtsSentenceQueue>,
+  'warmup' | 'pushAccumulatedText' | 'flush' | 'waitUntilIdle' | 'stop'
+>;
+
+/**
+ * 把**一整段已经写完的文本**念完：喂进去 → 冲掉结尾那半句 → 等最后一句放完 → 关流。
+ *
+ * 这几步必须齐全，少一步都会出问题：
+ * - 没有 flush，结尾没有终止标点的半句永远不会念（它还留在 carry 里），
+ *   而且流收不到"没有更多文本了"的信号；
+ * - 没有 stop，WebSocket 会一直等着下一句，空闲超时后（约 120 秒）弹出合成失败。
+ *
+ * 返回是否正常念完；`isStillCurrent` 用来判断这次朗读是否已被"停止"或新的一次朗读接管，
+ * 被接管时不再关流（那个队列已经不归它管了）。
+ */
+export async function speakWholeText(
+  tts: WholeTextQueue,
+  text: string,
+  options?: { isStillCurrent?: () => boolean },
+): Promise<boolean> {
+  tts.warmup();
+  tts.pushAccumulatedText(text);
+  tts.flush();
+  await tts.waitUntilIdle();
+  if (options?.isStillCurrent && !options.isStillCurrent()) return false;
+  tts.stop();
+  return true;
 }

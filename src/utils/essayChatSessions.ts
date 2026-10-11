@@ -1,10 +1,9 @@
 import type { EssayChatMessage, EssayChatSession } from '../db';
 import {
   buildChatSession,
+  buildRestoreChatSessionPlan,
   chatSessionPreview,
-  findChatSession,
   prependChatArchive,
-  removeChatSession,
   type ChatSessionLike,
 } from './chatSessionArchive';
 
@@ -34,20 +33,7 @@ export function restoreEssayChatSessionPlan(
   nextMessages: EssayChatMessage[];
   nextArchive: EssayChatSession[];
 } | null {
-  const { archive: without, session } = removeChatSession(archive, sessionId);
-  if (!session) return null;
-  const nextArchive =
-    current.length > 0
-      ? prependChatArchive(without, buildEssayChatSession(current))
-      : without;
-  return { nextMessages: session.messages, nextArchive };
-}
-
-export function findEssayChatSession(
-  archive: EssayChatSession[] | undefined,
-  sessionId: string,
-): EssayChatSession | undefined {
-  return findChatSession(archive, sessionId);
+  return buildRestoreChatSessionPlan(current, archive, sessionId, 'ecs');
 }
 
 export type { ChatSessionLike };

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { renderHook, act, screen } from '@testing-library/react';
+import { renderHook, act, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import React, { useRef } from 'react';
 import { AppDialogProvider } from '../../src/components/AppDialogProvider';
@@ -17,7 +17,9 @@ const asrSession = {
 // Use `any` for the mock signature so we can pass options through the vi.mock wrapper
 // without forcing a public type for the test-only mock. Production types are validated
 // by tests of the real implementation; this mock just needs to round-trip its args.
-const openVolcAsrSession = vi.fn((_creds?: unknown, _options?: unknown) => asrSession);
+// 真实的 openVolcAsrSession 是 async（返回 Promise<session>），替身也得是：
+// 同步返回的话，下面那次 mockImplementationOnce 覆写成 Promise 就对不上签名。
+const openVolcAsrSession = vi.fn(async (_creds?: unknown, _options?: unknown) => asrSession);
 const hasVolcAsrCredentials = vi.fn(() => true);
 
 const setStreamingAiNodeIdMock = vi.fn();
@@ -104,13 +106,27 @@ vi.mock('../../src/services/minimaxTts', () => ({
   synthesizeMinimaxSpeech: vi.fn(async () => new Blob()),
 }));
 vi.mock('../../src/services/minimaxTtsStream', () => ({
-  openMinimaxTtsStream: vi.fn(async () => ({
+  // 记下参数是为了断言"这条流是按谁的音色开的"。
+  openMinimaxTtsStream: vi.fn(async (_options?: unknown) => defaultTtsStream()),
+}));
+
+/** 一条"立刻放完"的假流。用例要模拟播放时长/录音时用 mockImplementationOnce 覆盖。 */
+function defaultTtsStream(overrides?: Partial<{
+  enqueueText: () => void;
+  finish: () => void;
+  waitUntilIdle: () => Promise<void>;
+  stop: () => void;
+  takeRecordedWavBytes: () => Uint8Array | null;
+}>) {
+  return {
     enqueueText: vi.fn(),
     finish: vi.fn(),
     waitUntilIdle: vi.fn(async () => undefined),
     stop: vi.fn(),
-  })),
-}));
+    takeRecordedWavBytes: vi.fn(() => null),
+    ...overrides,
+  };
+}
 
 import { openMinimaxTtsStream } from '../../src/services/minimaxTtsStream';
 
@@ -128,6 +144,8 @@ beforeEach(() => {
   callUniversalAIMock.mockClear();
   playVoiceCueMock.mockClear();
   vi.mocked(openMinimaxTtsStream).mockClear();
+  // mockClear 不清实现：每个用例都从"立刻放完"的默认流开始，免得上一个用例的覆盖漏过来。
+  vi.mocked(openMinimaxTtsStream).mockImplementation(async () => defaultTtsStream());
   dbNodeStore.clear();
   dbNodesAddMock.mockClear();
   dbNodesUpdateMock.mockClear();
@@ -137,6 +155,7 @@ beforeEach(() => {
 async function renderVoiceHook(options?: {
   editingNodeId?: string | null;
   targetAskCardId?: string | null;
+  voiceInputMode?: 'handsfree' | 'dictation';
   onTranscript?: (t: string, askId: string) => void;
   onCommit?: (t: string, askId: string) => void;
   onOpenLogin?: () => void;
@@ -158,6 +177,7 @@ async function renderVoiceHook(options?: {
           provider: 'openai' as const,
           volcAsrApiKey: 'asr',
           minimaxApiKey: 'm',
+          voiceInputMode: options?.voiceInputMode,
         } as any,
         activeCanvasId: 'c1',
         transformRef: { current: { x: 0, y: 0, scale: 1 } } as any,
@@ -195,7 +215,7 @@ describe('useVoiceWritingMode', () => {
     expect(openVolcAsrSession).toHaveBeenCalledTimes(1);
   });
 
-  it.skip('offers sign-in when ASR keys are missing and the user can log in', async () => {
+  it('offers sign-in when ASR keys are missing and the user can log in', async () => {
     hasVolcAsrCredentials.mockReturnValue(false);
     const onOpenLogin = vi.fn();
     const user = userEvent.setup();
@@ -209,7 +229,7 @@ describe('useVoiceWritingMode', () => {
     expect(onOpenLogin).toHaveBeenCalledTimes(1);
   });
 
-  it.skip('does not open login when the guest dismisses the missing-keys dialog', async () => {
+  it('does not open login when the guest dismisses the missing-keys dialog', async () => {
     hasVolcAsrCredentials.mockReturnValue(false);
     const onOpenLogin = vi.fn();
     const user = userEvent.setup();
@@ -250,7 +270,7 @@ describe('useVoiceWritingMode', () => {
     let resolveAsr: (session: typeof asrSession) => void = () => undefined;
     openVolcAsrSession.mockImplementationOnce(
       () =>
-        new Promise((resolve) => {
+        new Promise<typeof asrSession>((resolve) => {
           resolveAsr = resolve;
         }),
     );
@@ -290,7 +310,7 @@ describe('useVoiceWritingMode', () => {
 
   // 守护 bf6112f 的"ASR 与人工编辑共存"契约：用户编辑时 ASR 应当让位，提交时取用户文本。
   it('用户编辑便签时，ASR 部分结果不覆盖用户文本；mic-off 提交的是用户文本（不是 ASR 最新片段）', async () => {
-    const { result, rerender } = await renderVoiceHook({ editingNodeId: null });
+    const { result, rerender } = await renderVoiceHook({ editingNodeId: null, voiceInputMode: 'handsfree' });
 
     // 1) 启动语音模式 —— 创建 user note（add 返回 id）并打开 ASR 会话。
     await act(async () => {
@@ -354,7 +374,7 @@ describe('useVoiceWritingMode', () => {
 
   // 配套守护：用户没在编辑时，ASR 正常推进，提交文本来自 ASR。
   it('用户未编辑便签时，ASR 部分结果正常写库；mic-off 提交的是 ASR 当前累积文本', async () => {
-    const { result } = await renderVoiceHook({ editingNodeId: null });
+    const { result } = await renderVoiceHook({ editingNodeId: null, voiceInputMode: 'handsfree' });
     await act(async () => {
       result.current.toggleVoiceMode();
       await Promise.resolve();
@@ -422,6 +442,7 @@ describe('useVoiceWritingMode', () => {
     const onCommit = vi.fn();
     const { result } = await renderVoiceHook({
       targetAskCardId: 'ask-1',
+      voiceInputMode: 'handsfree',
       onTranscript,
       onCommit,
     });
@@ -483,6 +504,7 @@ describe('useVoiceWritingMode', () => {
     const onCommit = vi.fn();
     const { result } = await renderVoiceHook({
       targetAskCardId: 'ask-1',
+      voiceInputMode: 'handsfree',
       onTranscript,
       onCommit,
     });
@@ -518,6 +540,7 @@ describe('useVoiceWritingMode', () => {
     const onCommit = vi.fn();
     const { result } = await renderVoiceHook({
       targetAskCardId: 'ask-1',
+      voiceInputMode: 'handsfree',
       onTranscript,
       onCommit,
     });
@@ -549,10 +572,120 @@ describe('useVoiceWritingMode', () => {
     expect(callUniversalAIMock.mock.calls.length).toBe(callsBefore);
   });
 
+  it('转写模式：1.5s 静默不会 onCommit，文字留在输入框', async () => {
+    const onTranscript = vi.fn();
+    const onCommit = vi.fn();
+    const { result } = await renderVoiceHook({
+      targetAskCardId: 'ask-1',
+      voiceInputMode: 'dictation',
+      onTranscript,
+      onCommit,
+    });
+    await act(async () => {
+      result.current.toggleVoiceMode();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const asrOpts = openVolcAsrSession.mock.calls[0]?.[1] as {
+      onPartial?: (text: string) => void;
+    };
+    await act(async () => {
+      asrOpts.onPartial?.('我在 Redis 上面看到一个帖子');
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      await Promise.resolve();
+    });
+    expect(onTranscript).toHaveBeenCalledWith('我在 Redis 上面看到一个帖子', 'ask-1');
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 1600));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(onCommit).not.toHaveBeenCalled();
+    expect(result.current.voiceModeActive).toBe(true);
+    expect(result.current.voicePhase).toBe('listening');
+  });
+
+  it('转写模式：再点麦克风结束听写但不发送，进入 draft', async () => {
+    const onTranscript = vi.fn();
+    const onCommit = vi.fn();
+    const { result } = await renderVoiceHook({
+      targetAskCardId: 'ask-1',
+      voiceInputMode: 'dictation',
+      onTranscript,
+      onCommit,
+    });
+    await act(async () => {
+      result.current.toggleVoiceMode();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const asrOpts = openVolcAsrSession.mock.calls[0]?.[1] as {
+      onPartial?: (text: string) => void;
+    };
+    await act(async () => {
+      asrOpts.onPartial?.('这段先改再发');
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      result.current.toggleVoiceMode();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(onCommit).not.toHaveBeenCalled();
+    expect(result.current.voiceModeActive).toBe(true);
+    expect(result.current.voicePhase).toBe('draft');
+  });
+
+  it('转写模式：草稿里再点麦克风退出语音，不发送', async () => {
+    const onCommit = vi.fn();
+    const { result } = await renderVoiceHook({
+      targetAskCardId: 'ask-1',
+      voiceInputMode: 'dictation',
+      onCommit,
+    });
+    await act(async () => {
+      result.current.toggleVoiceMode();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const asrOpts = openVolcAsrSession.mock.calls[0]?.[1] as {
+      onPartial?: (text: string) => void;
+    };
+    await act(async () => {
+      asrOpts.onPartial?.('这段先改再发');
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      result.current.toggleVoiceMode();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.voicePhase).toBe('draft');
+    await act(async () => {
+      result.current.toggleVoiceMode();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(onCommit).not.toHaveBeenCalled();
+    await waitFor(() => {
+      expect(result.current.voiceModeActive).toBe(false);
+    });
+    expect(result.current.voicePhase).toBe('idle');
+  });
+
   it('stopTts 清掉挂着的提交：用户说了一段 → 点 stop → 静默定时器不再触发 onCommit', async () => {
     const onCommit = vi.fn();
     const { result } = await renderVoiceHook({
       targetAskCardId: 'ask-1',
+      voiceInputMode: 'handsfree',
       onCommit,
     });
     await act(async () => {
@@ -675,6 +808,7 @@ describe('useVoiceWritingMode', () => {
       const onCommit = vi.fn();
       const { result } = await renderVoiceHook({
         targetAskCardId: 'ask-1',
+        voiceInputMode: 'handsfree',
         onCommit,
       });
       await act(async () => {
@@ -724,5 +858,237 @@ describe('useVoiceWritingMode', () => {
       // rollbackOnStartFailure path → no cue, just the alert.
       expect(playVoiceCueMock).not.toHaveBeenCalled();
     });
+  });
+});
+
+// 会话朗读按发言人换音色：房间里几个角色各念各的，划线跟着正在念的那条回复走。
+describe('useVoiceWritingMode · 会话朗读的发言人音色', () => {
+  type StreamOptions = {
+    voiceId?: string;
+    onActiveTextChange?: (sentence: string | null) => void;
+  };
+  const streamAt = (i: number) =>
+    vi.mocked(openMinimaxTtsStream).mock.calls[i]?.[0] as StreamOptions | undefined;
+
+  async function startVoice() {
+    const rendered = await renderVoiceHook({ targetAskCardId: 'ask-1' });
+    await act(async () => {
+      rendered.result.current.toggleVoiceMode();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    return rendered;
+  }
+
+  it('markThinking 就按这个角色的音色开流（回复卡还没出现，也不能用错声音）', async () => {
+    const { result } = await startVoice();
+    await act(async () => {
+      result.current.markThinking('female-yujie');
+      await Promise.resolve();
+    });
+    await act(async () => {
+      result.current.pushTtsChunk('reply-1', '第一句。', 'female-yujie');
+      await Promise.resolve();
+    });
+    // 热好的那条流被这条回复认领，不另开一条
+    expect(openMinimaxTtsStream).toHaveBeenCalledTimes(1);
+    expect(streamAt(0)?.voiceId).toBe('female-yujie');
+  });
+
+  it('划线：回复卡 id 后到也能点亮（不再被建队列时捕获的 null 吃掉）', async () => {
+    const { result } = await startVoice();
+    await act(async () => {
+      result.current.markThinking();
+      result.current.pushTtsChunk('reply-1', '第一句。第二句。');
+      await Promise.resolve();
+    });
+    await act(async () => {
+      streamAt(0)?.onActiveTextChange?.('第一句。');
+      await Promise.resolve();
+    });
+    expect(result.current.ttsHighlight).toEqual({ nodeId: 'reply-1', sentence: '第一句。' });
+  });
+
+  it('房间里主人答完参与者接话：一条一条念，各用各的音色，划线跟着换人', async () => {
+    const { result } = await startVoice();
+    await act(async () => {
+      result.current.markThinking('Chinese (Mandarin)_Gentleman');
+      result.current.pushTtsChunk('reply-host', '主人先说。', 'Chinese (Mandarin)_Gentleman');
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      result.current.pushTtsChunk('reply-peer', '参与者接话。', 'female-yujie');
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    // 换人就换流：第二位的流按他自己的音色开
+    expect(openMinimaxTtsStream).toHaveBeenCalledTimes(2);
+    expect(streamAt(0)?.voiceId).toBe('Chinese (Mandarin)_Gentleman');
+    expect(streamAt(1)?.voiceId).toBe('female-yujie');
+    await act(async () => {
+      streamAt(1)?.onActiveTextChange?.('参与者接话。');
+      await Promise.resolve();
+    });
+    expect(result.current.ttsHighlight).toEqual({ nodeId: 'reply-peer', sentence: '参与者接话。' });
+  });
+
+  it('收尾：最后一位念完就清掉划线、重新开麦', async () => {
+    // 免提模式才"念完继续听"；转写模式念完就是退出语音模式（既有行为）。
+    const { result } = await renderVoiceHook({
+      targetAskCardId: 'ask-1',
+      voiceInputMode: 'handsfree',
+    });
+    await act(async () => {
+      result.current.toggleVoiceMode();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const asrSessionsBefore = openVolcAsrSession.mock.calls.length;
+    await act(async () => {
+      result.current.markThinking('female-yujie');
+      result.current.pushTtsChunk('reply-1', '你好。', 'female-yujie');
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await result.current.endTtsReply('reply-1', '你好。');
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.ttsHighlight).toBeNull();
+    expect(result.current.voiceModeActive).toBe(true);
+    expect(openVolcAsrSession.mock.calls.length).toBeGreaterThan(asrSessionsBefore);
+  });
+
+  it('手动朗读（喇叭）依旧按角色音色念', async () => {
+    const { result } = await startVoice();
+    await act(async () => {
+      await result.current.speakMessage('m2', '第一句。第二句。', 'female-yujie');
+      await Promise.resolve();
+    });
+    expect(streamAt(0)?.voiceId).toBe('female-yujie');
+  });
+});
+
+describe('useVoiceWritingMode · 念完之后语音模式还在', () => {
+  const streamAt = (i: number) =>
+    vi.mocked(openMinimaxTtsStream).mock.calls[i]?.[0] as
+      | { voiceId?: string; recordAudio?: boolean }
+      | undefined;
+
+  async function startVoice(voiceInputMode: 'handsfree' | 'dictation' = 'handsfree') {
+    const rendered = await renderVoiceHook({ targetAskCardId: 'ask-1', voiceInputMode });
+    await act(async () => {
+      rendered.result.current.toggleVoiceMode();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    return rendered;
+  }
+
+  it('转写模式：一轮念完不退出语音模式，直接接着听（回归）', async () => {
+    const { result } = await startVoice('dictation');
+    await act(async () => {
+      result.current.markThinking('female-yujie');
+      result.current.pushTtsChunk('reply-1', '我先说。', 'female-yujie');
+      await Promise.resolve();
+    });
+    const asrBefore = openVolcAsrSession.mock.calls.length;
+    await act(async () => {
+      await result.current.endTtsReply('reply-1', '我先说。');
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    // 以前这里会 stopVoiceMode()，房间里的角色挨个说完就被踢出语音模式
+    expect(result.current.voiceModeActive).toBe(true);
+    expect(result.current.voicePhase).not.toBe('idle');
+    expect(openVolcAsrSession.mock.calls.length).toBeGreaterThan(asrBefore);
+  });
+
+  it('房间里三个人依次念完：语音模式还在，三条流按各自的音色、按说话顺序开', async () => {
+    const { result } = await startVoice();
+    await act(async () => {
+      result.current.markThinking('Chinese (Mandarin)_Gentleman');
+      result.current.pushTtsChunk('reply-host', '主人先说。', 'Chinese (Mandarin)_Gentleman');
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      result.current.pushTtsChunk('reply-peer-1', '甲接话。', 'female-yujie');
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      result.current.pushTtsChunk('reply-peer-2', '乙也说话。', 'male-qn-badao');
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await result.current.endTtsReply('reply-peer-2', '乙也说话。');
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(streamAt(0)?.voiceId).toBe('Chinese (Mandarin)_Gentleman');
+    expect(streamAt(1)?.voiceId).toBe('female-yujie');
+    expect(streamAt(2)?.voiceId).toBe('male-qn-badao');
+    expect(result.current.voiceModeActive).toBe(true);
+  });
+
+  it('前一位还在放音时，下一位的流不会同时开（一条接一条）', async () => {
+    const { result } = await startVoice();
+    let releaseFirst = () => {};
+    const firstPlayback = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let opened = 0;
+    vi.mocked(openMinimaxTtsStream).mockImplementation(async () => {
+      opened += 1;
+      return defaultTtsStream(
+        opened === 1 ? { waitUntilIdle: () => firstPlayback } : undefined,
+      );
+    });
+
+    await act(async () => {
+      result.current.markThinking('Chinese (Mandarin)_Gentleman');
+      result.current.pushTtsChunk('reply-host', '主人先说。', 'Chinese (Mandarin)_Gentleman');
+      await Promise.resolve();
+    });
+    await act(async () => {
+      // 第二位开口 = 上一位收口，但上一位的音频还在放
+      result.current.pushTtsChunk('reply-peer', '甲接话。', 'female-yujie');
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    // 抢跑就会在这里看到第二条流；实际上要等第一条放完
+    expect(openMinimaxTtsStream).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      releaseFirst();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(openMinimaxTtsStream).toHaveBeenCalledTimes(2);
+    expect(streamAt(1)?.voiceId).toBe('female-yujie');
+  });
+
+  it('没开录音的日常朗读不会顺手录（不留内存）', async () => {
+    const { result } = await startVoice();
+    await act(async () => {
+      result.current.markThinking('female-yujie');
+      result.current.pushTtsChunk('reply-1', '你好。', 'female-yujie');
+      await Promise.resolve();
+    });
+    expect(streamAt(0)?.recordAudio).toBeUndefined();
   });
 });

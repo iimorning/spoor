@@ -5,6 +5,22 @@ export function edgeLineGeomEqual(a: EdgeLineGeom | undefined, b: EdgeLineGeom):
   return a != null && a.x1 === b.x1 && a.y1 === b.y1 && a.x2 === b.x2 && a.y2 === b.y2;
 }
 
+/**
+ * 这些 <line> 要不要重新写一遍几何。
+ *
+ * 只比几何是不够的：切画布/换数据会让 React 把 <g>/<line> 换成新的空元素，而几何缓存活在
+ * hook 的 effect 里、跨挂载还在，于是旧几何一比就"相等"、跳过写入 —— 新元素没有
+ * x1/y1/x2/y2，线就是隐形的（拖动卡片让几何变了才恢复）。所以元素换了也必须重写。
+ */
+export function edgeLineNeedsWrite(
+  cached: { geom: EdgeLineGeom; line: SVGLineElement | null } | undefined,
+  line: SVGLineElement | null,
+  geom: EdgeLineGeom,
+): boolean {
+  if (!cached) return true;
+  return cached.line !== line || !edgeLineGeomEqual(cached.geom, geom);
+}
+
 export function writeSvgLineGeom(line: SVGLineElement, geom: EdgeLineGeom): void {
   line.setAttribute('x1', String(geom.x1));
   line.setAttribute('y1', String(geom.y1));

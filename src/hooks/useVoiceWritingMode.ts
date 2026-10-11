@@ -5,6 +5,7 @@ import { useAppDialog } from '../components/AppDialogProvider';
 import {
   MINIMAX_DEFAULT_TTS_MODEL,
   VOLC_ASR_DEFAULT_RESOURCE_ID,
+  resolveVoiceInputMode,
 } from '../constants/voiceWriting';
 import { db } from '../db';
 import { stampNewCard } from '../utils/stampNewCard';
@@ -29,7 +30,7 @@ import { clipImageSourceNote } from '../utils/canvasContextImages';
 import { runCanvasStreamingAiCall } from '../utils/canvasStreamingAi';
 import { combineSystemParts, getLocaleDirective } from '../utils/aiI18n';
 import { spoorLlmSessionId } from '../utils/openRouterPromptCache';
-import { createTtsSentenceQueue } from '../utils/ttsSentenceQueue';
+import { createTtsSentenceQueue, speakWholeText } from '../utils/ttsSentenceQueue';
 import { playVoiceCue } from '../utils/voiceCue';
 import { parseVoiceDrawIntent } from '../utils/voiceDrawIntent';
 import { inferImageOrientation } from '../utils/imageOrientation';
@@ -41,7 +42,26 @@ import { spokenFallbackFromWritten } from '../utils/voiceSpokenBrief';
 import { visibleAiReplyText } from '../utils/visibleAiReply';
 import type { CanvasTransform } from './useCanvasInteraction';
 
-export type VoicePhase = 'idle' | 'listening' | 'thinking' | 'speaking';
+export type VoicePhase = 'idle' | 'listening' | 'draft' | 'thinking' | 'speaking';
+
+/**
+ * 会话朗读播放列表里的一条：谁在说、用什么音色、说到哪了。
+ *
+ * 一个发言人一条队列（一个队列 = 一条 MiniMax 流 = 一个音色），按发言顺序串着念：
+ * 房间里主人答完、参与者接话时，几个人各用自己的声音，而且不会同时出声。
+ */
+type SessionSpeechItem = {
+  /** 回复卡 id。`''` 是 markThinking 预热出来的空位，等这轮的第一条回复认领它。 */
+  messageId: string;
+  voiceId?: string;
+  /** 这个发言人已经流出来的可见文本（累积）。 */
+  text: string;
+  /** 话已经说完：可以 flush 收尾了。 */
+  complete: boolean;
+  /** 队列。预热或轮到它时才建 —— 空转太久的流会被服务端判超时。 */
+  queue: ReturnType<typeof createTtsSentenceQueue> | null;
+  played: boolean;
+};
 
 type UseVoiceWritingModeParams = {
   aiConfig: AIConfig;
@@ -105,6 +125,35 @@ export function useVoiceWritingMode({
   const micRef = useRef<MicCapture | null>(null);
   const asrRef = useRef<VolcAsrSession | null>(null);
   const ttsRef = useRef<ReturnType<typeof createTtsSentenceQueue> | null>(null);
+  /** 手动朗读（侧栏/卡片上的喇叭）专用的队列，和语音会话那个互不干扰。 */
+  const manualTtsRef = useRef<ReturnType<typeof createTtsSentenceQueue> | null>(null);
+  /**
+   * 会话朗读的播放列表：一个发言人一条队列，按发言顺序串着念。同一时刻只有一条流在放，
+   * 换人就是停掉上一条、用新音色开一条（所以房间里几个角色的声音能分开）。
+   */
+  const sessionSpeechRef = useRef<SessionSpeechItem[]>([]);
+  /** 正在跑的播放循环 + 它属于哪一代。停止朗读会把代号推进，旧循环自己退场。 */
+  const sessionPumpRef = useRef<{ gen: number; promise: Promise<void> } | null>(null);
+  const sessionSpeechGenRef = useRef(0);
+  /**
+   * 丢掉整条播放列表（停止朗读 / 会话结束）。流也一并停掉，别留着占用连接。
+   * 代号先推进：还在等音频的旧播放循环据此知道这一趟已经不算数了。
+   */
+  const clearSessionSpeech = useCallback(() => {
+    sessionSpeechGenRef.current += 1;
+    for (const item of sessionSpeechRef.current) {
+      item.played = true;
+      const queue = item.queue;
+      item.queue = null;
+      try {
+        queue?.stop();
+      } catch {
+        /* ignore */
+      }
+    }
+    sessionSpeechRef.current.length = 0;
+  }, []);
+  const [manualSpeechMessageId, setManualSpeechMessageId] = useState<string | null>(null);
   /** Card to highlight while TTS plays; empty during thinking fillers. */
   const ttsHighlightNodeIdRef = useRef<string | null>(null);
   const handlingUtteranceRef = useRef(false);
@@ -120,6 +169,8 @@ export function useVoiceWritingMode({
   // Synchronous gate: voiceModeActive is React state and lags behind ref writes by one tick,
   // so a fast double-click observes the same `false` in both closures and would launch two
   // sessions. `startingRef` is a ref so the second click sees `true` immediately.
+  const voiceInputModeRef = useRef(resolveVoiceInputMode(aiConfig.voiceInputMode));
+  voiceInputModeRef.current = resolveVoiceInputMode(aiConfig.voiceInputMode);
   const startingRef = useRef(false);
 
   const setPhase = (p: VoicePhase) => {
@@ -134,6 +185,7 @@ export function useVoiceWritingMode({
     // Stop the TTS instance we currently own *before* awaiting mic shutdown.
     // Mic stop can lag; if we wait and then stop `ttsRef.current`, we would
     // kill a reply stream that started while we were still tearing down.
+    clearSessionSpeech();
     const ttsToStop = ttsRef.current;
     ttsRef.current = null;
     ttsHighlightNodeIdRef.current = null;
@@ -185,6 +237,8 @@ export function useVoiceWritingMode({
   }
 
   const stopVoiceMode = useCallback(() => {
+    // Draft already played the off-cue when the mic stopped.
+    const playOff = voicePhaseRef.current !== 'draft';
     activeRef.current = false;
     pausedListeningRef.current = true;
     handlingUtteranceRef.current = false;
@@ -197,7 +251,7 @@ export function useVoiceWritingMode({
       // Mic + ASR + TTS are all torn down at this point — fire the off-cue as the
       // audible "voice mode ended" signal. Cues are fire-and-forget; even if Web
       // Audio is locked or unavailable the session still exits cleanly.
-      playVoiceCue('off');
+      if (playOff) playVoiceCue('off');
       setStreamingAiNodeId(null);
       setVoiceModeActive(false);
       setPhase('idle');
@@ -222,15 +276,16 @@ export function useVoiceWritingMode({
     latestTranscriptRef.current = '';
     setLiveTranscript('');
 
-    // Silence detector: every ASR callback arms a timer; if no callback fires
-    // within SILENCE_MS the buffered transcript is committed automatically.
-    // Lets the user just speak and wait, no second mic click required.
+    // Silence detector (handsfree only): every ASR callback arms a timer; if no
+    // callback fires within SILENCE_MS the buffered transcript is committed.
+    // Dictation mode skips this so pauses in a long utterance do not auto-send.
     const SILENCE_MS = 1500;
     const TRANSCRIPT_RENDER_INTERVAL_MS = 180;
     let silenceTimer: ReturnType<typeof setTimeout> | null = null;
     let transcriptFlushTimer: ReturnType<typeof setTimeout> | null = null;
     let pendingTranscript: string | null = null;
     const armSilenceTimer = () => {
+      if (voiceInputModeRef.current === 'dictation') return;
       if (silenceTimer) clearTimeout(silenceTimer);
       silenceTimer = setTimeout(() => {
         silenceTimer = null;
@@ -327,6 +382,22 @@ export function useVoiceWritingMode({
         if (!trimmed) {
           // Nothing spoken — treat mic-off as exiting voice mode.
           stopVoiceMode();
+          return;
+        }
+        if (voiceInputModeRef.current === 'dictation') {
+          // Keep the transcript in the composer. User edits, then clicks send.
+          // Stay in voice mode so the same AI+TTS reply path still works.
+          pausedListeningRef.current = true;
+          finishListeningRoundRef.current = null;
+          if (silenceTimer) {
+            clearTimeout(silenceTimer);
+            silenceTimer = null;
+          }
+          await teardownSession();
+          if (!activeRef.current) return;
+          playVoiceCue('off');
+          setPhase('draft');
+          startingRef.current = false;
           return;
         }
         // Ask card path: hand the final transcript to the parent (which will
@@ -841,6 +912,7 @@ export function useVoiceWritingMode({
       return;
     }
     // Listening: mic-off ends this speaking turn (or exits if nothing was said).
+    // Dictation draft: mic is already off; another click leaves voice mode.
     // Thinking / speaking: mic-off cancels the whole voice session.
     if (voicePhaseRef.current === 'listening' && !handlingUtteranceRef.current) {
       finishListeningRoundRef.current?.();
@@ -889,49 +961,129 @@ export function useVoiceWritingMode({
    * reply card id is set. Creating the queue starts the MiniMax handshake so
    * the first sentence does not wait on token + WebSocket.
    */
-  const ensureTtsQueue = (replyNodeId?: string) => {
-    if (replyNodeId) ttsHighlightNodeIdRef.current = replyNodeId;
-    if (ttsRef.current) return ttsRef.current;
+  /**
+   * 造一个 TTS 队列。会话朗读（回复流式朗读）与手动朗读共用这里，
+   * 区别只在回调是否受语音会话限制、以及谁持有这个队列。
+   */
+  const buildTtsQueue = (
+    replyNodeId: string | null,
+    mode: 'session' | 'manual',
+    onDone?: () => void,
+    /** 这个声音的音色（角色卡上配的）；空 = 全局设置 → 界面语言默认。 */
+    voiceId?: string,
+  ) => {
     if (!hasMinimaxTtsAccess(aiConfig.minimaxApiKey)) return null;
-    const minimaxKey = (aiConfig.minimaxApiKey || '').trim();
     let tts: ReturnType<typeof createTtsSentenceQueue>;
     tts = createTtsSentenceQueue({
-      apiKey: minimaxKey,
+      apiKey: (aiConfig.minimaxApiKey || '').trim(),
       model: aiConfig.minimaxTtsModel || MINIMAX_DEFAULT_TTS_MODEL,
-      voiceId: aiConfig.minimaxVoiceId,
+      voiceId: voiceId || aiConfig.minimaxVoiceId,
       language: i18n.language,
       onSpeakingChange: (speaking) => {
-        if (!activeRef.current) return;
+        // 手动朗读不受语音会话限制；会话朗读依然只在会话里起作用。
+        if (mode === 'session' && !activeRef.current) return;
         if (speaking) setPhase('speaking');
       },
       onActiveSentenceChange: (sentence) => {
-        if (!activeRef.current) return;
-        const nodeId = ttsHighlightNodeIdRef.current;
+        if (mode === 'session' && !activeRef.current) return;
+        // 会话朗读的回复卡 id 是**后来**才知道的：markThinking 先把流热起来，回复卡随后才出现。
+        // 所以这里按"这条流现在念的是谁"解析，而不是建队列时捕获的那个值 —— 捕获值一直是 null，
+        // 整段朗读就都不会有划线。
+        const nodeId = mode === 'session' ? ttsHighlightNodeIdRef.current : replyNodeId;
         if (!sentence || !nodeId) {
           setTtsHighlight(null);
+          if (!sentence) onDone?.();
           return;
         }
         setTtsHighlight({ nodeId, sentence });
       },
       onError: (message) => {
+        console.error('[Spoor] MiniMax TTS', message);
+        if (mode === 'manual') {
+          // 已经念完（或被停掉）的队列迟到的报错不该弹：用户看到的是"读完之后报错"。
+          if (manualTtsRef.current !== tts) return;
+          manualTtsRef.current = null;
+          setManualSpeechMessageId(null);
+          setTtsHighlight(null);
+          void appAlert({ message: t('voice.tts_error', { message }) });
+          return;
+        }
         const stillActive = ttsRef.current === tts;
         if (stillActive) {
           try {
-            ttsRef.current.stop();
+            tts.stop();
           } catch {
             /* ignore */
           }
           ttsRef.current = null;
         }
-        console.error('[Spoor] MiniMax TTS', message);
         if (!stillActive) return;
         void appAlert({ message: t('voice.tts_error', { message }) });
       },
     });
-    ttsRef.current = tts;
-    tts.warmup();
     return tts;
   };
+
+  const sessionItem = (messageId: string) =>
+    sessionSpeechRef.current.find((it) => it.messageId === messageId);
+
+  /**
+   * 把列表里还没念的发言人一个个念完，直到念不动为止。
+   *
+   * 循环在两种情况下退出：列表空了（念完），或者当前这位还在流式（等下一块文本再来驱动）。
+   * 两种都算"这一趟结束"，所以句柄在结算时清掉；被"停止朗读"打断的那一趟会认出代号变了，
+   * 既不接着念新一代的列表，也不会把新一代的句柄误清掉。
+   */
+  const pumpSessionSpeech = useCallback((): Promise<void> => {
+    const gen = sessionSpeechGenRef.current;
+    const existing = sessionPumpRef.current;
+    if (existing && existing.gen === gen) return existing.promise;
+    const run = (async () => {
+      for (;;) {
+        if (gen !== sessionSpeechGenRef.current) return;
+        const item = sessionSpeechRef.current.find((it) => !it.played);
+        if (!item) break;
+        if (!item.text.trim()) {
+          // 空位（预热出来的）或还没吐出文本：等文本，别把它算成"念完了"。
+          if (!item.complete) return;
+          // 这一轮没留下可念的话（空回复 / 轮次失败）：别空占一条流。
+          item.played = true;
+          item.queue?.stop();
+          item.queue = null;
+          continue;
+        }
+        const tts =
+          item.queue ?? buildTtsQueue(item.messageId || null, 'session', undefined, item.voiceId);
+        if (!tts) break;
+        item.queue = tts;
+        ttsRef.current = tts;
+        // 划线跟着"正在念的这条回复"走：换人时改这里的 id，界面上的下划线就换气泡。
+        if (item.messageId) ttsHighlightNodeIdRef.current = item.messageId;
+        tts.pushAccumulatedText(item.text);
+        if (!item.complete) return;
+        tts.flush();
+        await tts.waitUntilIdle();
+        if (gen !== sessionSpeechGenRef.current) return;
+        try {
+          tts.stop();
+        } catch {
+          /* ignore */
+        }
+        item.played = true;
+        item.queue = null;
+        if (ttsRef.current === tts) ttsRef.current = null;
+      }
+    })();
+    sessionPumpRef.current = { gen, promise: run };
+    void run
+      .catch(() => {
+        /* 单个队列报错自己会走 onError；循环本身不该把错误抛给调用方 */
+      })
+      .finally(() => {
+        if (sessionPumpRef.current?.promise === run) sessionPumpRef.current = null;
+      });
+    return run;
+  }, [aiConfig.minimaxApiKey, aiConfig.minimaxTtsModel, aiConfig.minimaxVoiceId, i18n.language, t]);
 
   /** Drop the current ASR WebSocket session if any. Called whenever TTS is
    *  about to start so the Volc server doesn't sit on an idle WS until its
@@ -949,27 +1101,92 @@ export function useVoiceWritingMode({
     asrRef.current = null;
   }, []);
 
-  /** Push written-card text into the TTS queue as the stream accumulates. */
+  /**
+   * 把一块流式文本喂给"正在说的这位"。`voiceId` 是说话人自己的音色（角色卡上配的）：
+   * 房间里换人时，这里把上一位收口、给新的一位按他自己的音色排一条。
+   */
   const pushTtsChunk = useCallback(
-    (replyNodeId: string, accumulated: string) => {
+    (replyNodeId: string, accumulated: string, voiceId?: string) => {
       closeAsr();
       const spoken = visibleAiReplyText(accumulated).trim();
       if (!spoken) return;
-      const tts = ensureTtsQueue(replyNodeId);
-      if (!tts) return;
-      tts.pushAccumulatedText(spoken);
+      const items = sessionSpeechRef.current;
+      let item = sessionItem(replyNodeId);
+      if (!item) {
+        // 认领 markThinking 预热出来的空位（音色对不上就重开一条，别整段用错声音）。
+        const warm = items.find((it) => !it.messageId && !it.played && !it.text);
+        item = warm ?? {
+          messageId: '',
+          voiceId,
+          text: '',
+          complete: false,
+          queue: null,
+          played: false,
+        };
+        if (!warm) {
+          items.push(item);
+        } else if (warm.voiceId !== voiceId) {
+          warm.queue?.stop();
+          warm.queue = null;
+          warm.voiceId = voiceId;
+        }
+        item.messageId = replyNodeId;
+      }
+      if (item.voiceId === undefined) item.voiceId = voiceId;
+      // 上一位的话到这儿就算说完了：房间轮次是一条一条排着来的，新发言人开口即前任收尾。
+      // 在这里收口，他的最后半句才不会永远卡在 carry 里没人念。
+      for (const other of items) {
+        if (other === item) break;
+        if (!other.played && other.messageId) other.complete = true;
+      }
+      item.text = spoken;
+      void pumpSessionSpeech();
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [aiConfig.minimaxApiKey, aiConfig.minimaxTtsModel, aiConfig.minimaxVoiceId, closeAsr, i18n.language, t],
   );
 
-  /** Flush leftover carry, wait for audio already in flight, then listen again. */
+  /** Flush leftover carry, wait for the whole playlist, then listen again. */
   const endTtsReply = useCallback(
     async (replyNodeId: string, spokenText: string): Promise<void> => {
       if (!activeRef.current) return;
-      // Reuse the warmed / in-flight queue so first-sentence audio is not thrown away.
-      const tts = replyNodeId ? ensureTtsQueue(replyNodeId) : ttsRef.current;
-      if (!tts) {
+      const items = sessionSpeechRef.current;
+      const tail = spokenText.trim();
+      let last = replyNodeId ? sessionItem(replyNodeId) : undefined;
+      if (tail) {
+        if (!last) {
+          // 这条回复一个 chunk 都没吐过：认领预热出来的空位（音色就是它热的那一个），
+          // 没有空位才补一条新的。
+          const warm = items.find((it) => !it.messageId && !it.played && !it.text);
+          last =
+            warm ?? {
+              messageId: '',
+              voiceId: undefined,
+              text: '',
+              complete: false,
+              queue: null,
+              played: false,
+            };
+          if (!warm) items.push(last);
+          last.messageId = replyNodeId;
+        }
+        // 写下来的可能比念出来的全（收尾那段在 thread 里更完整）：以完整文本为准。
+        if (tail.length >= last.text.length) last.text = tail;
+      }
+      // 这一轮的话到这儿全说完了。房间里只有最后一位会走到这里，所以剩下的都在这里统一收口；
+      // 没留下文本的（空回复、失败的轮次）直接淘汰，免得空占一条流。
+      for (const item of items) {
+        if (item.text.trim()) {
+          item.complete = true;
+        } else {
+          item.played = true;
+          item.queue?.stop();
+          item.queue = null;
+        }
+      }
+      if (!items.some((it) => !it.played && it.text.trim())) {
+        // 这一轮没有任何可念的话（没有 MiniMax key / 空回复）：直接回到听。
+        // 注意这里不区分输入模式：见下面"念完继续听"的说明。
         handlingUtteranceRef.current = false;
         if (targetAskCardIdRef.current) {
           try {
@@ -980,21 +1197,16 @@ export function useVoiceWritingMode({
         }
         return;
       }
-      if (spokenText.trim()) {
-        tts.pushAccumulatedText(spokenText.trim());
-      }
-      tts.flush();
-      await tts.waitUntilIdle();
-      try {
-        tts.stop();
-      } catch {
-        /* ignore */
-      }
-      if (ttsRef.current === tts) ttsRef.current = null;
+      await pumpSessionSpeech();
+      clearSessionSpeech();
+      ttsRef.current = null;
       ttsHighlightNodeIdRef.current = null;
       setTtsHighlight(null);
       handlingUtteranceRef.current = false;
 
+      // 念完继续听。语音模式不因为"这一轮读完了"自己退出 —— 房间里一串角色挨个说完之后
+      // 被踢出语音模式尤其莫名其妙（转写模式的差别只在"用户说的话进输入框、不自动发送"，
+      // 跟读完要不要接着听无关）。要停就由用户点麦克风/停止，走 stopVoiceMode 那条路。
       if (!activeRef.current) return;
       if (targetAskCardIdRef.current) {
         try {
@@ -1005,13 +1217,14 @@ export function useVoiceWritingMode({
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [aiConfig.minimaxApiKey, aiConfig.minimaxTtsModel, aiConfig.minimaxVoiceId, rollbackOnStartFailure, startListeningLoop, i18n.language, t, targetAskCardIdRef],
+    [aiConfig.minimaxApiKey, aiConfig.minimaxTtsModel, aiConfig.minimaxVoiceId, rollbackOnStartFailure, startListeningLoop, stopVoiceMode, i18n.language, t, targetAskCardIdRef],
   );
 
   /** Stop the current TTS stream mid-playback. Clears the queue, drops the
    *  highlight, cancels any pending silence auto-commit and mic-off commit,
    *  and re-opens ASR so the user can keep talking. Does NOT exit voice mode. */
   const stopTts = useCallback(async (): Promise<void> => {
+    clearSessionSpeech();
     if (ttsRef.current) {
       try {
         ttsRef.current.stop();
@@ -1037,14 +1250,93 @@ export function useVoiceWritingMode({
     }
   }, [rollbackOnStartFailure, startListeningLoop, targetAskCardIdRef]);
 
-  /** Caller flips phase to "thinking"; MiniMax handshake starts immediately. */
-  const markThinking = useCallback(() => {
-    if (!activeRef.current) return;
-    setPhase('thinking');
-    closeAsr();
-    ensureTtsQueue();
+  /**
+   * Caller flips phase to "thinking"; MiniMax handshake starts immediately.
+   *
+   * `voiceId` 是"用户正在跟谁说话"那个角色的音色 —— 流必须照着它开：回复卡要到流式开始
+   * 之后才存在，等拿到卡 id 再定音色就晚了（那时整段音频都已经按错的音色合成了）。
+   */
+  const markThinking = useCallback(
+    (voiceId?: string) => {
+      if (!activeRef.current) return;
+      setPhase('thinking');
+      closeAsr();
+      // 上一轮的列表在收尾时已经清空了；这里再清一次，免得残留的条目把这一轮顶乱。
+      clearSessionSpeech();
+      const tts = buildTtsQueue(null, 'session', undefined, voiceId);
+      if (!tts) return;
+      ttsRef.current = tts;
+      // 预热出来的空位：回复卡出现后由 pushTtsChunk 认领。
+      sessionSpeechRef.current.push({
+        messageId: '',
+        voiceId,
+        text: '',
+        complete: false,
+        queue: tts,
+        played: false,
+      });
+      tts.warmup();
+    },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [aiConfig.minimaxApiKey, aiConfig.minimaxTtsModel, aiConfig.minimaxVoiceId, closeAsr, i18n.language, t]);
+    [aiConfig.minimaxApiKey, aiConfig.minimaxTtsModel, aiConfig.minimaxVoiceId, closeAsr, i18n.language, t],
+  );
+
+  const stopManualSpeech = useCallback(async (): Promise<void> => {
+    const tts = manualTtsRef.current;
+    manualTtsRef.current = null;
+    setManualSpeechMessageId(null);
+    if (tts) {
+      try {
+        tts.stop();
+      } catch {
+        /* ignore */
+      }
+    }
+    // 只有手动朗读在说话时才清高亮：语音会话的朗读由 stopTts 自己管。
+    if (!activeRef.current) setTtsHighlight(null);
+  }, []);
+
+  /**
+   * 手动朗读一条**已经写完**的回复（侧栏气泡与画布卡片上的喇叭）。
+   * 不依赖语音会话：音频输出这件事本身跟"正在录音"没关系。
+   *
+   * 每次都用新队列：流式那个队列记得"已经念到哪"，重播要的是从头念。
+   */
+  const speakMessage = useCallback(
+    async (messageId: string, text: string, voiceId?: string): Promise<void> => {
+      const spoken = visibleAiReplyText(text).trim();
+      await stopManualSpeech();
+      if (!spoken) return;
+      const tts = buildTtsQueue(
+        messageId,
+        'manual',
+        () => setManualSpeechMessageId(null),
+        voiceId,
+      );
+      if (!tts) {
+        void appAlert({ message: t('voice.need_minimax_key') });
+        return;
+      }
+      manualTtsRef.current = tts;
+      setManualSpeechMessageId(messageId);
+      // 读完整段：内部会 flush + 等念完 + 关流。少任何一步都会出问题（半句不念 / 空闲超时报错）。
+      const finished = await speakWholeText(tts, spoken, {
+        isStillCurrent: () => manualTtsRef.current === tts,
+      });
+      if (finished) setManualSpeechMessageId(null);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [aiConfig.minimaxApiKey, aiConfig.minimaxTtsModel, aiConfig.minimaxVoiceId, i18n.language, stopManualSpeech, t],
+  );
+
+  /**
+   * 界面上的"停止朗读"：手动朗读和语音会话里的朗读都停掉。
+   * （会话朗读还会顺手把麦克风重新打开，那是 stopTts 的职责。）
+   */
+  const stopSpeaking = useCallback(async (): Promise<void> => {
+    await stopManualSpeech();
+    if (activeRef.current) await stopTts();
+  }, [stopManualSpeech, stopTts]);
 
   return {
     voiceModeActive,
@@ -1057,6 +1349,11 @@ export function useVoiceWritingMode({
     pushTtsChunk,
     endTtsReply,
     stopTts,
+    /** 手动朗读：读一条已经写完的回复 / 重播。 */
+    speakMessage,
+    stopSpeaking,
+    /** 正在被手动朗读的消息 id（没有则为 null），界面据此切换喇叭/停止。 */
+    manualSpeechMessageId,
     markThinking,
   };
 }

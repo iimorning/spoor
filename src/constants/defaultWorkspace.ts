@@ -48,9 +48,13 @@ export const DEFAULT_WORKSPACE_COL_GAP = 80;
  * Previous L-shape starter coords (ask top-left, theme top-right, note under ask).
  * Virgin canvases still on this layout get repositioned on seed — the note sat
  * on top of the bottom-left ambience fixture on common laptop heights.
+ *
+ * 键只有这三个，别按 `keyof typeof DEFAULT_NODE_IDS` 开：这张表记的是镜像卡出现
+ * **之前**的布局。把 image1/image2 补进来（哪怕填上坐标）会让老画布凑不齐这张表，
+ * 反而认不出旧布局、跳过那次挪位迁移。
  */
 export const LEGACY_L_SHAPE_DEFAULT_POSITIONS: Readonly<
-  Record<keyof typeof DEFAULT_NODE_IDS, { x: number; y: number }>
+  Record<'ask' | 'theme' | 'note', { x: number; y: number }>
 > = {
   ask: { x: 80, y: 80 },
   theme: { x: 456, y: 80 },
@@ -61,13 +65,15 @@ export function isLegacyLShapeDefaultLayout(
   nodes: ReadonlyArray<{ id: string; x: number; y: number }>,
 ): boolean {
   const byId = new Map(nodes.map((n) => [n.id, n]));
-  return (Object.keys(LEGACY_L_SHAPE_DEFAULT_POSITIONS) as Array<keyof typeof DEFAULT_NODE_IDS>).every(
-    (key) => {
-      const node = byId.get(DEFAULT_NODE_IDS[key]);
-      const expected = LEGACY_L_SHAPE_DEFAULT_POSITIONS[key];
-      return node != null && node.x === expected.x && node.y === expected.y;
-    },
-  );
+  return (
+    Object.keys(LEGACY_L_SHAPE_DEFAULT_POSITIONS) as Array<
+      keyof typeof LEGACY_L_SHAPE_DEFAULT_POSITIONS
+    >
+  ).every((key) => {
+    const node = byId.get(DEFAULT_NODE_IDS[key]);
+    const expected = LEGACY_L_SHAPE_DEFAULT_POSITIONS[key];
+    return node != null && node.x === expected.x && node.y === expected.y;
+  });
 }
 
 export type DefaultWorkspaceIds = {

@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { useLiveQuery } from 'dexie-react-hooks';
 import Markdown from 'react-markdown';
-import { ArrowUp, ChevronLeft, FileText, GripVertical, Loader2, Mic, Plus, X } from 'lucide-react';
+import { ArrowUp, ChevronLeft, FileText, GripVertical, Loader2, MessageCircleMore, Mic, Plus, X } from 'lucide-react';
 import {
   db,
   type AgentConfig,
@@ -23,6 +23,7 @@ import { excerptSearchHitToCanvas, excerptToCanvas } from '../../utils/excerptTo
 import type { AskSearchHit } from '../../utils/askSearchHits';
 import { canvasOverlayProps } from '../../utils/canvasOverlay';
 import { isTextEditingTarget } from '../../utils/noteClipboard';
+import { resolveVoiceInputMode, type VoiceInputMode } from '../../constants/voiceWriting';
 import {
   composerHasContent,
   EMPTY_COMPOSER,
@@ -38,8 +39,9 @@ import {
   CHAT_PANEL_LIST_CLASS,
   CHAT_REPLY_DRAG_HANDLE_CLASS,
 } from './chatPanelStyles';
-import { ChatReplyCopyHost } from './ChatReplyCopyButton';
+import { ChatReplyCopyHost, ChatReplySpeakButton } from './ChatReplyCopyButton';
 import { ChatSearchHits } from './ChatSearchHits';
+import { ChatSuggestedFollowUps } from './ChatSuggestedFollowUps';
 import { ChatSidebarSessionControls } from './ChatSidebarSessionControls';
 import { ChatThinkingTrace, resolveChatThought } from './ChatThinkingTrace';
 import { ComposerInlineInput } from './ComposerInlineInput';
@@ -51,6 +53,16 @@ import {
 import { savePersonaComposerDraft } from '../../utils/personaStreamingAi';
 import { CANVAS_FILE_UPLOAD_ACCEPT, filesFromDataTransfer } from '../../utils/chatPanelFileUpload';
 import { dataTransferHasFiles } from '../../utils/dnd';
+import {
+  ChatRoomParticipants,
+  type ChatRoomInviteCandidate,
+} from './ChatRoomParticipants';
+import type { RoomParticipant } from '../../utils/personaChatRoom';
+import {
+  DEFAULT_ROOM_DISCUSSION_ROUNDS,
+  ROOM_DISCUSSION_ROUNDS_MAX,
+  clampRoomDiscussionRounds,
+} from '../../utils/personaChatRoom';
 
 export type CanvasChatPanelProps = {
   canvasId: string;
@@ -68,6 +80,14 @@ export type CanvasChatPanelProps = {
   onClose: () => void;
   ttsHighlightMessageId?: string | null;
   ttsHighlightSentence?: string | null;
+  /** 配了 TTS 才给出朗读按钮 */
+  canReadAloud?: boolean;
+  /** 正在被朗读的那条消息（会话朗读或手动朗读） */
+  speakingMessageId?: string | null;
+  /** 刚读完的那条：据此把喇叭显示成"重播" */
+  lastSpokenMessageId?: string | null;
+  onReadMessage?: (messageId: string, text: string) => void;
+  onStopSpeaking?: () => void;
   onSend: (segments: ComposerSegment[], onAccepted: () => void) => void | Promise<unknown>;
   /** Paste, drag-drop, or + picker — files become canvas cards beside the persona. */
   onIngestFiles?: (files: File[]) => void | Promise<unknown>;
@@ -90,14 +110,41 @@ export type CanvasChatPanelProps = {
   ) => void;
   onToggleVoice?: () => void;
   voiceModeActive?: boolean;
-  voicePhase?: 'idle' | 'listening' | 'thinking' | 'speaking';
+  voicePhase?: 'idle' | 'listening' | 'draft' | 'thinking' | 'speaking';
   liveTranscript?: string;
+  voiceInputMode?: VoiceInputMode;
   /** Stamp the composer (e.g. book “问 AI”) after the panel opens. */
   composerPrefill?: {
     personaNodeId: string;
     composerSegments: ComposerSegment[];
     token: number;
   } | null;
+  /** 多角色房间：在场角色，主 Agent 恒在首位。空/缺省 = 单人对话。 */
+  roomParticipants?: RoomParticipant[];
+  /** 画布上已有的其他角色卡。 */
+  roomInviteCandidates?: ChatRoomInviteCandidate[];
+  /** 角色库里还没上画布的角色，选中会先放到画布上再加入。 */
+  roomLibraryCandidates?: ChatRoomInviteCandidate[];
+  roomMaxParticipants?: number;
+  onAddRoomParticipant?: (nodeId: string) => void;
+  onAddRoomFromLibrary?: (agentConfigId: string) => void;
+  onRemoveRoomParticipant?: (nodeId: string) => void;
+  onToggleRoomParticipantMuted?: (nodeId: string) => void;
+  /**
+   * 多角色房间：在场各角色的流式状态（按角色卡节点 id）。
+   * 有值时气泡按自己的发言人取流式状态，头部跟着当前发言的角色走。
+   */
+  streamsByPersona?: Record<string, { messageId: string; thought: string }>;
+  /** 多角色房间：自动讨论的进度（没有则为 null）。 */
+  roomDiscussion?: { round: number; rounds: number } | null;
+  /** 多角色房间：一次讨论跑几轮（一轮 = 每个未禁言的声音各说一次）。 */
+  roomDiscussionRounds?: number;
+  onChangeRoomDiscussionRounds?: (rounds: number) => void;
+  onStartRoomDiscussion?: () => void;
+  onStopRoomDiscussion?: () => void;
+  /** 角色卡上的房间主动发言开关（右上角）。 */
+  proactiveEnabled?: boolean;
+  onToggleProactive?: (enabled: boolean) => void;
 };
 
 export function CanvasChatPanel({
@@ -119,6 +166,11 @@ export function CanvasChatPanel({
   scrollToMessageId,
   ttsHighlightMessageId = null,
   ttsHighlightSentence = null,
+  canReadAloud = false,
+  speakingMessageId = null,
+  lastSpokenMessageId = null,
+  onReadMessage,
+  onStopSpeaking,
   onDropReplyAt,
   onDropSelectionAt,
   onDropChatImage,
@@ -129,7 +181,24 @@ export function CanvasChatPanel({
   voiceModeActive = false,
   voicePhase = 'idle',
   liveTranscript = '',
+  voiceInputMode,
   composerPrefill = null,
+  roomParticipants,
+  roomInviteCandidates,
+  roomLibraryCandidates,
+  roomMaxParticipants = 3,
+  onAddRoomParticipant,
+  onAddRoomFromLibrary,
+  onRemoveRoomParticipant,
+  onToggleRoomParticipantMuted,
+  streamsByPersona,
+  roomDiscussion = null,
+  roomDiscussionRounds = DEFAULT_ROOM_DISCUSSION_ROUNDS,
+  onChangeRoomDiscussionRounds,
+  onStartRoomDiscussion,
+  onStopRoomDiscussion,
+  proactiveEnabled = true,
+  onToggleProactive,
 }: CanvasChatPanelProps) {
   const { t, i18n } = useTranslation();
   const { confirm } = useAppDialog();
@@ -138,6 +207,7 @@ export function CanvasChatPanel({
   const [localSegments, setLocalSegments] = useState<ComposerSegment[]>(EMPTY_COMPOSER);
   const segments = composerSegmentsProp ?? localSegments;
   const setSegments = onComposerSegmentsChange ?? setLocalSegments;
+  const dictation = resolveVoiceInputMode(voiceInputMode) === 'dictation';
   const segmentsRef = useRef(segments);
   segmentsRef.current = segments;
   const persistTimerRef = useRef<number | null>(null);
@@ -152,6 +222,8 @@ export function CanvasChatPanel({
   const threadId = personaThreadId(canvasId, agentNode.id);
   const hydratedDraftRef = useRef(false);
   const prefillTokenRef = useRef<number | null>(null);
+  const skipVoiceOverwriteRef = useRef(false);
+  const wasVoiceActiveRef = useRef(false);
   const composerPrefillRef = useRef(composerPrefill);
   composerPrefillRef.current = composerPrefill;
 
@@ -168,6 +240,19 @@ export function CanvasChatPanel({
       });
     },
     [agentNode.id, canvasId],
+  );
+
+  const setSegmentsFromUser = useCallback(
+    (next: ComposerSegment[]) => {
+      if (dictation && voicePhase === 'listening' && !skipVoiceOverwriteRef.current) {
+        skipVoiceOverwriteRef.current = true;
+        onToggleVoice?.();
+      } else if (dictation) {
+        skipVoiceOverwriteRef.current = true;
+      }
+      setSegments(next);
+    },
+    [dictation, onToggleVoice, setSegments, voicePhase],
   );
 
   const thread = useLiveQuery(
@@ -242,14 +327,32 @@ export function CanvasChatPanel({
   }, [agentNode.id, canvasId, composerSegmentsProp, setSegments]);
 
   useEffect(() => {
+    if (voiceModeActive && voicePhase === 'listening') {
+      skipVoiceOverwriteRef.current = false;
+    }
+  }, [voiceModeActive, voicePhase]);
+
+  useEffect(() => {
+    if (wasVoiceActiveRef.current && !voiceModeActive && composerPrefill) {
+      prefillTokenRef.current = composerPrefill.token;
+    }
+    wasVoiceActiveRef.current = voiceModeActive;
+  }, [composerPrefill, voiceModeActive]);
+
+  useEffect(() => {
     if (!composerPrefill || composerPrefill.personaNodeId !== agentNode.id) return;
     if (prefillTokenRef.current === composerPrefill.token) return;
+    if (dictation && voiceModeActive && (skipVoiceOverwriteRef.current || voicePhase !== 'listening')) {
+      // Consume the token so a skipped/stale transcript cannot land after the next listen.
+      prefillTokenRef.current = composerPrefill.token;
+      return;
+    }
     prefillTokenRef.current = composerPrefill.token;
     const next = normalizeComposerSegments(composerPrefill.composerSegments);
     setSegments(next);
     hydratedDraftRef.current = true;
     persistDraftNow(next);
-  }, [agentNode.id, composerPrefill, persistDraftNow, setSegments]);
+  }, [agentNode.id, composerPrefill, dictation, persistDraftNow, setSegments, voiceModeActive, voicePhase]);
 
   useEffect(() => {
     if (!hydratedDraftRef.current) return;
@@ -286,9 +389,23 @@ export function CanvasChatPanel({
     });
   };
 
-  const handleSubmit = () => {
-    const payload = normalizeComposerSegments(segments);
-    if (!composerHasContent(payload) || isStreaming || submitting) return;
+  // 自动讨论进行中合成器仍然可用：发出去就是插话接管（先停批次、等当前那句说完）。
+  const composerBusy = (isStreaming && !roomDiscussion) || submitting || uploading;
+
+  // 轮数输入用草稿值，让用户能把"10"打完再收口，不在每次按键时夹取。
+  const [roundsDraft, setRoundsDraft] = useState<string | null>(null);
+  const commitRoomDiscussionRounds = () => {
+    if (roundsDraft === null) return;
+    const parsed = Number.parseInt(roundsDraft, 10);
+    setRoundsDraft(null);
+    const next = clampRoomDiscussionRounds(
+      Number.isFinite(parsed) ? parsed : roomDiscussionRounds,
+    );
+    if (next !== roomDiscussionRounds) onChangeRoomDiscussionRounds?.(next);
+  };
+
+  const dispatchSend = (payload: ComposerSegment[]) => {
+    if (!composerHasContent(payload) || composerBusy) return;
     setSendHint(null);
     setSubmitting(true);
     scrollToLatest();
@@ -309,6 +426,14 @@ export function CanvasChatPanel({
     }).finally(() => {
       setSubmitting(false);
     });
+  };
+
+  const handleSubmit = () => {
+    dispatchSend(normalizeComposerSegments(segments));
+  };
+
+  const handleSuggestedFollowUp = (question: string) => {
+    dispatchSend([{ type: 'text', content: question }]);
   };
 
   useEffect(() => {
@@ -333,7 +458,7 @@ export function CanvasChatPanel({
     const el = listRef.current;
     if (!el || !stickToLatestRef.current) return;
     el.scrollTop = el.scrollHeight;
-  }, [threadId, thread?.messages.length, isStreaming, streamingThought]);
+  }, [threadId, thread?.messages.length, thread?.updatedAt, isStreaming, streamingThought]);
 
   useLayoutEffect(() => {
     if (!scrollToMessageId) return;
@@ -410,13 +535,70 @@ export function CanvasChatPanel({
   if (!portalHost) return null;
 
   const lastAssistant = [...displayMessages].reverse().find((m) => m.role === 'assistant');
-  const headerThought = lastAssistant
+  const lastStreamingMessageId = [...listMessages].reverse().find((m) => m.role === 'assistant')?.id;
+  // 多角色房间：哪个角色在说话，头部就显示谁的名字与思考。
+  const speakerNameById = new Map<string, string>([
+    [agentNode.id, agentName],
+    ...(roomParticipants ?? []).map((p) => [p.nodeId, p.name] as [string, string]),
+  ]);
+  const streamingSpeaker = streamsByPersona
+    ? Object.entries(streamsByPersona).find(
+        // 必须按"最后一条回复"来认领槽位：主 Agent 的槽位在整个房间轮次里都还在
+        // （插入顺序也在最前），只看"消息在不在列表里"会永远选中它。
+        ([, slot]) => slot.messageId === lastStreamingMessageId,
+      )
+    : undefined;
+  // 占着标题的那个声音：有人说话时是说话的人，空闲时归主 Agent。
+  const titledNodeId = streamingSpeaker?.[0] ?? agentNode.id;
+  // 空闲时头部只认领"占着标题的那个声音自己"的思考。房间里最后发言的可能是别人，
+  // 把它的思考挂在主角色的名字下面就是错位 —— 那一份留着，由它自己的气泡显示。
+  const idleThoughtOwner = lastAssistant?.speakerNodeId ?? titledNodeId;
+  const headerThought = streamingSpeaker
     ? resolveChatThought({
-        thinkingTrace: lastAssistant.thinkingTrace,
-        isStreaming: isStreaming && lastAssistant.id === streamingMessageId,
-        streamingThought,
+        thinkingTrace:
+          lastAssistant?.id === streamingSpeaker[1].messageId
+            ? lastAssistant.thinkingTrace
+            : undefined,
+        isStreaming: true,
+        streamingThought: streamingSpeaker[1].thought,
       })
-    : '';
+    : lastAssistant && idleThoughtOwner === titledNodeId
+      ? resolveChatThought({
+          thinkingTrace: lastAssistant.thinkingTrace,
+          isStreaming: isStreaming && lastAssistant.id === streamingMessageId,
+          streamingThought,
+        })
+      : '';
+  const headerSpeakerName = streamingSpeaker
+    ? speakerNameById.get(streamingSpeaker[0]) ?? agentName
+    : agentName;
+  // 讨论角色并进标题行：名字后面点灯，+ 头像按钮拉人，其他角色以 chip 跟在后面。
+  const roomCast =
+    roomParticipants && roomParticipants.length > 0 ? (
+      <ChatRoomParticipants
+        participants={roomParticipants}
+        hostNodeId={agentNode.id}
+        titledNodeId={titledNodeId}
+        candidates={roomInviteCandidates ?? []}
+        libraryCandidates={roomLibraryCandidates ?? []}
+        maxParticipants={roomMaxParticipants}
+        disabled={readonly || isStreaming || submitting}
+        onAdd={onAddRoomParticipant}
+        onAddFromLibrary={onAddRoomFromLibrary}
+        onRemove={(nodeId) => onRemoveRoomParticipant?.(nodeId)}
+        onToggleMuted={(nodeId) => onToggleRoomParticipantMuted?.(nodeId)}
+      />
+    ) : null;
+
+  // 房间里禁言的交互只有一种：点名字。占着标题的那个声音，标题本身就是它的开关
+  // （谁占标题谁可点）；它退成 chip 时，开关跟着 chip（由 ChatRoomParticipants 渲染）。
+  const roomIsCast = Boolean(roomParticipants && roomParticipants.length > 1);
+  const titledVoice = roomIsCast
+    ? roomParticipants!.find((p) => p.nodeId === titledNodeId)
+    : undefined;
+  const titleTextClass = `min-w-0 truncate text-[15px] font-medium tracking-[0.02em] ${
+    titledVoice?.muted ? 'text-[#a8a49c] line-through' : 'text-[#2c2c28]'
+  }`;
 
   return createPortal(
     <aside
@@ -453,8 +635,32 @@ export function CanvasChatPanel({
         ) : (
           <div className="min-w-0 flex-1">
             <ChatThinkingTrace
-              name={agentName}
-              nameClassName="text-[15px] font-medium tracking-[0.02em] text-[#2c2c28]"
+              name={
+                <>
+                  {titledVoice && onToggleRoomParticipantMuted ? (
+                    <button
+                      type="button"
+                      data-testid={`room-mute-${titledVoice.nodeId}`}
+                      // 和 chip 上的开关同一个禁用条件：有人正在说的时候不切换禁言，
+                      // 免得"点了要等下一轮才生效"；但不压暗 —— 标题不该因为别人在说话就变灰。
+                      disabled={readonly || isStreaming || submitting}
+                      aria-pressed={titledVoice.muted}
+                      title={t(titledVoice.muted ? 'canvas.v2.room_unmute' : 'canvas.v2.room_mute')}
+                      aria-label={t(
+                        titledVoice.muted ? 'canvas.v2.room_unmute' : 'canvas.v2.room_mute',
+                      )}
+                      onClick={() => onToggleRoomParticipantMuted(titledVoice.nodeId)}
+                      className={`${titleTextClass} text-left transition-colors hover:text-[#C2410C] disabled:hover:text-inherit`}
+                    >
+                      {headerSpeakerName}
+                    </button>
+                  ) : (
+                    <span className={titleTextClass}>{headerSpeakerName}</span>
+                  )}
+                  {roomCast}
+                </>
+              }
+              nameClassName="flex min-w-0 items-center gap-2"
               thought={headerThought}
               messageId={lastAssistant?.id ?? ''}
               canEdit={!isStreaming || lastAssistant?.id !== streamingMessageId}
@@ -468,6 +674,23 @@ export function CanvasChatPanel({
           </div>
         )}
         <div className="flex shrink-0 items-center gap-0.5">
+          {!readonly && onToggleProactive ? (
+            <button
+              type="button"
+              data-testid="canvas-chat-proactive-toggle"
+              aria-pressed={proactiveEnabled}
+              title={proactiveEnabled ? t('canvas.v2.proactive_on') : t('canvas.v2.proactive_off')}
+              aria-label={proactiveEnabled ? t('canvas.v2.proactive_on') : t('canvas.v2.proactive_off')}
+              onClick={() => onToggleProactive(!proactiveEnabled)}
+              className={
+                proactiveEnabled
+                  ? 'rounded-md p-1.5 text-[#C2410C] hover:bg-[#C2410C]/10'
+                  : 'rounded-md p-1.5 text-[#8a8a82] hover:bg-[#C2410C]/10 hover:text-[#C2410C]'
+              }
+            >
+              <MessageCircleMore className="h-4 w-4" />
+            </button>
+          ) : null}
           {!readonly ? (
             <ChatSidebarSessionControls
               testIdPrefix="canvas-chat"
@@ -520,13 +743,39 @@ export function CanvasChatPanel({
             </button>
           </div>
         ) : null}
-        {listMessages.map((msg) => (
+        {listMessages.map((msg) => {
+          // 每个气泡按自己的发言人取流式状态与名字；单人对话走原来的 props。
+          const stream = streamsByPersona
+            ? streamsByPersona[msg.speakerNodeId ?? agentNode.id]
+            : undefined;
+          const bubbleStreaming = streamsByPersona
+            ? Boolean(
+                stream &&
+                  stream.messageId === msg.id &&
+                  // 主 Agent 的槽位在整个房间轮次里都还在，所以只有"最后一条回复"
+                  // 才算在流式，否则它已经答完的气泡会一直挂在忙碌态上。
+                  msg.id === lastStreamingMessageId,
+              )
+            : !readonly && isStreaming && msg.id === streamingMessageId;
+          const bubbleThought = streamsByPersona
+            ? stream?.messageId === msg.id
+              ? stream.thought
+              : ''
+            : streamingThought;
+          const bubbleSpeakerName =
+            msg.role === 'assistant' &&
+            msg.speakerName &&
+            msg.speakerNodeId &&
+            msg.speakerNodeId !== agentNode.id
+              ? msg.speakerName
+              : agentName;
+          return (
           <ChatMessageBubble
             key={msg.id}
             message={msg}
-            agentName={agentName}
-            isStreaming={!readonly && isStreaming && msg.id === streamingMessageId}
-            streamingThought={streamingThought}
+            agentName={bubbleSpeakerName}
+            isStreaming={bubbleStreaming}
+            streamingThought={bubbleThought}
             readonly={readonly}
             ttsHighlightSentence={
               ttsHighlightMessageId === msg.id ? ttsHighlightSentence : null
@@ -541,19 +790,113 @@ export function CanvasChatPanel({
             onDropSearchHitAt={readonly ? undefined : onDropSearchHitAt}
             hideThinkingTrace={Boolean(headerThought && lastAssistant && msg.id === lastAssistant.id)}
             locale={i18n.language}
+            canReadAloud={canReadAloud}
+            isSpeaking={speakingMessageId === msg.id}
+            wasSpoken={lastSpokenMessageId === msg.id}
+            onReadMessage={
+              onReadMessage && msg.role === 'assistant'
+                ? () => onReadMessage(msg.id, msg.text)
+                : undefined
+            }
+            onStopSpeaking={onStopSpeaking}
           />
-        ))}
+          );
+        })}
+        {!readonly &&
+        !isStreaming &&
+        lastAssistant &&
+        lastAssistant.id === listMessages[listMessages.length - 1]?.id &&
+        (lastAssistant.suggestedFollowUps ?? []).length > 0 ? (
+          <ChatSuggestedFollowUps
+            questions={lastAssistant.suggestedFollowUps!}
+            disabled={submitting}
+            onSelect={handleSuggestedFollowUp}
+          />
+        ) : null}
       </div>
 
       <footer className={`shrink-0 px-4 pb-4 pt-2 ${readonly ? 'pointer-events-none opacity-40' : ''}`}>
-        {voiceModeActive && voicePhase === 'listening' ? (
+        {voiceModeActive && voicePhase === 'listening' && !dictation ? (
           <p className="mb-2 px-1 text-xs leading-relaxed tracking-[0.04em] text-[#C2410C]">
             {liveTranscript.trim() || t('voice.phase_listening')}
+          </p>
+        ) : voiceModeActive && voicePhase === 'draft' ? (
+          <p className="mb-2 px-1 text-xs leading-relaxed tracking-[0.04em] text-[#C2410C]">
+            {t('voice.phase_draft')}
           </p>
         ) : voiceModeActive && voicePhase === 'idle' ? (
           <p className="mb-2 px-1 text-xs leading-relaxed tracking-[0.04em] text-[#8a8a82]">
             {t('voice.wait_for_chime')}
           </p>
+        ) : null}
+        {/* 多角色房间：让角色之间自己聊。跑起来之后这里变成进度 + 停止；
+            讨论期间输入框仍然可用，发消息就是插话接管。 */}
+        {roomParticipants && roomParticipants.length > 1 && onStartRoomDiscussion ? (
+          <div className="mb-2 flex items-center gap-2 px-1">
+            {roomDiscussion ? (
+              <>
+                <span
+                  data-testid="canvas-chat-discussion-progress"
+                  className="min-w-0 flex-1 truncate text-xs tracking-[0.04em] text-[#C2410C]"
+                >
+                  {t('canvas.v2.room_discussion_running', {
+                    round: roomDiscussion.round,
+                    rounds: roomDiscussion.rounds,
+                  })}
+                </span>
+                <button
+                  type="button"
+                  data-testid="canvas-chat-discussion-stop"
+                  onClick={onStopRoomDiscussion}
+                  className="shrink-0 rounded-full border border-[#E6E4DF] bg-white px-2.5 py-1 text-[11px] tracking-[0.04em] text-[#5a5a54] transition-colors hover:border-[#C2410C]/40 hover:text-[#C2410C]"
+                >
+                  {t('canvas.v2.room_discussion_stop')}
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  data-testid="canvas-chat-discussion-start"
+                  disabled={submitting || isStreaming}
+                  onClick={onStartRoomDiscussion}
+                  className="rounded-full border border-dashed border-[#d1cfca] px-2.5 py-1 text-[11px] tracking-[0.04em] text-[#8a8a82] transition-colors hover:border-[#C2410C]/40 hover:text-[#C2410C] disabled:opacity-40"
+                >
+                  {displayMessages.some((m) => m.role === 'assistant')
+                    ? t('canvas.v2.room_discussion_continue')
+                    : t('canvas.v2.room_discussion_start')}
+                </button>
+                {/* 讨论轮数：一轮 = 每个未禁言的声音各说一次。直接填数字，
+                    输入期间不夹取（否则打到"10"会被改成"5"），失焦/回车时收口。 */}
+                {onChangeRoomDiscussionRounds ? (
+                  <span className="flex shrink-0 items-center gap-0.5 text-[11px] tracking-[0.04em] text-[#8a8a82]">
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      data-testid="canvas-chat-discussion-rounds"
+                      disabled={submitting || isStreaming}
+                      aria-label={t('canvas.v2.room_discussion_rounds_label')}
+                      title={t('canvas.v2.room_discussion_rounds_hint', {
+                        min: 1,
+                        max: ROOM_DISCUSSION_ROUNDS_MAX,
+                      })}
+                      value={roundsDraft ?? String(roomDiscussionRounds)}
+                      onChange={(e) => setRoundsDraft(e.target.value.replace(/\D/g, '').slice(0, 2))}
+                      onBlur={commitRoomDiscussionRounds}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          commitRoomDiscussionRounds();
+                        }
+                      }}
+                      className="w-6 border-b border-[#d1cfca] bg-transparent py-0.5 text-center tabular-nums text-[#2c2c28] outline-none transition-colors hover:border-[#C2410C]/40 focus:border-[#C2410C] disabled:opacity-40"
+                    />
+                    <span>{t('canvas.v2.room_discussion_rounds_unit')}</span>
+                  </span>
+                ) : null}
+              </>
+            )}
+          </div>
         ) : null}
         {sendHint ? (
           <p className="mb-2 px-1 text-xs leading-relaxed tracking-[0.04em] text-[#C2410C]" data-testid="canvas-chat-send-hint">
@@ -597,9 +940,9 @@ export function CanvasChatPanel({
           <div className={CHAT_COMPOSER_WRAP_CLASS}>
           <ComposerInlineInput
             segments={normalizeComposerSegments(segments)}
-            onSegmentsChange={setSegments}
+            onSegmentsChange={setSegmentsFromUser}
             nodes={nodes}
-            disabled={isStreaming || submitting || uploading}
+            disabled={composerBusy}
             placeholder={t('canvas.v2.chat_input_placeholder', { defaultValue: '输入消息…' })}
             chipFallback={t('canvas.v2.focus_card', { defaultValue: '卡片' })}
             clearLabel={t('canvas.v2.clear_focus', { defaultValue: '清除' })}
@@ -614,7 +957,7 @@ export function CanvasChatPanel({
                 <button
                   type="button"
                   data-testid="canvas-chat-upload"
-                  disabled={isStreaming || submitting || uploading}
+                  disabled={composerBusy}
                   title={t('canvas.v2.chat_upload', { defaultValue: '上传图片或文件' })}
                   aria-label={t('canvas.v2.chat_upload', { defaultValue: '上传图片或文件' })}
                   onClick={() => fileInputRef.current?.click()}
@@ -660,7 +1003,7 @@ export function CanvasChatPanel({
             <button
               type="button"
               onClick={handleSubmit}
-              disabled={isStreaming || submitting || uploading || !composerHasContent(segments)}
+              disabled={composerBusy || !composerHasContent(segments)}
               title={t('canvas.v2.send', { defaultValue: '发送' })}
               aria-label={t('canvas.v2.send', { defaultValue: '发送' })}
               data-testid="canvas-chat-send"
@@ -760,6 +1103,14 @@ type BubbleProps = {
   hideThinkingTrace?: boolean;
   readonly?: boolean;
   locale: string;
+  /** 配了 TTS 才显示朗读按钮 */
+  canReadAloud?: boolean;
+  /** 这一条正在被朗读 */
+  isSpeaking?: boolean;
+  /** 这一条刚被读过（按钮显示"重播"） */
+  wasSpoken?: boolean;
+  onReadMessage?: () => void;
+  onStopSpeaking?: () => void;
 };
 
 function ChatMessageBubble({
@@ -778,6 +1129,11 @@ function ChatMessageBubble({
   onDropSearchHitAt,
   hideThinkingTrace = false,
   readonly = false,
+  canReadAloud = false,
+  isSpeaking = false,
+  wasSpoken = false,
+  onReadMessage,
+  onStopSpeaking,
 }: BubbleProps) {
   const { t } = useTranslation();
   const isUser = message.role === 'user';
@@ -872,7 +1228,7 @@ function ChatMessageBubble({
       {!isUser ? (
         <ChatThinkingTrace
           name={agentName}
-          nameClassName="text-[11px] tracking-[0.08em] text-[#aaa]"
+          nameClassName="truncate text-[11px] tracking-[0.08em] text-[#aaa]"
           thought={
             hideThinkingTrace
               ? ''
@@ -937,6 +1293,19 @@ function ChatMessageBubble({
           <ChatReplyCopyHost
             text={message.text}
             showCopy={!isUser && Boolean(message.text.trim()) && !isStreaming}
+            trailingControls={
+              !isUser &&
+              !isStreaming &&
+              canReadAloud &&
+              (isSpeaking ? Boolean(onStopSpeaking) : Boolean(onReadMessage)) ? (
+                <ChatReplySpeakButton
+                  speaking={isSpeaking}
+                  spokenBefore={wasSpoken}
+                  onSpeak={onReadMessage}
+                  onStop={onStopSpeaking}
+                />
+              ) : undefined
+            }
           >
             {ttsHighlightSentence ? (
               <ChatTtsFollowAlong

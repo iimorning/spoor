@@ -2,7 +2,9 @@ import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { Loader2 } from 'lucide-react';
 import type { CanvasNode } from '../../db';
+import type { ProactiveStatus } from '../../hooks/useRoomProactiveChat';
 import { WebSearchSourcesToggle } from './WebSearchSourcesToggle';
+import { ProactiveStatusPill } from './ProactiveStatusPill';
 import askFoxUrl from '../../assets/ask-fox.png';
 
 export interface AskNodeProps {
@@ -13,6 +15,8 @@ export interface AskNodeProps {
   askThreadReplyCount?: number;
   askThreadCollapsed?: boolean;
   onToggleAskThread?: () => void;
+  /** 这个房间的主动发言进度；没有就不渲染。 */
+  proactiveStatus?: ProactiveStatus;
 }
 
 export function AskNode({
@@ -20,6 +24,7 @@ export function AskNode({
   askThreadReplyCount = 0,
   askThreadCollapsed = false,
   onToggleAskThread,
+  proactiveStatus,
 }: AskNodeProps) {
   const { t } = useTranslation();
 
@@ -44,6 +49,7 @@ export function AskNode({
         collapseTitle={t('nodes.collapse_ask_thread')}
         expandTitle={t('nodes.expand_ask_thread')}
       />
+      <ProactiveStatusPill status={proactiveStatus} />
       {isSubmitting ? (
         <div
           className="absolute inset-0 z-10 flex items-center justify-center bg-[#FBF5EE]/35"
