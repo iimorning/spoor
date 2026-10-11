@@ -6,6 +6,7 @@ import {volcAsrProxyPlugin} from './vite-plugins/volcAsrProxyPlugin';
 import {minimaxTtsProxyPlugin} from './vite-plugins/minimaxTtsProxyPlugin';
 import {fetchPageProxyPlugin} from './vite-plugins/fetchPageProxyPlugin';
 import {geoPrerenderPlugin} from './vite-plugins/geoPrerenderPlugin';
+import {ortWasmPlugin} from './vite-plugins/ortWasmPlugin';
 
 /** 与 tp- Token 套餐控制台一致；开发代理转发到此前缀 */
 const MIMO_PROXY_TARGET = 'https://token-plan-cn.xiaomimimo.com/v1';
@@ -117,6 +118,7 @@ export default defineConfig(({mode, command}) => {
       minimaxTtsProxyPlugin(),
       fetchPageProxyPlugin(),
       geoPrerenderPlugin(),
+      ortWasmPlugin(),
     ],
     define: {
       'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
@@ -125,6 +127,18 @@ export default defineConfig(({mode, command}) => {
       alias: {
         '@': path.resolve(__dirname, '.'),
       },
+    },
+    optimizeDeps: {
+      // 端侧 OCR 的 SDK 用 `new URL('./assets/worker-entry-*.js', import.meta.url)` 造 Worker。
+      // 一旦这个依赖被 esbuild 预打包，import.meta.url 就指向 .vite/deps/，
+      // 那个 assets 路径不存在，Worker 起来就报 "OCR worker failed"，而且只在 dev 出现
+      // （build 走的是 rollup 的 new URL 处理，是好的）。所以必须排除掉，让它按原样 ESM 提供。
+      exclude: ['@paddleocr/paddleocr-js'],
+      // 被排除的包，它的 CJS 依赖也就不再走 esbuild 的 interop 了：
+      // clipper-lib / opencv-js / js-yaml 都只有一个 default 导出，按原样 ESM 提供时
+      // 浏览器会报 "does not provide an export named 'default'"。所以把依赖逐个捞回来预打包。
+      // 这几个就是 @paddleocr/paddleocr-js 的全部 dependencies（见它的 package.json）。
+      include: ['clipper-lib', '@techstark/opencv-js', 'js-yaml', 'onnxruntime-web'],
     },
     server: {
       hmr: process.env.DISABLE_HMR !== 'true',
