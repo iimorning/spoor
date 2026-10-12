@@ -43,6 +43,22 @@ Three things follow from that:
 - **Verbatim anchoring.** Annotations and excerpts store the exact quoted string and locate it by re-finding it in the rendered text. Offsets break the moment the text reflows; a quote does not.
 - **Offline by construction.** Canvas data, notes, and photo OCR all run locally. Nothing requires an account to be useful.
 
+### What this is, and what it isn't
+
+Spoor is a **local reading and annotation tool**. Import a PDF or EPUB, talk with the text, mark passages, translate a sentence, and turn what you keep into a card on your canvas.
+
+It is deliberately **not**:
+
+| | Why |
+|---|---|
+| **A server-backed app with accounts** | The premise is that your data does not leave your device. Adding accounts means maintaining a server, a database, and a security boundary — the exact things this project avoids. Cross-device sync exists in a separate commercial build. |
+| **Built for real-time collaboration** | Collaboration requires a server and conflict resolution by definition. That's a different product. |
+| **A desktop app for every OS** | The desktop shell bundles local inference and a voice proxy that are only verified on Windows. Shipping a macOS or Linux build that might not run would be worse than not shipping one. |
+| **Something that hosts models for you** | Bring your own API key, or run a local GGUF model on the desktop build. |
+| **A mobile app** | The Pocket capture feature lives in the desktop and web builds. A real mobile app is a project's worth of work on its own. |
+
+This is maintained by one person. [GOVERNANCE.md](docs/GOVERNANCE.md) says who, how decisions get made, and what that means for you. [ROADMAP.md](docs/ROADMAP.md) says what's planned and what isn't.
+
 ## Example Workflow
 
 Imagine you are writing about how AI changes independent creators:
@@ -167,6 +183,9 @@ npx vitest run tests/App.test.tsx -t "AI 助手工作室"
 | [AGENT.md](AGENT.md) | AI agent design and workflow |
 | [SKILL.md](SKILL.md) | Capability summary for submission |
 | [APP.md](APP.md) | App overview for submission |
+| [ROADMAP.md](docs/ROADMAP.md) | What is planned, and what is deliberately not |
+| [GOVERNANCE.md](docs/GOVERNANCE.md) | Who maintains it, how decisions are made, scope boundaries |
+| [CONTRIBUTING.md](docs/CONTRIBUTING.md) | How to file issues and pull requests |
 | [TESTING.md](docs/TESTING.md) | How to run the test suite, timing budget, and known failures |
 | [DEBUGGING.md](docs/DEBUGGING.md) | Diagnosing flicker, re-render churn, and layout bugs |
 | [DESKTOP_INSTALL.md](docs/DESKTOP_INSTALL.md) | Desktop install and release notes |
@@ -216,6 +235,24 @@ Spoor 是一个带 AI 的无限便签画布。你可以把想法、资料、截�
 - **按空间划定上下文。** 画一个工作区，里面的卡片就是这个角色的工作集。聊天窗口只能看见全部历史，画布能看见*这块区域*、*这一轮*。
 - **靠原文定位，不靠偏移量。** 标注和摘抄存的是逐字引文，在渲染出来的正文里重新找一遍。文字一重排偏移量就废了，引文不会。
 - **天然离线。** 画布数据、便签、照片 OCR 都在本地跑，不登录也能用。
+
+### 它是什么，不是什么
+
+Spoor 是一个**本地的阅读与批注工具**：导入 PDF 或 EPUB，和书里的内容对话，标注高亮、划词翻译，
+把值得留下的段落摘成画布上的卡片。
+
+它刻意**不是**：
+
+| | 为什么 |
+|---|---|
+| **带账号的服务端应用** | 前提是数据不离开设备。加账号意味着要维护服务器、数据库和安全边界 —— 恰恰是这个项目要避免的东西。跨设备同步在另一个商业版里提供。 |
+| **为实时协作设计** | 协作天然要求服务端和冲突合并。那是另一个产品的问题。 |
+| **全平台桌面应用** | 桌面壳里的本地推理与语音代理只在 Windows 上验证过。发一个可能跑不动的 macOS / Linux 安装包，比不发更糟。 |
+| **代跑模型的托管服务** | 用自己的 API 密钥，或在桌面端接本地 GGUF。 |
+| **移动端 App** | Pocket 随手拍功能在桌面版和网页版里。做一个真正的移动端等于再做一个项目。 |
+
+项目由一个人维护。[GOVERNANCE.md](docs/GOVERNANCE.md) 说明是谁、怎么决策、这对你意味着什么；
+[ROADMAP.md](docs/ROADMAP.md) 说明打算做什么、明确不做什么。
 
 ### 一个例子
 

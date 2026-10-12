@@ -1,3 +1,0 @@
-# This directory is auto-populated by scripts/reddit-monitor/fetch.mjs.
-# Tracked files: none by default (output JSON is regenerable).
-# To start fresh: rm -f forum-raw.json forum-insights.json

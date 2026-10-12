@@ -1,4 +1,0 @@
-ZhuqueFangsong-Regular.ttf
-Source: 朱雀仿宋 / Zhuque Fangsong v0.212
-https://github.com/TrionesType/zhuque
-License: SIL Open Font License 1.1
