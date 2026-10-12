@@ -14,6 +14,12 @@ Place notes, screenshots, documents, research findings, and AI responses on one 
 
 [Live Demo](https://scribe-ai-canvas.netlify.app/) · [Windows Release](https://github.com/iimorning/spoor/releases/latest) · [Issues](https://github.com/iimorning/spoor/issues)
 
+<p align="center">
+  <img src="docs/images/reading.png" alt="Spoor reading view: excerpt rail on the left, the book text in the middle, an AI companion chat on the right" width="880">
+</p>
+
+*The reading view — excerpts on the left, the book in the middle, the companion on the right.*
+
 </div>
 
 ---
@@ -61,15 +67,22 @@ This is maintained by one person. [GOVERNANCE.md](docs/GOVERNANCE.md) says who, 
 
 ## Example Workflow
 
-Imagine you are writing about how AI changes independent creators:
+Reading something worth keeping:
 
-1. Put rough notes on the canvas: creator workflows, platform risks, writing tools, and personal style.
-2. Ask **The Mirror of Insight** to challenge a weak assumption.
-3. Ask **The Weaver** to find the hidden connection between several notes.
-4. Use **The Smoothing Iron** to rewrite a key sentence in different tones.
-5. Synthesize the selected notes into a draft.
+1. **Import** the PDF or EPUB — it becomes a book card on your canvas.
+2. **Read** it in the full-screen reader, or talk with it in the companion panel.
+3. **Mark** a passage worth a second look. The mark stores the verbatim quote and is re-found by matching, so it survives a re-layout.
+4. **Translate** a sentence in place. It becomes its own kind of highlight, so a translated passage never counts as "already annotated".
+5. **Excerpt** what you want to keep, with your own thought attached. It lands in the excerpt rail with its chapter position.
+6. **Send it to the canvas.** The excerpt and your reason for keeping it become one editable card, in open space next to the book.
 
-The key difference from a chatbot: every AI response becomes part of your visual workspace, so ideas can keep growing instead of disappearing into a transcript. See [How this differs from a chat assistant](#how-this-differs-from-a-chat-assistant).
+<p align="center">
+  <img src="docs/images/canvas.png" alt="The Spoor canvas: notes, an image, a persona card, and a drawn work zone" width="880">
+</p>
+
+*The canvas — where excerpts land as cards. The dashed rectangle is a persona's work zone: drop material inside and it becomes that persona's context.*
+
+Every AI response becomes part of this workspace, so ideas keep growing instead of disappearing into a transcript. See [How this differs from a chat assistant](#how-this-differs-from-a-chat-assistant).
 
 ## Default AI Personas
 
@@ -256,7 +269,20 @@ Spoor 是一个**本地的阅读与批注工具**：导入 PDF 或 EPUB，和书
 
 ### 一个例子
 
-如果你想写一篇关于“AI 如何改变独立创作者”的文章，可以先把零散想法放成便签：AI 写作、个人品牌、平台依赖、真实经验。然后让真知镜找逻辑漏洞，让编织者找隐藏联系，让熨烫师改写关键句，最后把这些便签合成为文章草稿。
+读到一段值得留下的东西时：
+
+1. **导入** PDF 或 EPUB，它会变成画布上的一张书卡。
+2. **读**它——全屏阅读器，或者在伴读面板里和它聊。
+3. **标**一段值得回看的地方。标注存的是逐字引文、靠重新匹配定位，重排之后仍然找得到。
+4. **翻译**其中一句。译文算另一种高亮，所以翻过的段落不会被当成"已经标注过"。
+5. **摘抄**想留下的部分，可以附上自己的想法。它会带着章节位置进入摘抄本。
+6. **送到画布。** 摘抄正文和你留下的理由合成同一张卡，自动落在书卡旁边的空白处。
+
+<p align="center">
+  <img src="docs/images/canvas.png" alt="雪泥画布：便签、图片、角色卡，以及画出的工作区" width="880">
+</p>
+
+*画布 —— 摘抄最终落脚的地方。虚线框是角色的工作区：把素材拖进去，它就成了这个角色的上下文。*
 
 ### 快速开始
 
